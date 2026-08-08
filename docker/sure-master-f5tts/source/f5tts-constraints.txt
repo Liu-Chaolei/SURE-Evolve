@@ -1,0 +1,2 @@
+torch==2.4.0+cu121
+torchaudio==2.4.0+cu121

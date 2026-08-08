@@ -1,0 +1,10 @@
+Task description:
+{task_description}
+
+SURE task card:
+{task_card}
+
+Base model profile:
+{base_model_profile}
+
+Write a compact retrieval descriptor that captures the task type, language/profile, metric, artifact contract, base model/recipe, and likely workspace-local optimization approach.

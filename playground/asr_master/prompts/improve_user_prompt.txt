@@ -1,0 +1,72 @@
+You are an ASR (Automatic Speech Recognition) research expert. You are provided with a previously developed wrapper script solution and a creative improvement idea. You need to implement this idea on top of (or building upon) the previously developed solution.
+
+# Task description
+You are working on optimizing a Zipformer ASR model trained on LibriSpeech using the icefall framework. You must produce a wrapper script that trains and decodes the model, then prints the final WER.
+
+FRAMEWORK SETUP
+------
+- **Codebase**: The icefall ASR framework is at the icefall root directory. The recipe directory has `train.py`, `decode.py`, `model.py`, `zipformer.py`, etc.
+- **Data**: Lhotse cuts and BPE language resources are already prepared. The cuts are physically under `./icefall_data/fbank`, but after changing into `./icefall_recipe` create or reuse `./data -> ../icefall_data` and pass `--manifest-dir ./data/fbank`; embedded Lhotse feature paths also start with `data/fbank/...`. Do NOT use `./icefall_data/manifests`, and do NOT run `prepare.sh`.
+- **Evaluation**: WER (Word Error Rate). Lower is better.
+- **Output format**: Your script MUST print the final WER as `\boxed{{WER_value}}`.
+
+COMPETITION INSTRUCTIONS
+------
+{task_description}
+
+
+
+# Instructions
+Here is the instruction about response format and implementation.
+
+## Response format
+
+Your response should be a brief outline/sketch of the solution in natural language (3-5 sentences), followed by a single markdown code block (wrapped in ```) which implements this solution and prints the final WER in `\boxed{{}}` format. There should be no additional headings or text in your response. Just natural language text followed by a newline and then the markdown code block.
+
+## Solution improvement sketch guideline
+
+- The solution sketch should be a brief natural language description (3-5 sentences) of how you improved the previous solution.
+- Don't suggest exploratory data analysis.
+- All packages have been installed. You are not allowed to install anything with pip or conda. If something is missing, try another way instead of installing a package.
+
+## Implementation guideline
+
+- The code must be a **single-file Python wrapper script** that:
+  1. Sets `sys.path` to include the icefall root and recipe directory
+  2. Implements the creative improvement idea (modify hyperparameters, override model components, change training schedule, etc.)
+  3. Calls `train.py` (via subprocess or direct import) with the modified arguments
+  4. Calls `decode.py` (via subprocess or direct import) on the trained checkpoint
+  5. Parses the decoding output to extract the final WER
+  6. Prints the WER in `\boxed{{WER_value}}` format
+- **CRITICAL**: The script MUST print `\boxed{{WER_value}}` at the end. Without this, the solution cannot be evaluated and will be considered invalid.
+- Use **1 epoch by default** for fast agent iteration. Only increase epochs after the candidate can train and decode successfully.
+- If implementing a multi-candidate sweep inside one wrapper, log each candidate's name, key configuration, real decoded WER, and failure reason if it fails. The final `\boxed{{WER_value}}` must be selected only from successful candidates with real decoded WER. If no candidate succeeds, exit non-zero so the debug agent can fix the wrapper.
+- Support multi-GPU training. Detect `world_size` from `ASR_WORLD_SIZE` if set, otherwise from comma-separated `CUDA_VISIBLE_DEVICES`; fall back to 1. Pass `--world-size str(world_size)` to train.py and pass a unique `--master-port`. Keep decode.py single-process.
+- Save checkpoints to a unique `--exp-dir` to avoid overwriting previous experiments.
+- When decoding, use `--decoding-method modified_beam_search` or `--decoding-method greedy_search`.
+
+## How to implement improvement ideas
+
+- **Hyperparameter changes**: Override train.py CLI args (e.g., `--num-encoder-layers`, `--encoder-dim`, `--learning-rate`, `--num-epochs`, `--base-lr`).
+- **Architecture changes**: If modifying the model, either monkey-patch `model.py` / `zipformer.py` functions, or import and subclass model components before calling train.py.
+- **Data augmentation**: Adjust SpecAugment params (e.g., `--time-mask-factor`, `--freq-mask-factor`).
+- **Training schedule**: Tune learning rate, warmup-related CLI parameters, epoch count, and batch duration while preserving the recipe scheduler.
+- Always preserve the overall train -> decode -> parse WER -> print `\boxed{{}}` structure.
+- **CRITICAL**: Use RELATIVE paths: `./icefall_recipe`, `./icefall_data`, `./icefall_root` (NO `os.path.dirname(__file__)` needed)
+- **CRITICAL**: Use the icefall conda environment Python: `/home/liuchaolei/anaconda3/envs/icefall/bin/python` for train.py and decode.py.
+- **CRITICAL**: Pass `--manifest-dir ./data/fbank` after creating `./icefall_recipe/data -> ../icefall_data`; this lets train.py find both `librispeech_cuts_train-all-shuf.jsonl.gz` and the embedded `data/fbank/.../*.lca` feature archives.
+- **CRITICAL**: Use a memory-aware `--max-duration` instead of a tiny fixed batch. Icefall's parser default is 200, but its own examples use larger values when memory allows. Choose the initial value from per-GPU memory, not summed memory: >=80GB -> 2200, >=48GB -> 1700, >=32GB -> 1400, >=24GB -> 1000, <24GB -> 800, and unknown memory -> 1000. Allow `ASR_MAX_DURATION` to override this. If CUDA OOM occurs, retry with a smaller value (2200 -> 1700 -> 1400 -> 1000 -> 800 -> 500 -> 300 -> 200). If a run fails with `grad_scale is too small`, `loss=inf`, `metric=nan`, or non-finite outputs/gradients, retry with `--use-fp16 0`; do not reduce `--max-duration` unless the error is OOM.
+- **CRITICAL**: Do NOT patch or replace icefall's optimizer or scheduler. Zipformer training depends on the recipe's `ScaledAdam(get_parameter_groups_with_lrs(...), clipping_scale=2.0)` optimizer and `Eden` scheduler; replacing them with `AdamW`, plain `Adam`, or another scheduler can make fp32 training diverge.
+- **CRITICAL**: Do not hide failures by printing placeholder scores such as `\boxed{{999.0}}` with exit code 0. If no real WER was produced, exit non-zero after printing the diagnostic output so the outer debug loop can continue.
+
+# Data preview
+Here is a preview of the real structure of the data.
+{data_preview}
+
+# Previous solution
+This is the code of the previously developed solution. Your implementation should be based on this code.
+{previous_solution}
+
+# Creative idea
+This is a creative idea which may improve the performance. You need to implement this idea on top of (or building upon) the existing code above.
+Creative idea: {improve_idea}

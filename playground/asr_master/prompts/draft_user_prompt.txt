@@ -1,0 +1,247 @@
+**CRITICAL INSTRUCTIONS - USE RELATIVE PATHS:**
+1. **DO NOT use `os.path.dirname(__file__)` or `os.path.abspath(__file__)`** - these are NOT needed
+2. **DO NOT compute parent directories or use `os.path.dirname(script_dir)`**
+3. **USE RELATIVE PATHS DIRECTLY** - the script will be executed in the workspace directory where these directories exist:
+   - `./icefall_recipe` - Contains train.py, decode.py
+   - `./icefall_data` - Contains lang_bpe_500/, manifests/, fbank/
+   - `./icefall_root` - Icefall root directory
+4. **Use the icefall conda environment Python**: `/home/liuchaolei/anaconda3/envs/icefall/bin/python`
+
+# Task description
+You are working on optimizing a Zipformer ASR model trained on LibriSpeech using the icefall framework.
+
+Your goal is to produce a single Python wrapper script (`run_asr.py`) that:
+1. Calls `./icefall_recipe/train.py` to train the model
+2. Calls `./icefall_recipe/decode.py` to decode the trained model
+3. Parses the decoding output for the final WER
+4. Prints the WER in the format: `\boxed{{WER_value}}` (e.g., `\boxed{{3.52}}`)
+
+FRAMEWORK SETUP
+------
+- **Codebase**: Use `./icefall_recipe/train.py` and `./icefall_recipe/decode.py`
+- **Data**: Use the prepared `./icefall_data` resources. The LibriSpeech `librispeech_cuts_*.jsonl.gz` files are in `fbank/`, not in `manifests/`. After changing into `./icefall_recipe`, create or reuse a local symlink `./data -> ../icefall_data`, then pass `--manifest-dir ./data/fbank` and `--bpe-model ./data/lang_bpe_500/bpe.model`.
+- **Evaluation**: WER (Word Error Rate) is the evaluation metric. Lower WER is better.
+- **Output format**: Your script MUST print the final WER as `\boxed{{WER_value}}` at the end.
+
+COMPETITION INSTRUCTIONS
+------
+{task_description}
+
+
+# Instructions
+
+## Response format
+
+**Your response must ONLY contain a single markdown code block (wrapped in ```) with Python code. There should be NO bash commands, NO shell scripts, NO execute_bash tool calls, and NO other text outside the code block.**
+
+Your response should be a brief outline/sketch of your proposed solution in natural language (3-5 sentences), followed by a single markdown code block (wrapped in ```) which implements this solution and prints the final WER in `\boxed{{}}` format. There should be no additional headings or text in your response. Just natural language text followed by a newline and then the markdown code block.
+
+## Solution sketch guideline
+
+- The solution sketch should be 3-5 sentences.
+- Propose a specific improvement strategy (hyperparameter tuning, architecture modification, training schedule change, data augmentation, etc.).
+- Don't suggest exploratory data analysis.
+- The data is already prepared and available. There is no need to run prepare.sh or download anything.
+
+## Implementation guideline
+
+- The code must be a **single-file Python wrapper script** that:
+  1. Uses relative paths `./icefall_recipe`, `./icefall_data`, `./icefall_root`
+  2. Calls train.py via subprocess with your hyperparameter overrides
+  3. Calls decode.py via subprocess on the trained checkpoint
+  4. Parses the decoding output to extract the final WER
+  5. Prints the WER in `\boxed{{WER_value}}` format
+- **CRITICAL**: The script MUST print `\boxed{{WER_value}}` at the end. Without this, the solution cannot be evaluated and will be considered invalid.
+- The code should be self-contained and executable as `python run_asr.py` in the workspace directory.
+- Use **1 epoch by default** for fast agent iteration. Only increase epochs after a candidate can train and decode successfully.
+- If you run multiple candidate configurations inside one wrapper, every candidate must print a clear candidate name, key configuration, real decoded WER, and failure reason if it fails. The final `\boxed{{WER_value}}` must be the best real decoded WER only. If all candidates fail, exit non-zero instead of printing a placeholder score.
+- Support multi-GPU training. Detect `world_size` from `ASR_WORLD_SIZE` if set, otherwise from comma-separated `CUDA_VISIBLE_DEVICES`; fall back to 1. Pass `--world-size str(world_size)` to train.py and pass a unique `--master-port`. Keep decode.py single-process.
+- Save checkpoints to a unique `--exp-dir` (e.g., `./exp_asr_opt`).
+- When decoding, use `--decoding-method modified_beam_search` or `--decoding-method greedy_search`.
+- **ONLY use supported parameters**:
+  - Training: `--world-size`, `--num-epochs`, `--start-epoch`, `--use-fp16`, `--exp-dir`, `--full-libri`, `--max-duration`, `--base-lr`, `--num-encoder-layers`, `--encoder-dim`, `--feedforward-dim`, `--num-heads`, `--decoder-dim`, `--joiner-dim`, `--causal`, `--manifest-dir`, `--bpe-model`
+  - Decoding: `--epoch`, `--avg`, `--use-averaged-model`, `--exp-dir`, `--max-duration`, `--decoding-method`, `--beam-size`
+- **CRITICAL**: The cuts manifests contain embedded feature paths like `data/fbank/librispeech_feats_.../*.lca`. Because the script changes into `./icefall_recipe`, you must ensure `./icefall_recipe/data` resolves to `../icefall_data`; otherwise Lhotse will find the manifests but fail when loading feature archives.
+- **CRITICAL**: When passing `--manifest-dir`, use the cuts directory `./data/fbank` after creating the recipe-local data symlink; do not use `./icefall_data/manifests`, which contains recordings/supervisions but not the `librispeech_cuts_*.jsonl.gz` files required by this recipe.
+- **CRITICAL**: Use a memory-aware `--max-duration` instead of a tiny fixed batch. Icefall's parser default is 200, but its own training examples commonly use much larger values (e.g., 1000 on multi-GPU fp16 and 300-500 for single-job fp16 examples). Choose the initial value from per-GPU memory, not summed memory: >=80GB -> 2200, >=48GB -> 1700, >=32GB -> 1400, >=24GB -> 1000, otherwise 800; if memory cannot be detected, use 1000. Allow an `ASR_MAX_DURATION` environment override. If CUDA OOM occurs, retry with a smaller value (2200 -> 1700 -> 1400 -> 1000 -> 800 -> 500 -> 300 -> 200). If training fails with `grad_scale is too small`, `loss=inf`, `metric=nan`, or non-finite outputs, retry with `--use-fp16 0` before declaring failure. Do not reduce `--max-duration` unless the error is OOM.
+- **CRITICAL**: Do NOT patch or replace icefall's optimizer or scheduler. Zipformer training must keep the recipe's `ScaledAdam(get_parameter_groups_with_lrs(...), clipping_scale=2.0)` optimizer and `Eden` scheduler; replacing them with `AdamW`, plain `Adam`, or another scheduler can cause `loss=inf`/`metric=nan` even in fp32.
+- **CRITICAL**: Never print placeholder scores such as `\boxed{{999.0}}` after training or decoding failure. If no real WER is available, print the diagnostic output to stderr and exit with a non-zero status so the debug agent can fix the wrapper.
+
+## Example wrapper script structure
+
+```python
+import sys
+import os
+import subprocess
+import re
+import random
+
+# CRITICAL: Use icefall conda environment Python
+icefall_python = "/home/liuchaolei/anaconda3/envs/icefall/bin/python"
+
+# Use RELATIVE paths directly (NO os.path.dirname(__file__) needed!)
+icefall_root = "./icefall_root"
+recipe_dir = "./icefall_recipe"
+data_dir = "./icefall_data"
+
+# Set up paths
+sys.path.insert(0, icefall_root)
+sys.path.insert(0, recipe_dir)
+os.chdir(recipe_dir)
+
+# The cuts manifests store feature paths relative to the recipe as data/fbank/...
+if not os.path.exists("data"):
+    os.symlink("../icefall_data", "data")
+
+# Experiment directory
+exp_dir = "./exp_asr_opt"
+
+# Manifest and BPE model paths
+# CRITICAL: train.py expects librispeech_cuts_*.jsonl.gz under --manifest-dir.
+# Use ./data because embedded Lhotse feature paths also start with data/fbank.
+manifest_dir = "./data/fbank"
+bpe_model = "./data/lang_bpe_500/bpe.model"
+
+def detect_gpu_mem_gb():
+    try:
+        probe = subprocess.run(
+            [
+                icefall_python,
+                "-c",
+                "import torch; print(torch.cuda.get_device_properties(0).total_memory / (1024 ** 3) if torch.cuda.is_available() else 0)",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if probe.returncode == 0:
+            return float(probe.stdout.strip() or "0")
+    except Exception:
+        pass
+    return 0.0
+
+def choose_max_duration():
+    override = os.environ.get("ASR_MAX_DURATION")
+    if override:
+        return int(float(override))
+    mem_gb = detect_gpu_mem_gb()
+    if mem_gb >= 80:
+        return 2200
+    if mem_gb >= 48:
+        return 1700
+    if mem_gb >= 32:
+        return 1400
+    if mem_gb >= 24:
+        return 1000
+    if mem_gb > 0:
+        return 800
+    return 1000
+
+def infer_world_size():
+    override = os.environ.get("ASR_WORLD_SIZE")
+    if override:
+        return max(1, int(override))
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if visible and visible not in {"-1", "none", "None"}:
+        return max(1, len([x for x in visible.split(",") if x.strip()]))
+    return 1
+
+def choose_master_port():
+    override = os.environ.get("ASR_MASTER_PORT")
+    if override:
+        return override
+    return str(12354 + random.randint(0, 2000))
+
+def next_oom_max_duration(value):
+    if value > 1700:
+        return 1700
+    if value > 1400:
+        return 1400
+    if value > 1000:
+        return 1000
+    if value > 800:
+        return 800
+    if value > 500:
+        return 500
+    if value > 300:
+        return 300
+    if value > 200:
+        return 200
+    return None
+
+max_duration = choose_max_duration()
+world_size = infer_world_size()
+master_port = choose_master_port()
+
+# Step 1: Train. Use fp16 first for speed, then fall back to fp32 on non-finite/grad-scale instability.
+base_lr = "0.02"
+use_fp16 = "1"
+while True:
+    train_cmd = [
+        icefall_python, "train.py",
+        "--world-size", str(world_size),
+        "--master-port", master_port,
+        "--num-epochs", "1",
+        "--start-epoch", "1",
+        "--use-fp16", use_fp16,
+        "--exp-dir", exp_dir,
+        "--full-libri", "1",
+        "--max-duration", str(max_duration),
+        "--base-lr", base_lr,
+        "--manifest-dir", manifest_dir,
+        "--bpe-model", bpe_model,
+    ]
+    train_result = subprocess.run(train_cmd, capture_output=True, text=True)
+    if train_result.returncode == 0:
+        break
+    train_output = train_result.stdout + train_result.stderr
+    lower_output = train_output.lower()
+    lowered = next_oom_max_duration(max_duration)
+    if ("cuda out of memory" in lower_output or "out of memory" in lower_output) and lowered is not None:
+        max_duration = lowered
+        continue
+    if use_fp16 == "1" and (
+        "grad_scale is too small" in lower_output
+        or "loss=inf" in lower_output
+        or "metric=nan" in lower_output
+        or "not finite" in lower_output
+    ):
+        use_fp16 = "0"
+        continue
+    print(train_output)
+    train_result.check_returncode()
+
+# Step 2: Decode
+decode_cmd = [
+    icefall_python, "decode.py",
+    "--epoch", "1",
+    "--avg", "1",
+    "--use-averaged-model", "0",
+    "--exp-dir", exp_dir,
+    "--max-duration", str(max(600, min(max_duration, 1200))),
+    "--decoding-method", "modified_beam_search",
+]
+result = subprocess.run(decode_cmd, capture_output=True, text=True)
+
+# Step 3: Parse WER from decode output
+output = result.stdout + result.stderr
+wer_match = re.findall(r'(?:WER|wer)[\s:=]+(\d+\.?\d*)', output)
+if wer_match:
+    final_wer = float(wer_match[-1])
+    print(f"\\boxed{{{{{{final_wer}}}}}}")
+else:
+    print("WER not found in decode output")
+```
+
+# Data preview
+{data_preview}
+
+# External knowledge
+Here are some information about ASR model training, decoding, and optimization from speech recognition experts.
+Your final code should leverage these insights where applicable.
+
+## Data and training configuration
+{data_knowledge}
+
+## Model architecture and optimization
+{model_knowledge}

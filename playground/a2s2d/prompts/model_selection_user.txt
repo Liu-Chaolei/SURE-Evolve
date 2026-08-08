@@ -1,0 +1,68 @@
+# Model Selection Agent User Prompt
+
+请为以下 X-Y 候选关系设计完整的计量分析方案。
+
+## 任务
+
+对每个候选关系，你需要：
+1. 确定研究目标和估计对象
+2. 选择模型族
+3. 决策控制变量（逐个分类）
+4. 判断依赖结构和多层处理
+5. 决策权重使用
+6. 指定诊断要求
+7. 建议稳健性检查
+8. 评估因果识别可行性
+9. 审查正反方向（必须在看到任何回归结果之前完成）
+
+## 输入数据
+
+### 候选关系列表
+{relations}
+
+### 控制变量池
+{control_pool}
+
+### 分析框架
+{analysis_framework}
+
+### 方法上下文
+{method_context}
+
+## 重要约束
+
+1. **输入数据中没有预筛选的显著性、P 值或回归结果**
+2. **不得依据预期显著性选择模型或控制变量**
+3. **必须对 control_pool 中每个变量逐项分类**
+4. **方向审查必须在看到任何回归结果之前完成**
+5. **必须返回所有 relation_id，不得遗漏**
+
+## 关键决策指南
+
+### 控制变量因果角色判断
+- **confounder/backdoor_blocker/precision_covariate**: 应纳入
+- **mediator**: 总效应模型排除（控制直接效应模型可纳入）
+- **collider/descendant_of_x/descendant_of_y**: 排除
+- **instrument**: 不作为普通控制
+- **ambiguous**: 默认排除并标记人工复核
+
+### 有序 X 的编码选择
+- **linear_trend**: 只有理论上可解释为单调线性趋势时选择
+- **categorical**: 安全默认，不假定相邻类别间距相等
+
+### 方向审查证据结构
+- **temporal_order_direction**: 只描述现实时间先后（X先于Y/Y先于X/同期/未知）
+- **construct_direction**: 题目定义是否天然具有方向
+- **forward/reverse_mechanism_strength**: 分别评估正向和反向机制强度
+- **common_cause_likelihood**: 共同原因可能性
+- **direction_identifiability**: 当前数据能否区分方向
+
+## 输出要求
+
+为每个关系返回一个完整的 JSON 设计对象，包含所有必填字段。确保：
+- 所有 relation_id 都已返回
+- control_decisions 包含 control_pool 中每个变量的决策
+- 所有枚举值都在 schema 白名单内
+- 方向证据结构化填写
+
+请按照系统提示词中定义的 JSON Schema 输出完整结果。

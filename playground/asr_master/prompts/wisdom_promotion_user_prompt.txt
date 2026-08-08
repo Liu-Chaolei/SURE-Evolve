@@ -1,0 +1,24 @@
+Here is the ASR optimization task description and the final high-performance code of the task.
+
+Based on this information, your job is to:
+
+1. summarize the key points about the data loading and feature extraction of the best code (e.g., fbank config, lhotse cuts, BPE/lang setup).
+
+2. summarize the key points about the model architecture and the model training of the best code (e.g., encoder dims, layers, LR schedule, augmentation, decoding method).
+
+Your response should be concise but not too short. Do not omit any parameters. You should make sure a code engineer can basically reproduce the code with your summarization.
+
+ASR task description:
+
+{task_description}
+
+Final code:
+
+{best_solution}
+
+Your answer should follow the format below:
+
+{{
+    "DATA LOADING AND FEATURE EXTRACTION SUMMARY":"YOUR ANSWER",
+    "MODEL ARCHITECTURE AND TRAINING SUMMARY":"YOUR ANSWER",
+}}

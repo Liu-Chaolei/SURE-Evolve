@@ -1,0 +1,336 @@
+# SURE Master mixed local/VC configuration for TEDLIUM3 Zipformer ASR staged-axes search.
+# Coordinator: lightweight local SURE Master process.
+# Training-level candidates: synchronous VC child jobs, 8 GPUs per candidate.
+
+sure:
+  root: "/hpc_stor03/sjtu_home/chaolei.liu/sure"
+  pythonpath: "/hpc_stor03/sjtu_home/chaolei.liu/sure/src"
+  task_cards_path: "./playground/sure_master/task_cards/sure_tasks.yaml"
+  task_id: "asr_en_wer"
+  device: "cuda"
+  cache_dir: null
+  validate_env: false
+  require_base_model: true
+  workspace_cleanup:
+    enabled: true
+    on_success: true
+    on_failure: true
+    remove_models: true
+    remove_working: true
+    remove_runtime_cache: true
+    compact_metric_logs: true
+    keep_log_tails: true
+    log_tail_bytes: 65536
+  execution_mode: "mixed_local_vc"
+  search_strategy: "staged_axes"
+  staged_axes:
+    enabled: true
+    failure_policy: "continue_on_system_failure"
+    final_rung_candidate_failure_fallback: "previous_rung"
+    allow_neutral_axis_fallback: true
+    late_result_recovery:
+      enabled: true
+    rounds_per_axis: 4
+    ideas_per_round: 4
+    top_arch: 2
+    top_train: 2
+    top_inference: 3
+    runner_up_count: 5
+    draft:
+      execution_env:
+        SURE_MAX_DURATION: "300"
+        SURE_DURATION_AUTOTUNE: "0"
+        # Draft training and its VC child have no in-job deadline. The coordinator
+        # still uses remote_training.submit_timeout and late-result recovery.
+        SURE_BASELINE_TRAIN_TIMEOUT: "0"
+        SURE_RUN_TIMEOUT: "0"
+    axes:
+      arch:
+        rungs:
+          - name: short
+            keep: 8
+            execution_env:
+              SURE_MAX_TRAIN_EPOCHS: "1"
+              SURE_STAGED_TARGET_EPOCH: "1"
+              SURE_RUN_TIMEOUT: "259200"
+          - name: medium
+            keep: 2
+            execution_env:
+              SURE_MAX_TRAIN_EPOCHS: "2"
+              SURE_STAGED_TARGET_EPOCH: "2"
+          - name: final
+            keep: 2
+            execution_env:
+              SURE_MAX_TRAIN_EPOCHS: "3"
+              SURE_STAGED_TARGET_EPOCH: "3"
+      train:
+        rungs:
+          - name: short
+            keep: 8
+            execution_env:
+              SURE_MAX_TRAIN_EPOCHS: "1"
+              SURE_STAGED_TARGET_EPOCH: "1"
+              SURE_RUN_TIMEOUT: "259200"
+          - name: medium
+            keep: 2
+            execution_env:
+              SURE_MAX_TRAIN_EPOCHS: "2"
+              SURE_STAGED_TARGET_EPOCH: "2"
+          - name: final
+            keep: 2
+            execution_env:
+              SURE_MAX_TRAIN_EPOCHS: "3"
+              SURE_STAGED_TARGET_EPOCH: "3"
+      inference:
+        rungs:
+          - name: short
+            keep: 8
+          - name: medium
+            keep: 3
+          - name: final
+            keep: 3
+  candidate_types:
+    max_inference_per_round: 4
+    max_fine_tune_per_round: 2
+    max_arch_per_round: 2
+  remote_training:
+    enabled: true
+    # Draft baseline training also runs as a VC child job; the local session is only the coordinator.
+    draft_enabled: true
+    image: "docker.v2.aispeech.com/sjtu/sjtu_yukai-chaolei-suremaster_icefall:v1.0"
+    partition: "pdgpu-a10"
+    partitions: "pdgpu-a10"
+    partition_policy: "most_free_gpu"
+    partition_fallback: "queue_first"
+    qos: ""
+    nopassenv: true
+    num_task: 1
+    gpu_per_task: 8
+    cpu_per_task: 64
+    mem_per_task: "256G"
+    volumes:
+      - "/hpc_stor03/sjtu_home/chaolei.liu:/hpc_stor03/sjtu_home/chaolei.liu"
+    workdir: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster"
+    python: "/opt/conda/envs/evomaster/bin/python"
+    runner: "playground/sure_master/tools/run_vc_sure_candidate.py"
+    job_prefix: "sure-asr-train"
+    sync: true
+    debug: true
+    max_parallel: 4
+    # The coordinator also waits for the synchronous VC submission without a deadline.
+    submit_timeout: 0
+    result_recovery:
+      enabled: true
+      grace_seconds: 900
+      poll_seconds: 10
+      recover_missing_result: true
+  initial_solution_path: "playground/sure_master/baselines/zipformer_large_cr_ctc_rnnt_baseline.py"
+  inputs:
+    ref: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/asr_tedlium3_regular_ref.txt"
+  execution_env:
+    SURE_ASR_DATASET: "tedlium3"
+    SURE_ASR_RECIPE_PROFILE: "tedlium3_zipformer"
+    SURE_ASR_EVAL_SPLITS: "dev"
+    SURE_MAX_TRAIN_EPOCHS: "1"
+    SURE_MAX_DURATION: "auto"
+    SURE_DURATION_AUTOTUNE: "1"
+    SURE_DURATION_AUTOTUNE_MIN: "100"
+    SURE_DURATION_AUTOTUNE_STEP: "100"
+    SURE_DURATION_AUTOTUNE_MAX: "1400"
+    SURE_DURATION_PROBE_TIMEOUT: "3600"
+    SURE_DURATION_AUTOTUNE_TIMEOUT: "259200"
+    SURE_DURATION_PROBE_SUCCESS_BATCHES: "3"
+    SURE_DURATION_PROBE_LOG_INTERVAL: "1"
+    SURE_DURATION_HEADROOM_MB: "1000"
+    SURE_DURATION_PROBE_FULL_LIBRI: "0"
+    SURE_DURATION_PRINT_DIAGNOSTICS: "0"
+    SURE_DURATION_TRAIN_ARGS: >-
+      --num-encoder-layers 2,2,4,5,4,2
+      --feedforward-dim 512,768,1536,2048,1536,768
+      --encoder-dim 192,256,512,768,512,256
+      --encoder-unmasked-dim 192,192,256,320,256,192
+      --enable-spec-aug 0
+    SURE_TRAIN_DURATION_RETRY: "1"
+    SURE_TRAIN_DURATION_MIN: "100"
+    SURE_TRAIN_DURATION_RETRY_STEP: "100"
+    SURE_RUN_TIMEOUT: "259200"
+    SURE_BASELINE_TRAIN_TIMEOUT: "259200"
+    SURE_BASELINE_DECODE_TIMEOUT: "259200"
+    SURE_USE_FP16: "1"
+    SURE_DECODE_ONLY: "0"
+    SURE_BASELINE_CHECKPOINT_DIR: ""
+    SURE_BASELINE_USE_PRETRAINED: "0"
+    SURE_ASR_REQUIRE_LOCAL_CHECKPOINT: "1"
+    SURE_ASR_FORBID_BASELINE_CHECKPOINT_FOR_TRAINING: "0"
+    SURE_ASR_FAIL_ON_TRAIN_FATAL_WITHOUT_CHECKPOINT: "1"
+    SURE_ENABLE_MUSAN: "0"
+    ASR_WORLD_SIZE: "8"
+    SURE_BASELINE_WORLD_SIZE: "8"
+    SURE_ICEFALL_PYTHON: "/hpc_stor03/sjtu_home/chaolei.liu/anaconda3/envs/icefall/bin/python"
+    SURE_ASR_ZIPFORMER_WRAPPER: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_icefall_zipformer_candidate.py"
+    SURE_ASR_REQUIRE_ZIPFORMER_WRAPPER: "1"
+    SURE_BASELINE_EPOCH: "50"
+    SURE_BASELINE_AVG: "26"
+    SURE_BASELINE_TRAIN_MAX_DURATION: "600"
+    SURE_BASELINE_DECODE_MAX_DURATION: "300"
+    PYTORCH_CUDA_ALLOC_CONF: "max_split_size_mb:128,garbage_collection_threshold:0.8"
+    PYTHONPATH: "/hpc_stor03/sjtu_home/chaolei.liu/ASR/icefall"
+  base_models:
+    asr_en_wer:
+      source_paths:
+        recipe: "/hpc_stor03/sjtu_home/chaolei.liu/ASR/icefall/egs/tedlium3/ASR/zipformer"
+        data: "/hpc_stor03/sjtu_home/chaolei.liu/ASR/icefall/egs/tedlium3/ASR/data"
+        root: "/hpc_stor03/sjtu_home/chaolei.liu/ASR/icefall"
+
+max_research_rounds: 3
+
+llm:
+  openai:
+    provider: "openai"
+    model: "${GPT_CHAT_MODEL}"
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "${GPT_BASE_URL}"
+    temperature: 1
+    max_tokens: 65536
+    timeout: 3600
+    max_retries: 3
+    retry_delay: 1.0
+
+  kimi:
+    provider: "openai"
+    model: "kimi-k2.6"
+    api_key: "${KIMI_API_KEY}"
+    base_url: "${KIMI_BASE_URL}"
+    temperature: 0.7
+    max_tokens: 65536
+    timeout: 3600
+    max_retries: 3
+    retry_delay: 1.0
+
+  default: "openai"
+
+agents:
+  prefetch:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/prefetch_system_prompt.txt"
+    user_prompt_file: "prompts/prefetch_user_prompt.txt"
+
+  draft:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/draft_system_prompt.txt"
+    user_prompt_file: "prompts/draft_user_prompt.txt"
+
+  debug:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/debug_system_prompt.txt"
+    user_prompt_file: "prompts/debug_user_prompt.txt"
+
+  improve:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/improve_system_prompt.txt"
+    user_prompt_file: "prompts/improve_user_prompt.txt"
+
+  reseach:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/reseach_system_prompt.txt"
+    user_prompt_file: "prompts/reseach_user_prompt.txt"
+
+  knowledge_promotion:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/knowledge_promotion_system_prompt.txt"
+    user_prompt_file: "prompts/knowledge_promotion_user_prompt.txt"
+
+  wisdom_promotion:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/wisdom_promotion_system_prompt.txt"
+    user_prompt_file: "prompts/wisdom_promotion_user_prompt.txt"
+
+session:
+  type: "local"
+  local:
+    working_dir: "./playground/sure_master/workspace_icefall_staged_axes_mixed"
+    timeout: 86400
+    gpu_devices: idle
+    idle_gpu_min_free_mib: 10000
+    idle_gpu_max_utilization: 20
+    idle_gpu_min_count: 1
+    idle_gpu_allow_busy_fallback: false
+    gpu_lock_enabled: true
+    gpu_lock_dir: "/tmp/sure_master_gpu_locks"
+    gpu_lock_wait_seconds: 30
+    gpu_lock_poll_seconds: 2
+    cpu_devices: null
+    symlinks: {}
+    parallel:
+      enabled: true
+      max_parallel: 1
+      gpus_per_exp: 1
+      serial_gpus_per_exp: 1
+      set_asr_world_size: false
+      split_workspace_for_exp: true
+
+llm_output:
+  show_in_console: true
+  log_to_file: true
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: null
+  console: true

@@ -1,0 +1,248 @@
+# SURE Master Docker configuration for F5-TTS (smoke stage).
+# This config expects the vc task to mount:
+# /hpc_stor03/sjtu_home/chaolei.liu:/hpc_stor03/sjtu_home/chaolei.liu
+# /hpc_stor03/public/shared/data:/hpc_stor03/public/shared/data
+
+sure:
+  root: "/hpc_stor03/sjtu_home/chaolei.liu/sure"
+  pythonpath: "/hpc_stor03/sjtu_home/chaolei.liu/sure/src"
+  task_cards_path: "./playground/sure_master/task_cards/sure_tasks.yaml"
+  task_id: "tts_en_wer"
+  device: "cuda"
+  metric_gpu:
+    enabled: true
+    devices: "idle"
+    gpus_per_metric: 1
+    min_free_mib: 9500
+    max_utilization: 20
+    wait_timeout_sec: 900
+    poll_interval_sec: 10
+    oom_retry: true
+    max_retries: 4
+    cleanup_before_score: true
+    lock_dir: "/tmp/sure_master_metric_gpu_locks"
+  cache_dir: "/hpc_stor03/sjtu_home/chaolei.liu/.cache/sure-eval/tts-metrics"
+  validate_env: false
+  require_base_model: true
+  initial_solution_path: "playground/sure_master/baselines/f5tts_v1_base_official_baseline.py"
+  execution_env:
+    SURE_RUN_TIMEOUT: "21600"
+    SURE_TTS_PYTHON: "/opt/conda/envs/f5tts/bin/python"
+    SURE_TTS_ROOT: "base_model/root"
+    SURE_TTS_EVAL_DATA: "base_model/eval_data/prompts.jsonl"
+    SURE_TTS_LANGUAGE: "en"
+    SURE_TTS_MAX_SAMPLES: "20"
+    SURE_TTS_MODEL: "F5TTS_v1_Base"
+    SURE_TTS_CKPT_FILE: "/hpc_stor03/sjtu_home/chaolei.liu/models/official_drafts/SWivid-F5-TTS/F5TTS_v1_Base/model_1250000.safetensors"
+    SURE_TTS_VOCAB_FILE: "/hpc_stor03/sjtu_home/chaolei.liu/models/official_drafts/SWivid-F5-TTS/F5TTS_v1_Base/vocab.txt"
+    SURE_TTS_NFE_STEP: "32"
+    SURE_TTS_CFG_STRENGTH: "2.0"
+    SURE_TTS_SWAY_SAMPLING_COEF: "-1.0"
+    SURE_TTS_SPEED: "1.0"
+    SURE_TTS_REMOVE_SILENCE: "0"
+    SURE_TTS_INFER_WORKERS: "auto"
+    SURE_TTS_ENABLE_TRAINING: "1"
+    SURE_TTS_BATCH_INFER_WRAPPER: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_f5tts_batch_infer.py"
+    SURE_TTS_FINETUNE_WRAPPER: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_f5tts_finetune.py"
+    SURE_TTS_ARCH_WRAPPER: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_f5tts_arch_finetune.py"
+    SURE_TTS_ARCH_ENABLE: "1"
+    SURE_TTS_ARCH_OUTPUT: "models/f5tts_arch"
+    SURE_TTS_ARCH_WORKDIR: "working/f5tts_arch"
+    SURE_TTS_ARCH_ACTION: "no_arch"
+    SURE_TTS_ARCH_MATCH_THRESHOLD: "0.70"
+    SURE_TTS_ARCH_EARLY_STOP: "1"
+    SURE_TTS_ARCH_EARLY_STOP_MIN_UPDATES: "0"
+    SURE_TTS_ARCH_EARLY_STOP_PATIENCE: "0"
+    SURE_TTS_ARCH_EARLY_STOP_EMA_ALPHA: "0.05"
+    SURE_TTS_ARCH_EARLY_STOP_MIN_RELATIVE_DELTA: "0.002"
+    SURE_TTS_ARCH_REUSE_EXISTING: "1"
+    SURE_REQUIRE_CANDIDATE_CHANGES: "1"
+    SURE_TTS_TRAIN_DATA: "base_model/train_data"
+    SURE_TTS_TRAIN_OUTPUT: "models/f5tts_finetune"
+    SURE_TTS_TRAIN_WORKDIR: "working/f5tts_finetune"
+    SURE_TTS_TRAIN_TIMEOUT: "14400"
+    SURE_TTS_TRAIN_REUSE_EXISTING: "1"
+    SURE_TTS_TRAIN_ACTION: "no_train"
+    SURE_TTS_TRAIN_MANIFEST: "libritts_train_clean_100_1h"
+    SURE_TTS_TRAIN_MAX_STEPS: "1000"
+    SURE_TTS_TRAIN_LEARNING_RATE: "3e-6"
+    SURE_TTS_TRAIN_EFFECTIVE_BATCH_SIZE: "8"
+    SURE_TTS_TRAIN_FREEZE_POLICY: "none"
+    SURE_TTS_TRAIN_SEED: "20260714"
+    SURE_TTS_BASE_CKPT_FILE: "/hpc_stor03/sjtu_home/chaolei.liu/models/official_drafts/SWivid-F5-TTS/F5TTS_v1_Base/model_1250000.safetensors"
+    HF_HOME: "/hpc_stor03/sjtu_home/chaolei.liu/.cache/huggingface"
+    HUGGINGFACE_HUB_CACHE: "/hpc_stor03/sjtu_home/chaolei.liu/.cache/huggingface/hub"
+    HF_ENDPOINT: "https://hf-mirror.com"
+    HF_HUB_DISABLE_XET: "1"
+    HF_HUB_OFFLINE: "1"
+    MODELSCOPE_CACHE: "/hpc_stor03/sjtu_home/chaolei.liu/.cache/modelscope"
+    TOKENIZERS_PARALLELISM: "false"
+    WANDB_MODE: "offline"
+    PYTHONPATH: "base_model/root/src:/hpc_stor03/sjtu_home/chaolei.liu/sure/src"
+  base_models:
+    tts_en_wer:
+      model_id: "f5tts_v1_base"
+      model_type: "tts_model"
+      framework: "f5-tts"
+      usage_policy: "required"
+      required_paths:
+        root: "base_model/root"
+        eval_data: "base_model/eval_data"
+        train_data: "base_model/train_data"
+      source_paths:
+        root: "/hpc_stor03/sjtu_home/chaolei.liu/TTS/F5-TTS"
+        eval_data: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/f5tts_staged/smoke"
+        train_data: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/f5tts_train_manifests"
+      entrypoints:
+        infer: "base_model/root/src/f5_tts/infer/infer_cli.py"
+        batch_infer_wrapper: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_f5tts_batch_infer.py"
+        train: "base_model/root/src/f5_tts/train/train.py"
+        finetune_wrapper: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_f5tts_finetune.py"
+        arch_wrapper: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_f5tts_arch_finetune.py"
+      python: "/opt/conda/envs/f5tts/bin/python"
+      prompt_guidance: "Use workspace-local F5-TTS through base_model/root, fixed evaluation prompts in base_model/eval_data/prompts.jsonl, batch inference only through SURE_TTS_BATCH_INFER_WRAPPER, controlled fine-tuning only through SURE_TTS_FINETUNE_WRAPPER, and controlled architecture changes only through SURE_TTS_ARCH_WRAPPER."
+
+max_research_rounds: 3
+
+llm:
+  openai:
+    provider: "openai"
+    model: "${GPT_CHAT_MODEL}"
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "${GPT_BASE_URL}"
+    temperature: 1
+    max_tokens: 65536
+    timeout: 3600
+    max_retries: 3
+    retry_delay: 1.0
+
+  kimi:
+    provider: "openai"
+    model: "kimi-k2.6"
+    api_key: "${KIMI_API_KEY}"
+    base_url: "${KIMI_BASE_URL}"
+    temperature: 0.7
+    max_tokens: 65536
+    timeout: 3600
+    max_retries: 3
+    retry_delay: 1.0
+
+  default: "openai"
+
+agents:
+  prefetch:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/prefetch_system_prompt.txt"
+    user_prompt_file: "prompts/prefetch_user_prompt.txt"
+
+  draft:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/draft_system_prompt.txt"
+    user_prompt_file: "prompts/draft_user_prompt.txt"
+
+  debug:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/debug_system_prompt.txt"
+    user_prompt_file: "prompts/debug_user_prompt.txt"
+
+  improve:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/improve_system_prompt.txt"
+    user_prompt_file: "prompts/improve_user_prompt.txt"
+
+  reseach:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/reseach_system_prompt.txt"
+    user_prompt_file: "prompts/reseach_user_prompt.txt"
+
+  knowledge_promotion:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/knowledge_promotion_system_prompt.txt"
+    user_prompt_file: "prompts/knowledge_promotion_user_prompt.txt"
+
+  wisdom_promotion:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/wisdom_promotion_system_prompt.txt"
+    user_prompt_file: "prompts/wisdom_promotion_user_prompt.txt"
+
+session:
+  type: "local"
+  local:
+    working_dir: "./playground/sure_master/workspace_f5tts"
+    timeout: 86400
+    gpu_devices: auto
+    cpu_devices: null
+    symlinks: {}
+    parallel:
+      enabled: true
+      max_parallel: auto
+      gpus_per_exp: 1
+      serial_gpus_per_exp: 1
+      set_asr_world_size: false
+      split_workspace_for_exp: true
+
+llm_output:
+  show_in_console: true
+  log_to_file: true
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: null
+  console: true

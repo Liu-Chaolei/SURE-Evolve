@@ -1,0 +1,125 @@
+# Minimal Multi-Agent Playground — Docker session configuration
+# Planning Agent + Coding Agent collaborating inside a Docker container.
+# Run with:
+#   python run.py --agent minimal_multi_agent \
+#       --config configs/minimal_multi_agent/docker.yaml --task "..."
+
+# ============================================
+# LLM Configuration
+# ============================================
+llm:
+  openai:
+    provider: "openai"
+    model: "${GPT_CHAT_MODEL}"
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "${GPT_BASE_URL}"
+    temperature: 0.7
+    max_tokens: 163840
+    timeout: 60
+    max_retries: 3
+    retry_delay: 1.0
+
+  anthropic:
+    provider: "anthropic"
+    model: "claude-haiku-4-5-20251001"
+    api_key: "${ANTHROPIC_API_KEY}"
+    base_url: "${ANTHROPIC_BASE_URL}"
+    temperature: 0.7
+    max_tokens: 16384
+    timeout: 60
+    max_retries: 3
+    retry_delay: 1.0
+
+  local_sglang:
+    provider: "deepseek"
+    model: "deepseek-v3.2"
+    api_key: "${DEEPSEEK_API_KEY}"
+    base_url: "${DEEPSEEK_API_BASE}"
+    temperature: 0.7
+    max_tokens: 16384
+    timeout: 300
+    max_retries: 3
+    retry_delay: 1.0
+
+  default: "openai"
+
+# ============================================
+# Multi-Agent Configuration
+# ============================================
+agents:
+  planning:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/planning_system_prompt.txt"
+    user_prompt_file: "prompts/planning_user_prompt.txt"
+
+  coding:
+    llm: "openai"
+    max_turns: 50
+    tools:
+      builtin: ["*"]
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/coding_system_prompt.txt"
+    user_prompt_file: "prompts/coding_user_prompt.txt"
+
+# ============================================
+# Session Configuration
+# ============================================
+session:
+  type: "docker"
+
+  docker:
+    image: "evomaster/base:bohrium"
+    container_name: null
+    use_existing_container: null
+
+    working_dir: "/workspace"
+
+    # Resource limits. `memory_limit` is a cgroup cap (paired with
+    # `--memory-swap` so the container can't mask it via swap), but note
+    # that `htop` / `free` inside the container still show the host's
+    # memory because `/proc/meminfo` is not namespaced. `cpu_limit` only
+    # throttles CPU time — to restrict which cores are visible set
+    # `cpu_devices` below.
+    memory_limit: "8g"
+    cpu_limit: 4.0
+    cpu_devices: null     # --cpuset-cpus. null = no pinning; "0-3",
+                          # "0,2", or [0,1,2] restricts visible cores.
+    gpu_devices: null
+    network_mode: "host"
+
+    # The agent workspace is mounted automatically by EvoMaster; add extra
+    # bind mounts here if you need to expose data files inside the
+    # container. Relative host paths ("./assets") resolve against the
+    # project root (the directory containing `evomaster/`). Volumes whose
+    # container target nests inside `working_dir` (e.g. /workspace/data)
+    # are mirrored as host-side symlinks in the run workspace so the host
+    # view matches the container view.
+    volumes: {}
+
+    env_vars: {}
+
+    auto_remove: true
+    pull_image: "missing"
+    timeout: 300
+
+llm_output:
+  show_in_console: true
+  log_to_file: true
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: null
+  console: true

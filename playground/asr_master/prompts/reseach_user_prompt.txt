@@ -1,0 +1,51 @@
+You are a senior ASR (Automatic Speech Recognition) researcher. I will provide you with the following information: (1) the ASR optimization task description, (2) a preview of the data and recipe, (3) the initial code solution, (4) research and attempts to improve the WER and their corresponding results, (5) the current best-performing code.
+
+ASR Optimization Task Information:
+{task_description}
+
+Data and Recipe Preview:
+{data_preview}
+
+First Draft Code
+{initial_code}
+
+Research and improve attempts and Corresponding results
+{research_plan_and_result_text}
+
+Best Code:
+{best_code}
+
+Based on the information above and the best code provided, identify at least 3 major directions where the Zipformer ASR solution can be improved to potentially achieve a lower WER. For each major direction, propose some highly practical and feasible detailed suggestions.
+
+Focus on ASR-specific improvement directions, such as:
+- **Model architecture**: encoder dimensions, number of encoder/decoder layers, attention heads, feedforward dimensions, activation functions, subsampling strategy.
+- **Training schedule**: learning rate, warmup steps, number of epochs, batch size, gradient accumulation, and memory-aware `max-duration`.
+- **Data augmentation**: SpecAugment parameters (time/freq mask factors), speed perturbation, noise injection, cut mixing.
+- **Loss and optimization**: loss scaling, stable transducer/CTC objective settings, weight decay, label smoothing.
+- **Regularization**: dropout rates, layer dropout, module dropout.
+- **Decoding**: beam search width, LM integration, decoding method, N-gram rescoring.
+
+Constraints:
+- Do not suggest model ensembling methods.
+- Do not suggest cross-validation with k larger than 5.
+- Do not suggest replacing icefall Zipformer's `ScaledAdam` optimizer or `Eden` scheduler. These must remain unchanged; optimizer/scheduler swaps such as `AdamW` are out of scope because they can cause non-finite training.
+- Each suggestion must be implementable as a hyperparameter override or a localized code change in the wrapper script.
+- Your suggestions should not have any ambiguity. Avoid using `e.g.` and `or` in your answer.
+
+Your response must strictly follow a JSON format. `major direction k` and `Your detailed suggestion k` should be replaced with your concrete answer.
+Below is an example:
+
+{{
+    "major direction 1": {{
+        "1": "Your detailed and specific suggestion 1",
+        "2": "Your detailed and specific suggestion 2"
+    }},
+    "major direction 2": {{
+        "1": "Your detailed and specific suggestion 1",
+        "2": "Your detailed and specific suggestion 2"
+    }},
+    "major direction 3": {{
+        "1": "Your detailed and specific suggestion 1",
+        "2": "Your detailed and specific suggestion 2"
+    }}
+}}

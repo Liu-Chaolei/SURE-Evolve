@@ -1,0 +1,81 @@
+{
+  "description": "Staged F5-TTS prompt sets for the existing SURE Master self-optimization flow.",
+  "stages": [
+    {
+      "stage": "smoke",
+      "count": 20,
+      "prompts_jsonl": "/mnt/cloudstorfs/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/f5tts_staged/smoke/prompts.jsonl",
+      "source_counts": {
+        "libritts": 20
+      },
+      "split_counts": {
+        "libritts:dev-clean": 20
+      }
+    },
+    {
+      "stage": "early_search",
+      "count": 200,
+      "prompts_jsonl": "/mnt/cloudstorfs/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/f5tts_staged/early_search/prompts.jsonl",
+      "source_counts": {
+        "libritts": 200
+      },
+      "split_counts": {
+        "libritts:dev-other": 93,
+        "libritts:dev-clean": 107
+      }
+    },
+    {
+      "stage": "regular_search",
+      "count": 800,
+      "prompts_jsonl": "/mnt/cloudstorfs/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/f5tts_staged/regular_search/prompts.jsonl",
+      "source_counts": {
+        "libritts": 800
+      },
+      "split_counts": {
+        "libritts:dev-clean": 428,
+        "libritts:dev-other": 372
+      }
+    },
+    {
+      "stage": "selection",
+      "count": 500,
+      "prompts_jsonl": "/mnt/cloudstorfs/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/f5tts_staged/selection/prompts.jsonl",
+      "source_counts": {
+        "vctk": 250,
+        "libritts": 250
+      },
+      "split_counts": {
+        "vctk:heldout_speakers": 250,
+        "libritts:dev-other": 117,
+        "libritts:dev-clean": 133
+      }
+    },
+    {
+      "stage": "holdout",
+      "count": 1000,
+      "prompts_jsonl": "/mnt/cloudstorfs/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/f5tts_staged/holdout/prompts.jsonl",
+      "source_counts": {
+        "libritts": 1000
+      },
+      "split_counts": {
+        "libritts:test-clean": 527,
+        "libritts:test-other": 473
+      }
+    }
+  ],
+  "config_paths": [
+    "/mnt/cloudstorfs/sjtu_home/chaolei.liu/Agent/EvoMaster/configs/sure_master/gpt-5-f5tts-smoke.yaml",
+    "/mnt/cloudstorfs/sjtu_home/chaolei.liu/Agent/EvoMaster/configs/sure_master/gpt-5-f5tts-early-search.yaml",
+    "/mnt/cloudstorfs/sjtu_home/chaolei.liu/Agent/EvoMaster/configs/sure_master/gpt-5-f5tts-regular-search.yaml",
+    "/mnt/cloudstorfs/sjtu_home/chaolei.liu/Agent/EvoMaster/configs/sure_master/gpt-5-f5tts-selection.yaml"
+  ],
+  "libritts_root": "/hpc_stor03/sjtu_home/chaolei.liu/data/tts/LibriTTS",
+  "vctk_root": "/hpc_stor03/sjtu_home/chaolei.liu/data/tts/VCTK-Corpus",
+  "seed": 20260714,
+  "available_counts": {
+    "libritts:dev-clean": 5736,
+    "libritts:dev-other": 4613,
+    "libritts:test-clean+test-other": 9957,
+    "vctk:heldout_speakers": 44070
+  }
+}

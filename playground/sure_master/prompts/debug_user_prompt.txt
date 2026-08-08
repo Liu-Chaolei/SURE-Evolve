@@ -1,0 +1,68 @@
+Task description:
+{task_description}
+
+SURE task card:
+{task_card}
+
+Base model profile:
+{base_model_profile}
+
+Configured SURE role paths:
+{role_paths}
+
+Execution environment variables for `run_sure.py`:
+{execution_env}
+
+Data and input preview:
+{data_preview}
+
+Previous buggy implementation:
+{buggy_code}
+
+Execution output:
+```
+{terminal_output}
+```
+
+SURE metric feedback:
+```
+{metric_feedback}
+```
+
+Required candidate type:
+{candidate_type_hint}
+
+Write a corrected single-file `run_sure.py`.
+
+Requirements:
+- Keep all writes inside the experiment workspace.
+- Preserve the required candidate type. `inference` must not train or create checkpoints. `fine_tune` may fine-tune or train weights but must not change model structure or parameter count. `arch` must change model structure or parameter count, not merely learning rate, epoch, batch size, decoding, thresholds, normalization, or post-processing.
+- Honor the configured SURE role paths. Required input roles are also copied to their task-card default `input/` paths for compatibility, but absolute configured paths remain valid read-only inputs.
+- Read-only input paths may be symlinks whose `Path.resolve()` target is outside the experiment workspace, especially `base_model/root`, `base_model/eval_data`, checkpoint files, vocab files, and configured role inputs. Do not reject these reads for being outside the workspace. Apply the inside-workspace restriction only to writes.
+- Read execution environment variables listed above when choosing training/decode limits.
+- `SURE_MAX_DURATION` may be configured as a fixed integer or as `auto`. For ASR Zipformer candidates, do not call `SURE_RUNTIME_ENV_HELPER` or run `resolve-max-duration` yourself; call `SURE_ASR_ZIPFORMER_WRAPPER` and pass candidate-controlled train/decode changes through `--train-args-json` and `--decode-args-json`. The wrapper owns duration probing, process-group logging, checkpoint placement, decode split handling, and `artifacts/hyp.txt` formatting.
+- If you are working on a non-Zipformer ASR path that does not have a task wrapper, only accept a resolved auto `SURE_MAX_DURATION` from a successful helper run and a final standalone integer line. Never parse duration values from failed helper logs, tracebacks, command lines, argparse usage text, or diagnostics; if the helper fails, exit non-zero instead of guessing or using an unverified fallback. Do not use a training `--max-duration` below `SURE_DURATION_AUTOTUNE_MIN`/`SURE_TRAIN_DURATION_MIN`.
+- For ASR Zipformer training/decode candidates, use `SURE_ASR_ZIPFORMER_WRAPPER` instead of spawning `base_model/recipe/train.py` or `decode.py` directly.
+- If the base model profile has `usage_policy: required`, keep using that model/recipe through its workspace-relative `required_paths`.
+- Do not switch to an unrelated pretrained model family when a required base model is configured.
+- Generate every required artifact from the task card.
+- For F5-TTS, model-structure changes are allowed only through `SURE_TTS_ARCH_WRAPPER`; do not patch raw F5-TTS model source or call raw F5-TTS training entrypoints directly.
+- For F5-TTS `arch`, call `SURE_TTS_ARCH_WRAPPER` with `action=arch_finetune_short` and change at least one of `depth`, `ff_mult`, `conv_layers`, or `qk_norm`.
+- For F5-TTS, write `artifacts/candidate_changes.json` with candidate_type, idea_text, changed_fields, defaults, diff_from_defaults, produced_artifacts, and the actual arch/training/inference configs used.
+- Do not edit `/hpc_stor03/sjtu_home/chaolei.liu/sure`.
+- Do not write to the external source directories behind the base model symlinks.
+- Do not call SURE scoring from the script.
+- Exit non-zero if required real artifacts cannot be produced.
+- For ASR, `artifacts/hyp.txt` must contain model-decoded hypotheses. Do not fill it by copying `ref`, reading reference text, or extracting Lhotse supervision/manifests as surrogate hypotheses.
+- For ASR, do not fill `artifacts/hyp.txt` with a constant token, fallback token, BPE-only prior, or other low-diversity placeholder when real model decoding is unavailable; exit non-zero instead.
+- For LibriSpeech/icefall ASR, normalize `recogs-*.txt` keys before writing `artifacts/hyp.txt`: keep the canonical `speaker-chapter-utterance` id and remove any trailing numeric Lhotse cut/segment suffix regardless of suffix length, e.g. `1089-134686-0000-0 -> 1089-134686-0000` and `2086-149214-0000-1708 -> 2086-149214-0000`. Do not restrict the suffix length with checks such as `len(parts[-1]) <= 3`. Write hypotheses in `input/ref.txt` order.
+- If `SURE_ENABLE_MUSAN=0` is configured, pass `--enable-musan 0` to the icefall training recipe.
+- Pass the fixed or resolved `SURE_MAX_DURATION` to icefall `train.py`/`decode.py` as `--max-duration`; do not hard-code 600 when a resolved value is available. This recipe expects an integer value, so pass `str(int(float(value)))`, e.g. `1000`, never `1000.0`.
+- Do not sweep, probe, or tune `--max-duration` above the resolved `SURE_MAX_DURATION`. If comparing durations, only use values less than or equal to that bound.
+- For long-running icefall `train.py` or `decode.py` subprocesses, do not use `stdout=subprocess.PIPE`, `stderr=subprocess.PIPE`, or `capture_output=True`. Write stdout/stderr directly to a log file, and use a helper that starts a new process group, applies a timeout, and kills the process group on failure or timeout.
+- For the Zipformer LibriSpeech recipe, `train.py` uses `--bpe-model` plus `--manifest-dir`; do not pass `--lang-dir` to `train.py`. `decode.py` may use `--lang-dir` when needed.
+- For Zipformer decode, do not pass train-only options such as `--ctc-loss-scale`, `--cr-loss-scale`, or `--time-mask-ratio`; reserve loss and augmentation settings for `train.py`.
+- For ASR `arch`, the `train.py` command must pass at least one structure argument: `--num-encoder-layers`, `--encoder-dim`, `--feedforward-dim`, or `--encoder-unmasked-dim`.
+- Support multi-GPU training. Detect `world_size` from `ASR_WORLD_SIZE` if set, otherwise from comma-separated `CUDA_VISIBLE_DEVICES`; fall back to 1. Pass `--world-size str(world_size)` and a unique `--master-port` to `train.py`. Do not hard-code `CUDA_VISIBLE_DEVICES=0` or `--world-size 1`; keep `decode.py` single-process.
+
+Respond with a brief bugfix sketch followed by exactly one markdown Python code block.

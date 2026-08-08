@@ -1,0 +1,21 @@
+# Runtime dependencies for the mounted icefall LibriSpeech Zipformer recipe.
+kaldifst==1.8.0
+kaldilm==1.15.4
+kaldialign==0.9.2
+num2words==0.5.14
+kaldi-decoder==0.3.0
+sentencepiece==0.2.0
+pypinyin==0.50.0
+tensorboard==2.14.0
+typeguard==4.4.0
+dill==0.4.0
+onnx==1.17.0
+onnxruntime==1.19.2
+onnxoptimizer==0.3.13
+onnxsim==0.5.0
+onnxconverter-common==1.16.0
+black==22.3.0
+isort==5.10.1
+flake8==5.0.4
+pycantonese==3.4.0
+packaging>=23.0

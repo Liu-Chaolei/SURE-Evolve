@@ -1,0 +1,619 @@
+{
+  "messages": [
+    {
+      "content": "你是社会科学调查数据变量审计器。只做语义标注，不决定最终统计模型。必须逐个标注输入中的每个变量，不得遗漏、重复或增加变量。角色是候选角色；不得根据显著性或变量间相关性分配角色。roles 是多选数组。返回格式为 {\"variables\": [ ... ]}。同时识别拒绝回答、不知道、不适用、跳题等没有实际回答含义的编码。分别给出变量作为 X 和作为 Y 时可考虑的测量处理建议。这些建议不能依赖统计显著性；不确定时必须选 none。没有机械关系时返回空数组。\n\n你必须严格按照下面的 JSON Schema 返回结果，只输出合法 JSON，不要输出任何解释文字或 markdown 代码块。\n\nJSON Schema:\n{\"type\": \"object\", \"properties\": {\"variables\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\", \"enum\": [\"id\", \"a2\", \"a3a\", \"a4\", \"a7a\", \"a69\", \"isurban\", \"weight2\", \"a15\", \"a53\", \"a62\", \"a8a\", \"a1\"]}, \"meaning\": {\"type\": \"string\"}, \"variable_type\": {\"type\": \"string\", \"enum\": [\"binary\", \"continuous\", \"count\", \"id\", \"nominal\", \"ordinal\", \"proportion\", \"technical\", \"text\"]}, \"measurement_object\": {\"type\": \"string\"}, \"is_original\": {\"type\": \"boolean\"}, \"is_derived\": {\"type\": \"boolean\"}, \"has_skip_logic\": {\"type\": \"boolean\"}, \"mechanical_overlap_risk\": {\"type\": \"boolean\"}, \"concepts\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"roles\": {\"type\": \"array\", \"items\": {\"type\": \"string\", \"enum\": [\"basic_control\", \"control_candidate\", \"explanatory\", \"extended_control\", \"grouping\", \"mechanism\", \"metadata\", \"moderator\", \"outcome\", \"potential_mediator\", \"unusable\"]}, \"minItems\": 1}, \"unusable_risk\": {\"type\": \"string\", \"enum\": [\"high\", \"low\", \"medium\"]}, \"semantic_confidence\": {\"type\": \"number\", \"minimum\": 0, \"maximum\": 1}, \"review_reason\": {\"type\": \"string\"}, \"nonresponse_values\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"nonresponse_reason\": {\"type\": \"string\"}, \"missing_action\": {\"type\": \"string\", \"enum\": [\"recode_to_missing\", \"keep\", \"manual_review\"]}, \"suggested_x_transform\": {\"type\": \"string\", \"enum\": [\"collapse_rare_categories\", \"log1p\", \"none\", \"reverse\", \"standardize\", \"winsorize\"]}, \"suggested_y_transform\": {\"type\": \"string\", \"enum\": [\"collapse_rare_categories\", \"log1p\", \"none\", \"reverse\", \"standardize\", \"winsorize\"]}, \"transform_reason\": {\"type\": \"string\"}, \"mechanical_links\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"target_variable\": {\"type\": \"string\", \"enum\": [\"id\", \"a2\", \"a3a\", \"a4\", \"a7a\", \"a69\", \"isurban\", \"weight2\", \"a15\", \"a53\", \"a62\", \"a8a\", \"a1\"]}, \"relation_type\": {\"type\": \"string\", \"enum\": [\"same_concept_recode\", \"derived_from\", \"component_total\", \"skip_logic\", \"definition_overlap\", \"near_synonym\"]}, \"reason\": {\"type\": \"string\"}, \"confidence\": {\"type\": \"number\", \"minimum\": 0, \"maximum\": 1}}, \"required\": [\"target_variable\", \"relation_type\", \"reason\", \"confidence\"], \"additionalProperties\": false}, \"maxItems\": 13}}, \"required\": [\"name\", \"meaning\", \"variable_type\", \"measurement_object\", \"is_original\", \"is_derived\", \"has_skip_logic\", \"mechanical_overlap_risk\", \"concepts\", \"roles\", \"unusable_risk\", \"semantic_confidence\", \"review_reason\", \"nonresponse_values\", \"nonresponse_reason\", \"missing_action\", \"suggested_x_transform\", \"suggested_y_transform\", \"transform_reason\", \"mechanical_links\"], \"additionalProperties\": false}}}, \"required\": [\"variables\"]}",
+      "role": "system"
+    },
+    {
+      "content": "{\"task\": \"按照固定 schema 标注每个变量\", \"schema_description\": {\"meaning\": \"变量含义\", \"variable_type\": \"continuous/binary/ordinal/nominal/count/proportion/id/text/technical\", \"measurement_object\": \"测量对象\", \"is_original\": \"布尔值\", \"is_derived\": \"布尔值\", \"has_skip_logic\": \"布尔值\", \"mechanical_overlap_risk\": \"布尔值\", \"concepts\": [\"社会科学概念\"], \"roles\": [\"outcome/explanatory/basic_control/extended_control/control_candidate/mechanism/potential_mediator/moderator/grouping/unusable/metadata\"], \"unusable_risk\": \"low/medium/high\", \"semantic_confidence\": \"0 到 1，仅表示语义角色判断把握，不进入统计信心分数\", \"review_reason\": \"需要人工检查的原因\", \"nonresponse_values\": [\"没有实际回答含义、应作为缺失值处理的原始编码\"], \"nonresponse_reason\": \"为什么这些编码不代表实质回答\", \"missing_action\": \"recode_to_missing/keep/manual_review\", \"suggested_x_transform\": \"none/standardize/log1p/winsorize/reverse/collapse_rare_categories\", \"suggested_y_transform\": \"none/standardize/log1p/winsorize/reverse/collapse_rare_categories\", \"transform_reason\": \"变量作为X或Y时的语义与测量处理理由\"}, \"variables\": [{\"name\": \"id\", \"label\": \"Person ID\", \"question\": \"What is your ID number?\", \"module\": \"demographics\", \"level\": \"person\", \"variable_type\": \"id\", \"dtype\": \"int64\", \"value_labels\": {}, \"missing_values\": [], \"concept_family\": \"idpersonid\", \"derived_from\": [], \"skip_condition\": \"\", \"scale_group\": \"\", \"direction\": \"\", \"years\": [], \"n\": 100, \"n_missing\": 0, \"missing_rate\": 0.0, \"n_unique\": 100, \"minimum\": 1.0, \"maximum\": 100.0, \"mean\": 50.5, \"std\": 29.011491975882016, \"skew\": 0.0, \"notes\": \"\"}, {\"name\": \"a2\", \"label\": \"Gender (1=Male, 2=Female)\", \"question\": \"What is your gender?\", \"module\": \"demographics\", \"level\": \"person\", \"variable_type\": \"binary\", \"dtype\": \"int64\", \"value_labels\": {\"1\": \"Male, 2:Female\"}, \"missing_values\": [], \"concept_family\": \"a2gender1male2female\", \"derived_from\": [], \"skip_condition\": \"\", \"scale_group\": \"\", \"direction\": \"\", \"years\": [], \"n\": 100, \"n_missing\": 0, \"missing_rate\": 0.0, \"n_unique\": 2, \"minimum\": 1.0, \"maximum\": 2.0, \"mean\": 1.48, \"std\": 0.5021167315686782, \"skew\": 0.08128852110364208, \"notes\": \"\"}, {\"name\": \"a3a\", \"label\": \"Age in years\", \"question\": \"What is your age?\", \"module\": \"demographics\", \"level\": \"person\", \"variable_type\": \"continuous\", \"dtype\": \"int64\", \"value_labels\": {}, \"missing_values\": [], \"concept_family\": \"a3aageinyears\", \"derived_from\": [], \"skip_condition\": \"\", \"scale_group\": \"\", \"direction\": \"\", \"years\": [], \"n\": 100, \"n_missing\": 0, \"missing_rate\": 0.0, \"n_unique\": 47, \"minimum\": 18.0, \"maximum\": 78.0, \"mean\": 50.18, \"std\": 18.827971883676828, \"skew\": -0.031259083485801975, \"notes\": \"\"}, {\"name\": \"a4\", \"label\": \"Ethnicity\", \"question\": \"What is your ethnicity?\", \"module\": \"demographics\", \"level\": \"person\", \"variable_type\": \"nominal\", \"dtype\": \"int64\", \"value_labels\": {\"1\": \"Han, 2:Mongolian, 3:Hui, 4:Tibetan, 5:Uygur, 6:Miao, 7:Yi, 8:Other\"}, \"missing_values\": [], \"concept_family\": \"a4ethnicity\", \"derived_from\": [], \"skip_condition\": \"\", \"scale_group\": \"\", \"direction\": \"\", \"years\": [], \"n\": 100, \"n_missing\": 0, \"missing_rate\": 0.0, \"n_unique\": 8, \"minimum\": 1.0, \"maximum\": 8.0, \"mean\": 4.52, \"std\": 2.388863048955856, \"skew\": 0.09269602460059445, \"notes\": \"\"}, {\"name\": \"a7a\", \"label\": \"Education level\", \"question\": \"What is your highest education level?\", \"module\": \"demographics\", \"level\": \"person\", \"variable_type\": \"nominal\", \"dtype\": \"int64\", \"value_labels\": {\"1\": \"No schooling, 2:Primary, 3:Junior high, 4:Senior high, 5:Vocational, 6:Associate, 7:Bachelor, 8:Master+\"}, \"missing_values\": [], \"concept_family\": \"a7aeducation\", \"derived_from\": [], \"skip_condition\": \"\", \"scale_group\": \"\", \"direction\": \"\", \"years\": [], \"n\": 100, \"n_missing\": 0, \"missing_rate\": 0.0, \"n_unique\": 8, \"minimum\": 1.0, \"maximum\": 8.0, \"mean\": 4.6, \"std\": 2.2696949467968492, \"skew\": -0.02433018098465893, \"notes\": \"\"}, {\"name\": \"a69\", \"label\": \"Marital status\", \"question\": \"What is your marital status?\", \"module\": \"demographics\", \"level\": \"person\", \"variable_type\": \"nominal\", \"dtype\": \"int64\", \"value_labels\": {\"1\": \"Never married, 2:Married, 3:Widowed, 4:Divorced, 5:Remarried\"}, \"missing_values\": [], \"concept_family\": \"a69maritalstatus\", \"derived_from\": [], \"skip_condition\": \"\", \"scale_group\": \"\", \"direction\": \"\", \"years\": [], \"n\": 100, \"n_missing\": 0, \"missing_rate\": 0.0, \"n_unique\": 5, \"minimum\": 1.0, \"maximum\": 5.0, \"mean\": 2.99, \"std\": 1.5008078632603985, \"skew\": 0.035642693928188994, \"notes\": \"\"}, {\"name\": \"isurban\", \"label\": \"Urban/rural (0=Rural, 1=Urban)\", \"question\": \"Do you live in urban area?\", \"module\": \"demographics\", \"level\": \"person\", \"variable_type\": \"binary\", \"dtype\": \"int64\", \"value_labels\": {\"0\": \"Rural, 1:Urban\"}, \"missing_values\": [], \"concept_family\": \"isurbanurbanrural0rural1urban\", \"derived_from\": [], \"skip_condition\": \"\", \"scale_group\": \"\", \"direction\": \"\", \"years\": [], \"n\": 100, \"n_missing\": 0, \"missing_rate\": 0.0, \"n_unique\": 2, \"minimum\": 0.0, \"maximum\": 1.0, \"mean\": 0.52, \"std\": 0.5021167315686782, \"skew\": -0.08128852110364211, \"notes\": \"\"}, {\"name\": \"weight2\", \"label\": \"Survey weight\", \"question\": \"Survey weight for representativeness\", \"module\": \"demographics\", \"level\": \"person\", \"variable_type\": \"technical\", \"dtype\": \"float64\", \"value_labels\": {}, \"missing_values\": [], \"concept_family\": \"weight2surveyweight\", \"derived_from\": [], \"skip_condition\": \"\", \"scale_group\": \"\", \"direction\": \"\", \"years\": [], \"n\": 100, \"n_missing\": 0, \"missing_rate\": 0.0, \"n_unique\": 100, \"minimum\": 0.5061416941268321, \"maximum\": 1.9939188315332954, \"mean\": 1.2562143944022899, \"std\": 0.43612855717428434, \"skew\": -0.0023264292680372062, \"notes\": \"\"}, {\"name\": \"a15\", \"label\": \"Happiness level\", \"question\": \"How happy are you?\", \"module\": \"attitudes\", \"level\": \"person\", \"variable_type\": \"nominal\", \"dtype\": \"int64\", \"value_labels\": {\"1\": \"Very unhappy, 2:Unhappy, 3:Neutral, 4:Happy, 5:Very happy\"}, \"missing_values\": [], \"concept_family\": \"a15happiness\", \"derived_from\": [], \"skip_condition\": \"\", \"scale_group\": \"\", \"direction\": \"\", \"years\": [], \"n\": 100, \"n_missing\": 0, \"missing_rate\": 0.0, \"n_unique\": 5, \"minimum\": 1.0, \"maximum\": 5.0, \"mean\": 3.05, \"std\": 1.472817680227909, \"skew\": -0.02976172761909883, \"notes\": \"\"}, {\"name\": \"a53\", \"label\": \"Trust score\", \"question\": \"How much do you trust others?\", \"module\": \"attitudes\", \"level\": \"person\", \"variable_type\": \"continuous\", \"dtype\": \"int64\", \"value_labels\": {}, \"missing_values\": [], \"concept_family\": \"a53trustscore\", \"derived_from\": [], \"skip_condition\": \"\", \"scale_group\": \"\", \"direction\": \"\", \"years\": [], \"n\": 100, \"n_missing\": 0, \"missing_rate\": 0.0, \"n_unique\": 9, \"minimum\": 1.0, \"maximum\": 9.0, \"mean\": 4.82, \"std\": 2.3672001106024734, \"skew\": 0.23788835488312574, \"notes\": \"\"}, {\"name\": \"a62\", \"label\": \"Life satisfaction\", \"question\": \"How satisfied are you with your life?\", \"module\": \"attitudes\", \"level\": \"person\", \"variable_type\": \"nominal\", \"dtype\": \"int64\", \"value_labels\": {\"1\": \"Very dissatisfied, 2:Dissatisfied, 3:Neutral, 4:Satisfied, 5:Very satisfied\"}, \"missing_values\": [], \"concept_family\": \"a62lifesatisfaction\", \"derived_from\": [], \"skip_condition\": \"\", \"scale_group\": \"\", \"direction\": \"\", \"years\": [], \"n\": 100, \"n_missing\": 0, \"missing_rate\": 0.0, \"n_unique\": 5, \"minimum\": 1.0, \"maximum\": 5.0, \"mean\": 2.89, \"std\": 1.462632192074593, \"skew\": 0.056077656300971515, \"notes\": \"\"}, {\"name\": \"a8a\", \"label\": \"Annual income\", \"question\": \"What is your annual income?\", \"module\": \"attitudes\", \"level\": \"person\", \"variable_type\": \"continuous\", \"dtype\": \"int64\", \"value_labels\": {}, \"missing_values\": [], \"concept_family\": \"a8aannualincome\", \"derived_from\": [], \"skip_condition\": \"\", \"scale_group\": \"\", \"direction\": \"\", \"years\": [], \"n\": 100, \"n_missing\": 0, \"missing_rate\": 0.0, \"n_unique\": 100, \"minimum\": 178.0, \"maximum\": 99912.0, \"mean\": 48986.06, \"std\": 30990.42747506515, \"skew\": 0.022713342093721136, \"notes\": \"\"}, {\"name\": \"a1\", \"label\": \"Health status\", \"question\": \"How is your health status?\", \"module\": \"attitudes\", \"level\": \"person\", \"variable_type\": \"nominal\", \"dtype\": \"int64\", \"value_labels\": {\"1\": \"Very poor, 2:Poor, 3:Fair, 4:Good, 5:Very good\"}, \"missing_values\": [], \"concept_family\": \"a1healthstatus\", \"derived_from\": [], \"skip_condition\": \"\", \"scale_group\": \"\", \"direction\": \"\", \"years\": [], \"n\": 100, \"n_missing\": 0, \"missing_rate\": 0.0, \"n_unique\": 5, \"minimum\": 1.0, \"maximum\": 5.0, \"mean\": 3.07, \"std\": 1.4442851505016578, \"skew\": -0.0013732741961066718, \"notes\": \"\"}], \"prior_variables\": []}",
+      "role": "user"
+    }
+  ],
+  "model": "GLM-5.2-C",
+  "request_id": "chatcmpl-a0fabae4d0b7442fa5ff99e3",
+  "result": {
+    "variables": [
+      {
+        "concepts": [
+          "identifier"
+        ],
+        "has_skip_logic": false,
+        "is_derived": false,
+        "is_original": true,
+        "meaning": "受访者唯一标识符",
+        "measurement_object": "受访者",
+        "mechanical_links": [],
+        "mechanical_overlap_risk": false,
+        "missing_action": "keep",
+        "name": "id",
+        "nonresponse_reason": "无",
+        "nonresponse_values": [],
+        "review_reason": "无",
+        "roles": [
+          "metadata"
+        ],
+        "semantic_confidence": 1,
+        "suggested_x_transform": "none",
+        "suggested_y_transform": "none",
+        "transform_reason": "ID变量不进入统计模型",
+        "unusable_risk": "low",
+        "variable_type": "id"
+      },
+      {
+        "concepts": [
+          "gender",
+          "demographics"
+        ],
+        "has_skip_logic": false,
+        "is_derived": false,
+        "is_original": true,
+        "meaning": "性别",
+        "measurement_object": "受访者",
+        "mechanical_links": [],
+        "mechanical_overlap_risk": false,
+        "missing_action": "keep",
+        "name": "a2",
+        "nonresponse_reason": "无",
+        "nonresponse_values": [],
+        "review_reason": "无",
+        "roles": [
+          "basic_control",
+          "grouping"
+        ],
+        "semantic_confidence": 1,
+        "suggested_x_transform": "none",
+        "suggested_y_transform": "none",
+        "transform_reason": "二分类变量，通常无需变换",
+        "unusable_risk": "low",
+        "variable_type": "binary"
+      },
+      {
+        "concepts": [
+          "age",
+          "demographics"
+        ],
+        "has_skip_logic": false,
+        "is_derived": false,
+        "is_original": true,
+        "meaning": "年龄（周岁）",
+        "measurement_object": "受访者",
+        "mechanical_links": [],
+        "mechanical_overlap_risk": false,
+        "missing_action": "keep",
+        "name": "a3a",
+        "nonresponse_reason": "无",
+        "nonresponse_values": [],
+        "review_reason": "无",
+        "roles": [
+          "basic_control",
+          "moderator"
+        ],
+        "semantic_confidence": 1,
+        "suggested_x_transform": "standardize",
+        "suggested_y_transform": "none",
+        "transform_reason": "作为X时标准化有助于系数解释；作为Y时通常保持原值",
+        "unusable_risk": "low",
+        "variable_type": "continuous"
+      },
+      {
+        "concepts": [
+          "ethnicity",
+          "demographics"
+        ],
+        "has_skip_logic": false,
+        "is_derived": false,
+        "is_original": true,
+        "meaning": "民族",
+        "measurement_object": "受访者",
+        "mechanical_links": [],
+        "mechanical_overlap_risk": false,
+        "missing_action": "keep",
+        "name": "a4",
+        "nonresponse_reason": "无",
+        "nonresponse_values": [],
+        "review_reason": "无",
+        "roles": [
+          "control_candidate",
+          "grouping"
+        ],
+        "semantic_confidence": 1,
+        "suggested_x_transform": "collapse_rare_categories",
+        "suggested_y_transform": "none",
+        "transform_reason": "名义变量，若作为自变量且类别过多需合并稀疏类别",
+        "unusable_risk": "low",
+        "variable_type": "nominal"
+      },
+      {
+        "concepts": [
+          "education",
+          "socioeconomic_status"
+        ],
+        "has_skip_logic": false,
+        "is_derived": false,
+        "is_original": true,
+        "meaning": "最高受教育程度",
+        "measurement_object": "受访者",
+        "mechanical_links": [],
+        "mechanical_overlap_risk": false,
+        "missing_action": "keep",
+        "name": "a7a",
+        "nonresponse_reason": "无",
+        "nonresponse_values": [],
+        "review_reason": "无",
+        "roles": [
+          "basic_control",
+          "explanatory"
+        ],
+        "semantic_confidence": 1,
+        "suggested_x_transform": "none",
+        "suggested_y_transform": "none",
+        "transform_reason": "有序分类变量，可视作连续或虚拟变量处理",
+        "unusable_risk": "low",
+        "variable_type": "ordinal"
+      },
+      {
+        "concepts": [
+          "marital_status",
+          "demographics"
+        ],
+        "has_skip_logic": false,
+        "is_derived": false,
+        "is_original": true,
+        "meaning": "婚姻状况",
+        "measurement_object": "受访者",
+        "mechanical_links": [],
+        "mechanical_overlap_risk": false,
+        "missing_action": "keep",
+        "name": "a69",
+        "nonresponse_reason": "无",
+        "nonresponse_values": [],
+        "review_reason": "无",
+        "roles": [
+          "control_candidate",
+          "grouping"
+        ],
+        "semantic_confidence": 1,
+        "suggested_x_transform": "collapse_rare_categories",
+        "suggested_y_transform": "none",
+        "transform_reason": "名义变量，需关注类别样本量分布",
+        "unusable_risk": "low",
+        "variable_type": "nominal"
+      },
+      {
+        "concepts": [
+          "urbanization",
+          "residence"
+        ],
+        "has_skip_logic": false,
+        "is_derived": false,
+        "is_original": true,
+        "meaning": "城乡属性",
+        "measurement_object": "受访者",
+        "mechanical_links": [],
+        "mechanical_overlap_risk": false,
+        "missing_action": "keep",
+        "name": "isurban",
+        "nonresponse_reason": "无",
+        "nonresponse_values": [],
+        "review_reason": "无",
+        "roles": [
+          "basic_control",
+          "grouping",
+          "moderator"
+        ],
+        "semantic_confidence": 1,
+        "suggested_x_transform": "none",
+        "suggested_y_transform": "none",
+        "transform_reason": "二分类变量，无需变换",
+        "unusable_risk": "low",
+        "variable_type": "binary"
+      },
+      {
+        "concepts": [
+          "survey_methodology"
+        ],
+        "has_skip_logic": false,
+        "is_derived": true,
+        "is_original": true,
+        "meaning": "调查权重",
+        "measurement_object": "样本",
+        "mechanical_links": [],
+        "mechanical_overlap_risk": false,
+        "missing_action": "keep",
+        "name": "weight2",
+        "nonresponse_reason": "无",
+        "nonresponse_values": [],
+        "review_reason": "无",
+        "roles": [
+          "metadata"
+        ],
+        "semantic_confidence": 1,
+        "suggested_x_transform": "none",
+        "suggested_y_transform": "none",
+        "transform_reason": "技术变量，用于加权计算，不作为分析变量",
+        "unusable_risk": "low",
+        "variable_type": "technical"
+      },
+      {
+        "concepts": [
+          "happiness",
+          "subjective_wellbeing"
+        ],
+        "has_skip_logic": false,
+        "is_derived": false,
+        "is_original": true,
+        "meaning": "幸福程度",
+        "measurement_object": "受访者",
+        "mechanical_links": [],
+        "mechanical_overlap_risk": false,
+        "missing_action": "keep",
+        "name": "a15",
+        "nonresponse_reason": "无",
+        "nonresponse_values": [],
+        "review_reason": "无",
+        "roles": [
+          "outcome",
+          "potential_mediator"
+        ],
+        "semantic_confidence": 1,
+        "suggested_x_transform": "none",
+        "suggested_y_transform": "none",
+        "transform_reason": "有序分类变量，常作为结果变量",
+        "unusable_risk": "low",
+        "variable_type": "ordinal"
+      },
+      {
+        "concepts": [
+          "social_trust",
+          "social_capital"
+        ],
+        "has_skip_logic": false,
+        "is_derived": false,
+        "is_original": true,
+        "meaning": "社会信任得分",
+        "measurement_object": "受访者",
+        "mechanical_links": [],
+        "mechanical_overlap_risk": false,
+        "missing_action": "keep",
+        "name": "a53",
+        "nonresponse_reason": "无",
+        "nonresponse_values": [],
+        "review_reason": "无",
+        "roles": [
+          "outcome",
+          "explanatory",
+          "potential_mediator"
+        ],
+        "semantic_confidence": 1,
+        "suggested_x_transform": "standardize",
+        "suggested_y_transform": "standardize",
+        "transform_reason": "连续得分，标准化有助于模型收敛和系数比较",
+        "unusable_risk": "low",
+        "variable_type": "continuous"
+      },
+      {
+        "concepts": [
+          "life_satisfaction",
+          "subjective_wellbeing"
+        ],
+        "has_skip_logic": false,
+        "is_derived": false,
+        "is_original": true,
+        "meaning": "生活满意度",
+        "measurement_object": "受访者",
+        "mechanical_links": [],
+        "mechanical_overlap_risk": false,
+        "missing_action": "keep",
+        "name": "a62",
+        "nonresponse_reason": "无",
+        "nonresponse_values": [],
+        "review_reason": "无",
+        "roles": [
+          "outcome",
+          "potential_mediator"
+        ],
+        "semantic_confidence": 1,
+        "suggested_x_transform": "none",
+        "suggested_y_transform": "none",
+        "transform_reason": "有序分类变量，常作为结果变量",
+        "unusable_risk": "low",
+        "variable_type": "ordinal"
+      },
+      {
+        "concepts": [
+          "income",
+          "socioeconomic_status"
+        ],
+        "has_skip_logic": false,
+        "is_derived": false,
+        "is_original": true,
+        "meaning": "个人年收入（元）",
+        "measurement_object": "受访者",
+        "mechanical_links": [],
+        "mechanical_overlap_risk": false,
+        "missing_action": "keep",
+        "name": "a8a",
+        "nonresponse_reason": "无",
+        "nonresponse_values": [],
+        "review_reason": "无",
+        "roles": [
+          "explanatory",
+          "basic_control"
+        ],
+        "semantic_confidence": 1,
+        "suggested_x_transform": "log1p",
+        "suggested_y_transform": "log1p",
+        "transform_reason": "收入通常右偏，取对数可正态化并缓解异方差",
+        "unusable_risk": "low",
+        "variable_type": "continuous"
+      },
+      {
+        "concepts": [
+          "health",
+          "wellbeing"
+        ],
+        "has_skip_logic": false,
+        "is_derived": false,
+        "is_original": true,
+        "meaning": "健康状况自评",
+        "measurement_object": "受访者",
+        "mechanical_links": [],
+        "mechanical_overlap_risk": false,
+        "missing_action": "keep",
+        "name": "a1",
+        "nonresponse_reason": "无",
+        "nonresponse_values": [],
+        "review_reason": "无",
+        "roles": [
+          "outcome",
+          "explanatory",
+          "control_candidate"
+        ],
+        "semantic_confidence": 1,
+        "suggested_x_transform": "none",
+        "suggested_y_transform": "none",
+        "transform_reason": "有序分类变量，可视作连续或虚拟变量处理",
+        "unusable_risk": "low",
+        "variable_type": "ordinal"
+      }
+    ]
+  },
+  "schema": {
+    "properties": {
+      "variables": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "concepts": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "has_skip_logic": {
+              "type": "boolean"
+            },
+            "is_derived": {
+              "type": "boolean"
+            },
+            "is_original": {
+              "type": "boolean"
+            },
+            "meaning": {
+              "type": "string"
+            },
+            "measurement_object": {
+              "type": "string"
+            },
+            "mechanical_links": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "confidence": {
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "relation_type": {
+                    "enum": [
+                      "same_concept_recode",
+                      "derived_from",
+                      "component_total",
+                      "skip_logic",
+                      "definition_overlap",
+                      "near_synonym"
+                    ],
+                    "type": "string"
+                  },
+                  "target_variable": {
+                    "enum": [
+                      "id",
+                      "a2",
+                      "a3a",
+                      "a4",
+                      "a7a",
+                      "a69",
+                      "isurban",
+                      "weight2",
+                      "a15",
+                      "a53",
+                      "a62",
+                      "a8a",
+                      "a1"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target_variable",
+                  "relation_type",
+                  "reason",
+                  "confidence"
+                ],
+                "type": "object"
+              },
+              "maxItems": 13,
+              "type": "array"
+            },
+            "mechanical_overlap_risk": {
+              "type": "boolean"
+            },
+            "missing_action": {
+              "enum": [
+                "recode_to_missing",
+                "keep",
+                "manual_review"
+              ],
+              "type": "string"
+            },
+            "name": {
+              "enum": [
+                "id",
+                "a2",
+                "a3a",
+                "a4",
+                "a7a",
+                "a69",
+                "isurban",
+                "weight2",
+                "a15",
+                "a53",
+                "a62",
+                "a8a",
+                "a1"
+              ],
+              "type": "string"
+            },
+            "nonresponse_reason": {
+              "type": "string"
+            },
+            "nonresponse_values": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "review_reason": {
+              "type": "string"
+            },
+            "roles": {
+              "items": {
+                "enum": [
+                  "basic_control",
+                  "control_candidate",
+                  "explanatory",
+                  "extended_control",
+                  "grouping",
+                  "mechanism",
+                  "metadata",
+                  "moderator",
+                  "outcome",
+                  "potential_mediator",
+                  "unusable"
+                ],
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "semantic_confidence": {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            "suggested_x_transform": {
+              "enum": [
+                "collapse_rare_categories",
+                "log1p",
+                "none",
+                "reverse",
+                "standardize",
+                "winsorize"
+              ],
+              "type": "string"
+            },
+            "suggested_y_transform": {
+              "enum": [
+                "collapse_rare_categories",
+                "log1p",
+                "none",
+                "reverse",
+                "standardize",
+                "winsorize"
+              ],
+              "type": "string"
+            },
+            "transform_reason": {
+              "type": "string"
+            },
+            "unusable_risk": {
+              "enum": [
+                "high",
+                "low",
+                "medium"
+              ],
+              "type": "string"
+            },
+            "variable_type": {
+              "enum": [
+                "binary",
+                "continuous",
+                "count",
+                "id",
+                "nominal",
+                "ordinal",
+                "proportion",
+                "technical",
+                "text"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "meaning",
+            "variable_type",
+            "measurement_object",
+            "is_original",
+            "is_derived",
+            "has_skip_logic",
+            "mechanical_overlap_risk",
+            "concepts",
+            "roles",
+            "unusable_risk",
+            "semantic_confidence",
+            "review_reason",
+            "nonresponse_values",
+            "nonresponse_reason",
+            "missing_action",
+            "suggested_x_transform",
+            "suggested_y_transform",
+            "transform_reason",
+            "mechanical_links"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "variables"
+    ],
+    "type": "object"
+  },
+  "schema_name": "a2s2d_variable_roles",
+  "usage": {
+    "completion_tokens": 7958,
+    "completion_tokens_details": {
+      "reasoning_tokens": 5733
+    },
+    "prompt_tokens": 4025,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "total_tokens": 11983
+  }
+}

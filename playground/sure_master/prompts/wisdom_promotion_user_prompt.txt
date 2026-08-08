@@ -1,0 +1,21 @@
+Task description:
+{task_description}
+
+SURE task card:
+{task_card}
+
+Base model profile:
+{base_model_profile}
+
+Best solution:
+{best_solution}
+
+Extract reusable knowledge for future SURE tasks. Include the base model/recipe, model/training choices, decoding or post-processing choices, artifact contract details, and metric-specific lessons.
+
+Return JSON only:
+{{
+  "DATA_AND_ARTIFACT_SUMMARY": "summary",
+  "MODEL_AND_INFERENCE_SUMMARY": "summary",
+  "METRIC_OPTIMIZATION_SUMMARY": "summary",
+  "FAILURE_AVOIDANCE_SUMMARY": "summary"
+}}

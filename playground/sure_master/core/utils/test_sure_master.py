@@ -1,0 +1,5228 @@
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+import yaml
+
+from playground.sure_master.core import playground as sure_playground_module
+from playground.sure_master.core.playground import SureMasterPlayground
+from playground.sure_master.core.exp.research_exp import ResearchExp
+from playground.sure_master.core.exp.run_exp import SureRunExp
+from playground.sure_master.env.local import SureMasterLocalEnv
+from playground.sure_master.baselines import (
+    f5tts_v1_base_official_baseline as f5tts_official_baseline,
+)
+from playground.sure_master.baselines import (
+    zipformer_large_cr_ctc_rnnt_baseline as zipformer_baseline,
+)
+from playground.sure_master.baselines.asr_profiles import (
+    get_asr_dataset_profile,
+    normalize_asr_cut_id,
+    parse_eval_splits_for_profile,
+)
+from playground.sure_master.baselines.zipformer_large_cr_ctc_rnnt_baseline import (
+    bounded_train_max_duration,
+    duration_retry_sequence,
+    is_oom_failure,
+    normalize_librispeech_cut_id,
+    world_size,
+)
+from playground.sure_master.tools import build_asr_refs
+from playground.sure_master.tools.build_asr_refs import (
+    RefRow,
+    select_tiered_rows,
+)
+from evomaster.agent.session.local import LocalSessionConfig
+from evomaster.env import local as evomaster_local_env_module
+from evomaster.env.local import LocalEnv, LocalEnvConfig, ResourceAllocator
+
+from .code import validate_run_sure_script, validate_sure_candidate_boundary
+from .candidate_type import (
+    ARCH,
+    FINE_TUNE,
+    INFERENCE,
+    TRAINING,
+    candidate_type_from_code,
+    candidate_type_from_idea,
+)
+from .candidate_changes import validate_arch_candidate_changes, validate_candidate_changes
+from .metric import SureMetricRunner
+from playground.sure_master.tools import (
+    run_f5tts_arch_finetune,
+    run_f5tts_batch_infer,
+    run_icefall_zipformer_candidate,
+    run_vc_sure_candidate,
+)
+from playground.sure_master.tools.cleanup_sure_workspaces import find_candidate_workspaces
+from . import runtime_env
+from .task_cards import (
+    BaseModelProfile,
+    SureTaskCard,
+    infer_metric_direction,
+    load_task_cards,
+    merge_base_model_profile,
+    resolve_task_card,
+    validate_base_model_profile,
+)
+from .vc_remote import (
+    VcRemoteTrainingExecutor,
+    candidate_runs_remotely,
+    draft_runs_remotely,
+    mixed_execution_enabled,
+    parse_vc_info_partitions,
+    remote_candidate_types_from,
+    remote_training_max_parallel,
+)
+from .workspace_cleanup import (
+    WorkspaceCleanupConfig,
+    cleanup_candidate_workspace,
+    workspace_cleanup_config,
+)
+from playground.sure_master.tools.run_vc_sure_candidate import load_remote_candidate_context
+from playground.sure_master.tools.run_vc_sure_candidate import ensure_base_model_paths
+
+
+class SureTaskCardsTest(unittest.TestCase):
+    def test_f5tts_candidate_type_prefers_explicit_label(self):
+        self.assertEqual(candidate_type_from_idea(("1", "[training] fine-tune for 1000 steps")), FINE_TUNE)
+        self.assertEqual(candidate_type_from_idea(("2", "[inference] adjust nfe steps")), INFERENCE)
+        self.assertEqual(candidate_type_from_idea({"idea_type": "training", "idea": "use wrapper"}), FINE_TUNE)
+        self.assertEqual(candidate_type_from_idea(("3", "[arch] reduce Zipformer encoder_dim")), ARCH)
+        self.assertEqual(
+            candidate_type_from_idea("[fine_tune] tune loss without changing model structure"),
+            FINE_TUNE,
+        )
+
+    def test_f5tts_candidate_type_code_forces_training_wrapper(self):
+        code = "cmd = [os.environ['SURE_TTS_FINETUNE_WRAPPER'], '--action', 'finetune_short']"
+        self.assertEqual(candidate_type_from_code(code, default=INFERENCE), FINE_TUNE)
+
+    def test_f5tts_candidate_type_code_forces_arch_wrapper(self):
+        code = "cmd = [os.environ['SURE_TTS_ARCH_WRAPPER'], '--action', 'arch_finetune_short']"
+        self.assertEqual(candidate_type_from_code(code, default=INFERENCE), ARCH)
+
+    def test_asr_candidate_type_code_forces_training_recipe(self):
+        code = (
+            "cmd = ['/opt/conda/envs/icefall/bin/python', "
+            "'base_model/recipe/train.py', '--world-size', '8']"
+        )
+        self.assertEqual(candidate_type_from_code(code, default=INFERENCE), FINE_TUNE)
+
+    def test_asr_candidate_type_code_forces_arch_structure_args(self):
+        code = (
+            "cmd = ['/opt/conda/envs/icefall/bin/python', "
+            "'base_model/recipe/train.py', '--encoder-dim', '256']"
+        )
+        self.assertEqual(candidate_type_from_code(code, default=INFERENCE), ARCH)
+
+    def test_asr_baseline_train_duration_respects_sure_max_duration_cap(self):
+        env = {
+            "SURE_MAX_DURATION": "600",
+            "SURE_BASELINE_TRAIN_MAX_DURATION": "1400",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(bounded_train_max_duration(), 600)
+
+    def test_asr_baseline_train_duration_clamps_to_configured_floor(self):
+        env = {
+            "SURE_MAX_DURATION": "16",
+            "SURE_BASELINE_TRAIN_MAX_DURATION": "16",
+            "SURE_DURATION_AUTOTUNE_MIN": "100",
+            "SURE_TRAIN_DURATION_MIN": "100",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(bounded_train_max_duration(), 100)
+
+    def test_asr_baseline_world_size_uses_requested_when_cuda_visible_unset(self):
+        with patch.dict(os.environ, {"ASR_WORLD_SIZE": "8"}, clear=True):
+            self.assertEqual(world_size(), 8)
+        env = {"ASR_WORLD_SIZE": "8", "CUDA_VISIBLE_DEVICES": "0,1,2,3"}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(world_size(), 4)
+
+    def test_asr_baseline_decode_command_omits_train_only_args(self):
+        env = {
+            "SURE_BASELINE_USE_PRETRAINED": "1",
+            "SURE_BASELINE_DECODE_MAX_DURATION": "300",
+            "SURE_ICEFALL_PYTHON": "/python",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            command = zipformer_baseline.build_decode_command(
+                50,
+                Path("working/decode_sure_eval.py"),
+            )
+
+        self.assertIn("--use-cr-ctc", command)
+        self.assertIn("--encoder-dim", command)
+        self.assertIn("--full-libri", command)
+        self.assertNotIn("--ctc-loss-scale", command)
+        self.assertNotIn("--cr-loss-scale", command)
+        self.assertNotIn("--time-mask-ratio", command)
+        self.assertNotIn("--enable-spec-aug", command)
+
+    def test_asr_profiles_default_to_librispeech_recipe_args(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(zipformer_baseline.dataset_profile().name, "librispeech")
+            self.assertEqual(
+                zipformer_baseline.recipe_profile().name,
+                "librispeech_zipformer_large_cr_ctc_rnnt",
+            )
+            self.assertEqual(zipformer_baseline.parse_eval_splits(), ["test-clean", "test-other"])
+            self.assertIn("--full-libri", zipformer_baseline.large_cr_ctc_rnnt_train_args())
+            self.assertIn("--full-libri", zipformer_baseline.large_cr_ctc_rnnt_decode_args())
+
+    def test_asr_profiles_tedlium3_uses_dataset_splits_and_supported_recipe_args(self):
+        env = {
+            "SURE_ASR_DATASET": "tedlium3",
+            "SURE_ASR_RECIPE_PROFILE": "tedlium3_zipformer",
+            "SURE_ASR_EVAL_SPLITS": "dev,test",
+            "SURE_ICEFALL_PYTHON": "/python",
+        }
+        unsupported_librispeech_args = {
+            "--full-libri",
+            "--use-cr-ctc",
+            "--use-ctc",
+            "--use-transducer",
+            "--use-attention-decoder",
+            "--ctc-loss-scale",
+            "--cr-loss-scale",
+            "--time-mask-ratio",
+        }
+        supported_zipformer_args = {
+            "--num-encoder-layers",
+            "--feedforward-dim",
+            "--encoder-dim",
+            "--encoder-unmasked-dim",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(zipformer_baseline.dataset_profile().name, "tedlium3")
+            self.assertEqual(zipformer_baseline.recipe_profile().name, "tedlium3_zipformer")
+            self.assertEqual(zipformer_baseline.parse_eval_splits(), ["dev", "test"])
+            train_args = zipformer_baseline.large_cr_ctc_rnnt_train_args()
+            decode_args = zipformer_baseline.large_cr_ctc_rnnt_decode_args()
+            command = zipformer_baseline.build_decode_command(1, Path("decode.py"))
+
+        for arg in unsupported_librispeech_args:
+            self.assertNotIn(arg, train_args)
+            self.assertNotIn(arg, decode_args)
+            self.assertNotIn(arg, command)
+        for arg in supported_zipformer_args:
+            self.assertIn(arg, train_args)
+            self.assertIn(arg, decode_args)
+            self.assertIn(arg, command)
+        self.assertIn("--enable-spec-aug", train_args)
+        self.assertNotIn("--enable-spec-aug", decode_args)
+        self.assertEqual(
+            command[command.index("--bpe-model") + 1],
+            "data/lang_bpe_500/bpe.model",
+        )
+
+    def test_asr_profiles_reject_mismatched_recipe_dataset(self):
+        env = {
+            "SURE_ASR_DATASET": "tedlium3",
+            "SURE_ASR_RECIPE_PROFILE": "librispeech_zipformer_large_cr_ctc_rnnt",
+        }
+        with patch.dict(os.environ, env, clear=True), self.assertRaisesRegex(ValueError, "is for dataset"):
+            zipformer_baseline.recipe_profile()
+
+    def test_asr_profiles_validate_eval_splits_per_dataset(self):
+        tedlium3 = get_asr_dataset_profile("tedlium3")
+        self.assertEqual(parse_eval_splits_for_profile(None, tedlium3), ["dev"])
+        with self.assertRaisesRegex(ValueError, "Unsupported SURE_ASR_EVAL_SPLITS"):
+            parse_eval_splits_for_profile("dev-clean", tedlium3)
+
+    def test_asr_baseline_train_command_keeps_train_only_args(self):
+        env = {
+            "ASR_WORLD_SIZE": "8",
+            "SURE_ENABLE_MUSAN": "0",
+            "SURE_ICEFALL_PYTHON": "/python",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            command = zipformer_baseline.build_train_command(
+                train_epochs=1,
+                train_max_duration=300,
+                fp16="1",
+                attempt_index=1,
+            )
+
+        self.assertIn("--ctc-loss-scale", command)
+        self.assertIn("--cr-loss-scale", command)
+        self.assertIn("--time-mask-ratio", command)
+        self.assertIn("--enable-spec-aug", command)
+
+    def test_asr_baseline_averaged_model_requires_endpoint_checkpoints(self):
+        env = {
+            "SURE_BASELINE_EPOCH": "50",
+            "SURE_BASELINE_AVG": "26",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            paths = zipformer_baseline.required_decode_checkpoints(50)
+        self.assertEqual([path.name for path in paths], ["epoch-24.pt", "epoch-50.pt"])
+
+    def test_asr_baseline_reports_missing_averaged_start_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            models = Path(tmp) / "models"
+            models.mkdir()
+            (models / "epoch-50.pt").write_text("checkpoint", encoding="utf-8")
+            env = {
+                "SURE_BASELINE_EPOCH": "50",
+                "SURE_BASELINE_AVG": "26",
+            }
+            with patch.object(zipformer_baseline, "MODELS_DIR", models), patch.dict(
+                os.environ,
+                env,
+                clear=True,
+            ):
+                missing = zipformer_baseline.missing_decode_checkpoints(50)
+
+        self.assertEqual([path.name for path in missing], ["epoch-24.pt"])
+
+    def test_asr_baseline_pretrained_checkpoint_maps_to_target_epoch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "official_exp"
+            source.mkdir()
+            (source / "pretrained.pt").write_text("pretrained", encoding="utf-8")
+            (source / "epoch-50.pt").write_text("raw epoch", encoding="utf-8")
+            models = Path(tmp) / "workspace_models"
+            models.mkdir()
+            env = {
+                "SURE_BASELINE_CHECKPOINT_DIR": str(source),
+                "SURE_BASELINE_EPOCH": "50",
+                "SURE_BASELINE_AVG": "26",
+                "SURE_BASELINE_USE_PRETRAINED": "1",
+            }
+            with patch.object(zipformer_baseline, "MODELS_DIR", models), patch.dict(
+                os.environ,
+                env,
+                clear=True,
+            ):
+                zipformer_baseline.copy_checkpoint_source()
+                self.assertEqual(zipformer_baseline.decode_avg(50), 1)
+                self.assertFalse(zipformer_baseline.decode_uses_averaged_model(50))
+                missing = zipformer_baseline.missing_decode_checkpoints(50)
+                self.assertTrue((models / "epoch-50.pt").is_file())
+                self.assertEqual(
+                    (models / "epoch-50.pt").read_text(encoding="utf-8"),
+                    "pretrained",
+                )
+
+        self.assertEqual(missing, [])
+
+    def test_asr_baseline_decode_uses_official_package_bpe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "official_package"
+            source = package / "exp"
+            source.mkdir(parents=True)
+            lang_dir = package / "data" / "lang_bpe_500"
+            lang_dir.mkdir(parents=True)
+            official_bpe = lang_dir / "bpe.model"
+            official_bpe.write_text("official bpe", encoding="utf-8")
+            (source / "pretrained.pt").write_text("pretrained", encoding="utf-8")
+            (source / "epoch-50.pt").write_text("raw epoch", encoding="utf-8")
+            models = Path(tmp) / "workspace_models"
+            models.mkdir()
+            env = {
+                "SURE_BASELINE_CHECKPOINT_DIR": str(source),
+                "SURE_BASELINE_EPOCH": "50",
+                "SURE_BASELINE_USE_PRETRAINED": "1",
+                "SURE_ICEFALL_PYTHON": "/python",
+            }
+            with patch.object(zipformer_baseline, "MODELS_DIR", models), patch.dict(
+                os.environ,
+                env,
+                clear=True,
+            ):
+                command = zipformer_baseline.build_decode_command(50, Path("decode.py"))
+
+            bpe_arg = command[command.index("--bpe-model") + 1]
+            self.assertEqual(bpe_arg, str(official_bpe))
+
+    def test_zipformer_candidate_train_decode_uses_training_bpe_with_official_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            local_bpe = root / zipformer_baseline.DEFAULT_BPE_MODEL
+            local_bpe.parent.mkdir(parents=True)
+            local_bpe.write_bytes(b"local candidate bpe")
+            package = root / zipformer_baseline.OFFICIAL_MODEL_DIR_NAME
+            source = package / "exp"
+            source.mkdir(parents=True)
+            official_bpe = package / zipformer_baseline.OFFICIAL_LANG_BPE_MODEL
+            official_bpe.parent.mkdir(parents=True)
+            official_bpe.write_bytes(b"official checkpoint bpe")
+            env = {
+                "SURE_BASELINE_CHECKPOINT_DIR": str(source),
+                "SURE_ICEFALL_PYTHON": "/python",
+            }
+            cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                with patch.dict(os.environ, env, clear=True), patch.object(
+                    run_icefall_zipformer_candidate.baseline,
+                    "patched_decode_script",
+                    return_value=Path("decode.py"),
+                ):
+                    final_train_args = run_icefall_zipformer_candidate.merge_cli_args(
+                        zipformer_baseline.LARGE_CR_CTC_RNNT_ARGS,
+                        [],
+                    )
+                    train_bpe = run_icefall_zipformer_candidate.selected_train_bpe_model(
+                        final_train_args
+                    )
+                    decode_bpe = run_icefall_zipformer_candidate.selected_decode_bpe_model(
+                        action="train_decode",
+                        final_train_args=final_train_args,
+                    )
+                    run_icefall_zipformer_candidate.validate_train_decode_bpe_models(
+                        train_bpe,
+                        decode_bpe,
+                    )
+                    command = run_icefall_zipformer_candidate.decode_command(
+                        exp_dir=Path("models/candidate"),
+                        epoch=1,
+                        avg=1,
+                        use_averaged_model="0",
+                        decode_method="modified_beam_search",
+                        decode_max_duration=300,
+                        bpe_model=decode_bpe,
+                        final_decode_args=[],
+                    )
+            finally:
+                os.chdir(cwd)
+
+        bpe_arg = command[command.index("--bpe-model") + 1]
+        self.assertEqual(bpe_arg, str(zipformer_baseline.DEFAULT_BPE_MODEL))
+        self.assertNotEqual(bpe_arg, str(official_bpe))
+
+    def test_zipformer_candidate_train_decode_allows_matching_decode_bpe_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bpe_model = Path("data/lang_bpe_500/bpe.model")
+            resolved_bpe = root / bpe_model
+            resolved_bpe.parent.mkdir(parents=True)
+            resolved_bpe.write_bytes(b"candidate bpe")
+            cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                with patch.object(
+                    run_icefall_zipformer_candidate.baseline,
+                    "patched_decode_script",
+                    return_value=Path("decode.py"),
+                ):
+                    final_train_args = run_icefall_zipformer_candidate.merge_cli_args(
+                        zipformer_baseline.LARGE_CR_CTC_RNNT_ARGS,
+                        ["--bpe-model", str(bpe_model)],
+                    )
+                    final_decode_args = run_icefall_zipformer_candidate.merge_cli_args(
+                        zipformer_baseline.LARGE_CR_CTC_RNNT_DECODE_ARGS,
+                        [f"--bpe-model={bpe_model}", "--beam-size", "4"],
+                    )
+                    train_bpe = run_icefall_zipformer_candidate.selected_train_bpe_model(
+                        final_train_args
+                    )
+                    run_icefall_zipformer_candidate.validate_requested_decode_bpe_model(
+                        train_bpe_model=train_bpe,
+                        final_decode_args=final_decode_args,
+                    )
+                    decode_args = run_icefall_zipformer_candidate.remove_cli_arg(
+                        final_decode_args,
+                        "--bpe-model",
+                    )
+                    command = run_icefall_zipformer_candidate.decode_command(
+                        exp_dir=Path("models/candidate"),
+                        epoch=1,
+                        avg=1,
+                        use_averaged_model="0",
+                        decode_method="modified_beam_search",
+                        decode_max_duration=300,
+                        bpe_model=train_bpe,
+                        final_decode_args=decode_args,
+                    )
+            finally:
+                os.chdir(cwd)
+
+        self.assertEqual(command.count("--bpe-model"), 1)
+        self.assertEqual(command[command.index("--bpe-model") + 1], str(bpe_model))
+        self.assertIn("--beam-size", command)
+
+    def test_zipformer_candidate_train_decode_rejects_bpe_content_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_bpe = root / "data/lang_bpe_500/bpe.model"
+            train_bpe.parent.mkdir(parents=True)
+            train_bpe.write_bytes(b"training bpe")
+            decode_bpe = root / "official/data/lang_bpe_500/bpe.model"
+            decode_bpe.parent.mkdir(parents=True)
+            decode_bpe.write_bytes(b"different decode bpe")
+            cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                with self.assertRaises(RuntimeError) as ctx:
+                    run_icefall_zipformer_candidate.validate_requested_decode_bpe_model(
+                        train_bpe_model=Path("data/lang_bpe_500/bpe.model"),
+                        final_decode_args=["--bpe-model", str(decode_bpe)],
+                    )
+            finally:
+                os.chdir(cwd)
+
+        self.assertIn("BPE mismatch", str(ctx.exception))
+
+    def _zipformer_candidate_args_with_structure_sync(
+        self,
+        train_extra_args: list[str],
+        decode_extra_args: list[str],
+    ) -> tuple[list[str], list[str]]:
+        final_train_args = run_icefall_zipformer_candidate.merge_cli_args(
+            zipformer_baseline.large_cr_ctc_rnnt_train_args(),
+            train_extra_args,
+        )
+        final_decode_args = run_icefall_zipformer_candidate.merge_cli_args(
+            zipformer_baseline.large_cr_ctc_rnnt_decode_args(),
+            decode_extra_args,
+        )
+        final_decode_args = run_icefall_zipformer_candidate.force_decode_structure_from_train(
+            final_train_args=final_train_args,
+            final_decode_args=final_decode_args,
+            decode_extra_args=decode_extra_args,
+        )
+        return final_train_args, final_decode_args
+
+    def test_zipformer_candidate_train_decode_propagates_train_structure_to_decode(self):
+        _, final_decode_args = self._zipformer_candidate_args_with_structure_sync(
+            ["--num-encoder-layers", "2,2,3,4,3,2"],
+            ["--decoding-method", "modified_beam_search"],
+        )
+
+        selected_layers = run_icefall_zipformer_candidate.last_arg_value(
+            final_decode_args,
+            "--num-encoder-layers",
+        )
+        self.assertEqual(selected_layers, "2,2,3,4,3,2")
+        self.assertIn("--decoding-method", final_decode_args)
+
+    def test_zipformer_candidate_train_decode_allows_matching_decode_structure(self):
+        _, final_decode_args = self._zipformer_candidate_args_with_structure_sync(
+            ["--num-encoder-layers", "2,2,3,4,3,2"],
+            ["--num-encoder-layers", "2,2,3,4,3,2", "--beam-size", "4"],
+        )
+
+        selected_layers = run_icefall_zipformer_candidate.last_arg_value(
+            final_decode_args,
+            "--num-encoder-layers",
+        )
+        self.assertEqual(selected_layers, "2,2,3,4,3,2")
+        self.assertIn("--beam-size", final_decode_args)
+
+    def test_zipformer_candidate_train_decode_rejects_conflicting_decode_structure(self):
+        final_train_args = run_icefall_zipformer_candidate.merge_cli_args(
+            zipformer_baseline.LARGE_CR_CTC_RNNT_ARGS,
+            ["--num-encoder-layers", "2,2,3,4,3,2"],
+        )
+        final_decode_args = run_icefall_zipformer_candidate.merge_cli_args(
+            zipformer_baseline.LARGE_CR_CTC_RNNT_DECODE_ARGS,
+            ["--num-encoder-layers", "2,2,4,5,4,2"],
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            run_icefall_zipformer_candidate.force_decode_structure_from_train(
+                final_train_args=final_train_args,
+                final_decode_args=final_decode_args,
+                decode_extra_args=["--num-encoder-layers", "2,2,4,5,4,2"],
+            )
+
+        self.assertIn("--num-encoder-layers", str(ctx.exception))
+        self.assertIn("structure mismatch", str(ctx.exception))
+
+    def test_zipformer_candidate_train_decode_replays_exp16_structure_pattern(self):
+        final_train_args, final_decode_args = self._zipformer_candidate_args_with_structure_sync(
+            [
+                "--num-encoder-layers",
+                "2,2,3,4,3,2",
+                "--encoder-dim",
+                "192,256,512,768,512,256",
+                "--feedforward-dim",
+                "512,768,1536,2048,1536,768",
+                "--encoder-unmasked-dim",
+                "192,192,256,320,256,192",
+            ],
+            ["--decoding-method", "modified_beam_search"],
+        )
+
+        for option in run_icefall_zipformer_candidate.STRUCTURE_ARGS:
+            self.assertEqual(
+                run_icefall_zipformer_candidate.last_arg_value(final_decode_args, option),
+                run_icefall_zipformer_candidate.last_arg_value(final_train_args, option),
+            )
+
+    def test_zipformer_candidate_decode_only_keeps_decode_structure_independent(self):
+        final_decode_args = run_icefall_zipformer_candidate.merge_cli_args(
+            zipformer_baseline.LARGE_CR_CTC_RNNT_DECODE_ARGS,
+            ["--decoding-method", "modified_beam_search"],
+        )
+
+        self.assertEqual(
+            run_icefall_zipformer_candidate.last_arg_value(
+                final_decode_args,
+                "--num-encoder-layers",
+            ),
+            "2,2,4,5,4,2",
+        )
+
+    def test_zipformer_candidate_record_includes_bpe_fingerprints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bpe_model = Path("data/lang_bpe_500/bpe.model")
+            resolved_bpe = root / bpe_model
+            resolved_bpe.parent.mkdir(parents=True)
+            resolved_bpe.write_bytes(b"candidate bpe")
+            cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                expected_sha256 = run_icefall_zipformer_candidate.file_sha256(resolved_bpe)
+                run_icefall_zipformer_candidate.write_candidate_record(
+                    candidate_type=ARCH,
+                    idea_text="change encoder dim",
+                    changed_fields=[],
+                    final_train_args=["--encoder-dim", "192"],
+                    final_decode_args=["--beam-size", "4"],
+                    train_extra_args=["--encoder-dim", "192"],
+                    decode_extra_args=["--beam-size", "4"],
+                    exp_dir=Path("models/candidate"),
+                    trained_epoch=1,
+                    selected_duration=100,
+                    attempts=[],
+                    train_bpe_model=bpe_model,
+                    decode_bpe_model=bpe_model,
+                    elapsed_seconds=1.0,
+                )
+                payload = json.loads(
+                    (root / "artifacts/candidate_changes.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+            finally:
+                os.chdir(cwd)
+
+        self.assertEqual(payload["training_config"]["actual_bpe_model"], str(bpe_model))
+        self.assertEqual(payload["training_config"]["actual_bpe_sha256"], expected_sha256)
+        self.assertEqual(payload["inference_config"]["actual_bpe_model"], str(bpe_model))
+        self.assertEqual(payload["inference_config"]["actual_bpe_sha256"], expected_sha256)
+
+    def test_zipformer_staged_resume_config_sets_start_and_target_epochs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkpoint = root / "retained" / "epoch-1.pt"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_text("checkpoint", encoding="utf-8")
+            exp_dir = root / "models" / "candidate"
+            env = {
+                "SURE_STAGED_RESUME_ENABLED": "1",
+                "SURE_STAGED_RESUME_CHECKPOINT": str(checkpoint),
+                "SURE_STAGED_RESUME_EPOCH": "1",
+                "SURE_STAGED_TARGET_EPOCH": "2",
+                "SURE_STAGED_RESUME_SOURCE_RUNG": "short",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                config = run_icefall_zipformer_candidate.staged_resume_config(
+                    exp_dir,
+                    requested_train_epochs=1,
+                )
+
+            self.assertTrue(config["enabled"])
+            self.assertEqual(config["resume_epoch"], 1)
+            self.assertEqual(config["start_epoch"], 2)
+            self.assertEqual(config["target_epoch"], 2)
+            self.assertEqual(config["source_rung"], "short")
+            self.assertTrue((exp_dir / "epoch-1.pt").exists())
+
+    def test_zipformer_staged_resume_config_rejects_non_increasing_target_epoch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "epoch-2.pt"
+            checkpoint.write_text("checkpoint", encoding="utf-8")
+            env = {
+                "SURE_STAGED_RESUME_ENABLED": "1",
+                "SURE_STAGED_RESUME_CHECKPOINT": str(checkpoint),
+                "SURE_STAGED_RESUME_EPOCH": "2",
+                "SURE_STAGED_TARGET_EPOCH": "2",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                with self.assertRaises(RuntimeError) as ctx:
+                    run_icefall_zipformer_candidate.staged_resume_config(
+                        Path(tmp) / "models",
+                        requested_train_epochs=2,
+                    )
+
+        self.assertIn("must be greater", str(ctx.exception))
+
+    def test_zipformer_train_command_uses_staged_resume_start_epoch(self):
+        with patch.dict(os.environ, {"ASR_WORLD_SIZE": "8", "SURE_USE_FP16": "1"}, clear=True):
+            command = run_icefall_zipformer_candidate.train_command(
+                exp_dir=Path("models/candidate"),
+                train_epochs=2,
+                start_epoch=2,
+                train_duration=300,
+                final_train_args=["--encoder-dim", "192"],
+                attempt_index=1,
+            )
+
+        self.assertEqual(command[command.index("--num-epochs") + 1], "2")
+        self.assertEqual(command[command.index("--start-epoch") + 1], "2")
+
+    def test_zipformer_retry_restages_staged_resume_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "retained" / "epoch-1.pt"
+            source.parent.mkdir(parents=True)
+            source.write_text("checkpoint", encoding="utf-8")
+            exp_dir = root / "models"
+            exp_dir.mkdir()
+            staged_resume = {
+                "enabled": True,
+                "resume_checkpoint": str(source),
+                "local_checkpoint": str(exp_dir / "epoch-1.pt"),
+            }
+            calls = {"count": 0}
+
+            def fake_run_command(name, command, timeout):
+                calls["count"] += 1
+                log_path = root / f"{name}.log"
+                log_path.write_text("CUDA out of memory\n", encoding="utf-8")
+                if calls["count"] == 1:
+                    raise zipformer_baseline.CommandFailedError(command, 1, log_path)
+                return log_path
+
+            def fake_clean():
+                for item in exp_dir.iterdir():
+                    item.unlink()
+
+            with patch.object(run_icefall_zipformer_candidate, "selected_train_duration", return_value=300), patch.object(
+                zipformer_baseline,
+                "duration_retry_sequence",
+                return_value=[300, 200],
+            ), patch.object(zipformer_baseline, "clean_training_exp_dir_for_retry", side_effect=fake_clean), patch.object(
+                zipformer_baseline,
+                "run_command",
+                side_effect=fake_run_command,
+            ), patch.object(zipformer_baseline, "is_oom_failure", return_value=True), patch.object(
+                zipformer_baseline,
+                "parse_max_memory_mb",
+                return_value=None,
+            ), patch.dict(os.environ, {"SURE_BASELINE_TRAIN_TIMEOUT": "10"}, clear=True):
+                trained_epoch, selected_duration, attempts = run_icefall_zipformer_candidate.run_training(
+                    exp_dir=exp_dir,
+                    train_epochs=2,
+                    start_epoch=2,
+                    final_train_args=[],
+                    staged_resume=staged_resume,
+                )
+
+            self.assertEqual(trained_epoch, 2)
+            self.assertEqual(selected_duration, 200)
+            self.assertEqual(len(attempts), 2)
+            self.assertEqual((exp_dir / "epoch-1.pt").read_text(encoding="utf-8"), "checkpoint")
+
+    def test_asr_baseline_official_source_requires_matching_bpe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / zipformer_baseline.OFFICIAL_MODEL_DIR_NAME
+            source = package / "exp"
+            source.mkdir(parents=True)
+            (source / "pretrained.pt").write_text("pretrained", encoding="utf-8")
+            models = Path(tmp) / "workspace_models"
+            models.mkdir()
+            env = {
+                "SURE_BASELINE_CHECKPOINT_DIR": str(source),
+                "SURE_BASELINE_USE_PRETRAINED": "1",
+            }
+            with patch.object(zipformer_baseline, "MODELS_DIR", models), patch.dict(
+                os.environ,
+                env,
+                clear=True,
+            ):
+                with self.assertRaises(FileNotFoundError) as ctx:
+                    zipformer_baseline.validate_decode_bpe_model()
+
+        self.assertIn("matching data/lang_bpe_500/bpe.model", str(ctx.exception))
+
+    def test_asr_baseline_pretrained_replaces_epoch_symlink_without_touching_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "official_exp"
+            source.mkdir()
+            (source / "pretrained.pt").write_text("pretrained", encoding="utf-8")
+            raw_epoch = source / "epoch-50.pt"
+            raw_epoch.write_text("raw epoch", encoding="utf-8")
+            models = Path(tmp) / "workspace_models"
+            models.mkdir()
+            target = models / "epoch-50.pt"
+            target.symlink_to(raw_epoch)
+            env = {
+                "SURE_BASELINE_CHECKPOINT_DIR": str(source),
+                "SURE_BASELINE_EPOCH": "50",
+                "SURE_BASELINE_USE_PRETRAINED": "1",
+            }
+            with patch.object(zipformer_baseline, "MODELS_DIR", models), patch.dict(
+                os.environ,
+                env,
+                clear=True,
+            ):
+                zipformer_baseline.copy_checkpoint_source()
+
+            self.assertFalse(target.is_symlink())
+            self.assertEqual(target.read_text(encoding="utf-8"), "pretrained")
+            self.assertEqual(raw_epoch.read_text(encoding="utf-8"), "raw epoch")
+
+    def test_asr_configured_checkpoint_source_fails_fast_when_incomplete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "official_exp"
+            source.mkdir()
+            (source / "epoch-50.pt").write_text("checkpoint", encoding="utf-8")
+            models = Path(tmp) / "workspace_models"
+            models.mkdir()
+            env = {
+                "SURE_BASELINE_CHECKPOINT_DIR": str(source),
+                "SURE_BASELINE_EPOCH": "50",
+                "SURE_BASELINE_AVG": "26",
+            }
+            with patch.object(zipformer_baseline, "MODELS_DIR", models), patch.dict(
+                os.environ,
+                env,
+                clear=True,
+            ):
+                with self.assertRaises(FileNotFoundError) as ctx:
+                    zipformer_baseline.train_if_needed()
+
+        self.assertIn("epoch-24.pt", str(ctx.exception))
+
+    def test_asr_mixed_research_guidance_uses_split_training_labels(self):
+        task_card = SureTaskCard(
+            task_id="asr_en_wer",
+            canonical_task="asr",
+            task_alias="asr",
+            primary_metric="WER",
+        )
+        exp = ResearchExp(
+            research_agent=None,
+            config={
+                "sure": {
+                    "execution_mode": "mixed_local_vc",
+                    "remote_training": {"enabled": True},
+                }
+            },
+            initial_code="",
+            exp_name="exp_0_research",
+            task_card=task_card,
+        )
+        guidance = exp._candidate_type_guidance_text()
+        self.assertIn("ASR", guidance)
+        self.assertIn("Produce exactly 4", guidance)
+        self.assertIn("2 `[fine_tune]` ideas", guidance)
+        self.assertIn("2 `[arch]` ideas", guidance)
+        self.assertIn("Zipformer", guidance)
+        self.assertIn("VC child jobs", guidance)
+
+    def test_mixed_remote_training_vc_command_uses_a10_template(self):
+        config = {
+            "sure": {
+                "execution_mode": "mixed_local_vc",
+                "task_id": "tts_en_wer",
+                "remote_training": {
+                    "enabled": True,
+                    "image": "docker.v2.aispeech.com/sjtu/sjtu_yukai-chaolei-suremaster_f5tts:v1.3",
+                    "partition": "pdgpu-a10",
+                    "qos": "30m",
+                    "num_task": 1,
+                    "gpu_per_task": 8,
+                    "cpu_per_task": 64,
+                    "mem_per_task": "256G",
+                    "volumes": ["/host:/host"],
+                    "workdir": "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster",
+                    "sync": True,
+                    "debug": True,
+                },
+            }
+        }
+        self.assertTrue(mixed_execution_enabled(config, task_id="tts_en_wer"))
+        executor = VcRemoteTrainingExecutor(config, config_path=Path(__file__))
+        command = executor._build_vc_command(
+            workspace=Path("/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/workspace_f5tts_mixed/exp_1"),
+            result_path=Path("/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/workspace_f5tts_mixed/exp_1/metric/remote_training_result.json"),
+            exp_name="exp_1_improve",
+            execution_timeout=21600,
+        )
+        command_text = " ".join(shlex.quote(part) for part in command)
+        self.assertIn("--gpu-per-task 8", command_text)
+        self.assertIn("--cpu-per-task 64", command_text)
+        self.assertIn("--mem-per-task 256G", command_text)
+        self.assertIn("ASR_WORLD_SIZE", command_text)
+        self.assertIn("SURE_BASELINE_WORLD_SIZE", command_text)
+        self.assertIn("run_vc_sure_candidate.py", command_text)
+
+    def test_remote_training_zero_submit_timeout_means_unlimited(self):
+        config = {
+            "sure": {
+                "remote_training": {
+                    "enabled": True,
+                    "image": "image:test",
+                    "partition": "pdgpu-a10",
+                    "submit_timeout": 0,
+                }
+            }
+        }
+        executor = VcRemoteTrainingExecutor(config, config_path=Path(__file__))
+
+        self.assertIsNone(executor._submit_timeout(0))
+        self.assertIsNone(executor._submit_timeout(21600))
+
+    def test_remote_training_missing_submit_timeout_keeps_finite_default(self):
+        config = {
+            "sure": {
+                "remote_training": {
+                    "enabled": True,
+                    "image": "image:test",
+                    "partition": "pdgpu-a10",
+                }
+            }
+        }
+        executor = VcRemoteTrainingExecutor(config, config_path=Path(__file__))
+
+        self.assertEqual(executor._submit_timeout(0), 88200)
+        self.assertEqual(executor._submit_timeout(21600), 23400)
+
+    def test_remote_training_vc_command_preserves_zero_execution_timeout(self):
+        config = {
+            "sure": {
+                "remote_training": {
+                    "enabled": True,
+                    "image": "image:test",
+                    "partition": "pdgpu-a10",
+                    "workdir": "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster",
+                }
+            }
+        }
+        executor = VcRemoteTrainingExecutor(config, config_path=Path(__file__))
+        workspace = Path(
+            "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/runs/demo/workspaces/task_0/exp_1"
+        )
+        command = executor._build_vc_command(
+            workspace=workspace,
+            result_path=workspace / "metric" / "remote_training_result.json",
+            exp_name="exp_1_draft",
+            execution_timeout=0,
+        )
+
+        self.assertIn("--timeout 0", " ".join(command))
+
+    def test_remote_training_vc_command_allows_env_resource_overrides(self):
+        config = {
+            "sure": {
+                "execution_mode": "mixed_local_vc",
+                "task_id": "asr_en_wer",
+                "remote_training": {
+                    "enabled": True,
+                    "image": "docker.v2.aispeech.com/sjtu/sjtu_yukai-chaolei-suremaster_icefall:v1.0",
+                    "partition": "pdgpu-a10",
+                    "qos": "30m",
+                    "num_task": 1,
+                    "gpu_per_task": 8,
+                    "cpu_per_task": 64,
+                    "mem_per_task": "256G",
+                    "max_parallel": 1,
+                    "volumes": ["/host:/host"],
+                    "workdir": "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster",
+                    "sync": True,
+                    "debug": True,
+                },
+            }
+        }
+        env = {
+            "SURE_REMOTE_PARTITION": "pdgpu-4090",
+            "SURE_REMOTE_GPU_PER_TASK": "4",
+            "SURE_REMOTE_CPU_PER_TASK": "32",
+            "SURE_REMOTE_MEM_PER_TASK": "128G",
+            "SURE_REMOTE_MAX_PARALLEL": "2",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            self.assertTrue(mixed_execution_enabled(config, task_id="asr_en_wer"))
+            self.assertEqual(remote_training_max_parallel(config), 2)
+            executor = VcRemoteTrainingExecutor(config, config_path=Path(__file__))
+            command = executor._build_vc_command(
+                workspace=Path("/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/workspace_icefall/exp_1"),
+                result_path=Path("/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/workspace_icefall/exp_1/metric/remote_training_result.json"),
+                exp_name="exp_1_improve",
+                execution_timeout=21600,
+            )
+
+        command_text = " ".join(shlex.quote(part) for part in command)
+        self.assertIn("--partition pdgpu-4090", command_text)
+        self.assertIn("--gpu-per-task 4", command_text)
+        self.assertIn("--cpu-per-task 32", command_text)
+        self.assertIn("--mem-per-task 128G", command_text)
+
+    def test_remote_candidate_types_default_to_training_like_only(self):
+        config = {
+            "sure": {
+                "execution_mode": "mixed_local_vc",
+                "remote_training": {"enabled": True},
+            }
+        }
+        self.assertEqual(remote_candidate_types_from(config), {FINE_TUNE, ARCH})
+        self.assertTrue(candidate_runs_remotely(config, FINE_TUNE))
+        self.assertTrue(candidate_runs_remotely(config, ARCH))
+        self.assertTrue(candidate_runs_remotely(config, TRAINING))
+        self.assertFalse(candidate_runs_remotely(config, INFERENCE))
+
+    def test_remote_draft_enabled_does_not_remote_inference_candidates(self):
+        config = {
+            "sure": {
+                "execution_mode": "mixed_local_vc",
+                "remote_training": {"enabled": True, "draft_enabled": True},
+            }
+        }
+        self.assertEqual(remote_candidate_types_from(config), {FINE_TUNE, ARCH})
+        self.assertFalse(candidate_runs_remotely(config, INFERENCE))
+        self.assertTrue(draft_runs_remotely(config))
+
+    def test_draft_runs_remotely_requires_remote_training_and_draft_flag(self):
+        disabled = {"sure": {"remote_training": {"enabled": False, "draft_enabled": True}}}
+        enabled_without_draft = {"sure": {"remote_training": {"enabled": True}}}
+        enabled_with_draft = {"sure": {"remote_training": {"enabled": True, "draft_enabled": True}}}
+        enabled_with_legacy_name = {
+            "sure": {"remote_training": {"enabled": True, "draft_training_enabled": "yes"}}
+        }
+        self.assertFalse(draft_runs_remotely(disabled))
+        self.assertFalse(draft_runs_remotely(enabled_without_draft))
+        self.assertTrue(draft_runs_remotely(enabled_with_draft))
+        self.assertTrue(draft_runs_remotely(enabled_with_legacy_name))
+
+    def test_draft_runs_remotely_supports_env_override(self):
+        config = {"sure": {"remote_training": {"enabled": True}}}
+        with patch.dict(os.environ, {"SURE_REMOTE_DRAFT_ENABLED": "1"}, clear=False):
+            self.assertTrue(draft_runs_remotely(config))
+
+    def test_draft_candidate_type_hint_uses_fine_tune_only_when_draft_remote_enabled(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.config = {"sure": {"remote_training": {"enabled": True}}}
+        self.assertEqual(playground._draft_candidate_type_hint(), INFERENCE)
+
+        playground.config = {"sure": {"remote_training": {"enabled": True, "draft_enabled": True}}}
+        self.assertEqual(playground._draft_candidate_type_hint(), FINE_TUNE)
+
+    def test_remote_candidate_types_can_include_inference(self):
+        config = {
+            "sure": {
+                "execution_mode": "mixed_local_vc",
+                "remote_training": {
+                    "enabled": True,
+                    "candidate_types": ["inference", "training"],
+                    "max_parallel": 4,
+                },
+            },
+            "session": {
+                "local": {
+                    "parallel": {
+                        "enabled": True,
+                        "max_parallel": 4,
+                    }
+                }
+            },
+        }
+        self.assertEqual(remote_candidate_types_from(config), {INFERENCE, FINE_TUNE, ARCH})
+        self.assertTrue(candidate_runs_remotely(config, INFERENCE))
+        self.assertTrue(candidate_runs_remotely(config, FINE_TUNE))
+        self.assertTrue(candidate_runs_remotely(config, ARCH))
+        self.assertTrue(candidate_runs_remotely(config, TRAINING))
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.config = config
+        playground.task_card = SureTaskCard(
+            task_id="tts_en_wer",
+            canonical_task="tts",
+            task_alias="tts",
+            primary_metric="tts_wer",
+        )
+        self.assertEqual(playground._idea_max_workers(config["session"]["local"]["parallel"]), 4)
+
+    def test_mixed_candidate_limits_default_to_four_two_two(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.config = {
+            "sure": {
+                "execution_mode": "mixed_local_vc",
+                "remote_training": {"enabled": True},
+            }
+        }
+        playground.task_card = SureTaskCard(
+            task_id="tts_en_wer",
+            canonical_task="tts",
+            task_alias="tts",
+            primary_metric="tts_wer",
+        )
+        self.assertEqual(
+            playground._candidate_limits(),
+            {INFERENCE: 4, FINE_TUNE: 2, ARCH: 2},
+        )
+
+    def test_staged_axes_config_merges_selection_inputs_and_env(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.sure_config = {
+            "search_strategy": "staged_axes",
+            "inputs": {"ref": "/search/ref.txt"},
+            "execution_env": {"SURE_RUN_TIMEOUT": "10"},
+            "staged_axes": {
+                "selection": {
+                    "inputs": {"ref": "/selection/ref.txt"},
+                    "execution_env": {"SURE_ASR_EVAL_SPLITS": "dev-clean"},
+                    "base_model_source_paths": {"eval_data": "/selection/prompts"},
+                }
+            },
+        }
+        playground.task_card = SureTaskCard(
+            task_id="asr_en_wer",
+            canonical_task="asr",
+            task_alias="asr",
+            primary_metric="WER",
+            artifact_contract={"ref": "input/ref.txt", "hyp": "artifacts/hyp.txt"},
+        )
+
+        self.assertTrue(playground._staged_axes_enabled())
+        self.assertEqual(playground._staged_role_paths("selection")["ref"], "/selection/ref.txt")
+        env = playground._staged_execution_env(phase="selection", stage_name="stage_selection")
+        self.assertEqual(env["SURE_RUN_TIMEOUT"], "10")
+        self.assertEqual(env["SURE_ASR_EVAL_SPLITS"], "dev-clean")
+        self.assertEqual(env["SURE_STAGED_PHASE"], "selection")
+        self.assertEqual(env["SURE_STAGED_STAGE"], "stage_selection")
+        self.assertEqual(
+            playground._staged_base_model_overrides("selection"),
+            {"eval_data": "/selection/prompts"},
+        )
+
+    def test_staged_pretrained_draft_disables_duration_autotune(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.sure_config = {
+            "execution_env": {
+                "SURE_MAX_DURATION": "auto",
+                "SURE_DURATION_AUTOTUNE": "1",
+                "SURE_BASELINE_USE_PRETRAINED": "1",
+                "SURE_BASELINE_DECODE_MAX_DURATION": "300",
+            },
+            "staged_axes": {
+                "draft": {
+                    "execution_env": {
+                        "SURE_ASR_EVAL_SPLITS": "dev-clean,dev-other",
+                    }
+                }
+            },
+        }
+
+        with patch.dict(os.environ, {}, clear=True):
+            env = playground._staged_draft_execution_env()
+
+        self.assertEqual(env["SURE_STAGED_PHASE"], "draft")
+        self.assertEqual(env["SURE_STAGED_STAGE"], "stage0_draft")
+        self.assertEqual(env["SURE_MAX_DURATION"], "300")
+        self.assertEqual(env["SURE_DURATION_AUTOTUNE"], "0")
+        self.assertEqual(env["SURE_ASR_EVAL_SPLITS"], "dev-clean,dev-other")
+
+    def test_tedlium3_staged_config_removes_only_draft_in_job_deadlines(self):
+        config_path = (
+            Path(__file__).resolve().parents[4]
+            / "configs"
+            / "sure_master"
+            / "gpt-5-icefall-tedlium3-staged-axes-mixed.yaml"
+        )
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        sure_config = config["sure"]
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.sure_config = sure_config
+
+        with patch.dict(os.environ, {}, clear=True):
+            draft_env = playground._staged_draft_execution_env()
+
+        self.assertEqual(draft_env["SURE_BASELINE_TRAIN_TIMEOUT"], "0")
+        self.assertEqual(draft_env["SURE_RUN_TIMEOUT"], "0")
+        self.assertEqual(sure_config["execution_env"]["SURE_RUN_TIMEOUT"], "259200")
+        self.assertEqual(
+            sure_config["execution_env"]["SURE_BASELINE_TRAIN_TIMEOUT"],
+            "259200",
+        )
+        self.assertEqual(
+            sure_config["staged_axes"]["axes"]["arch"]["rungs"][0][
+                "execution_env"
+            ]["SURE_RUN_TIMEOUT"],
+            "259200",
+        )
+        self.assertEqual(sure_config["remote_training"]["submit_timeout"], 0)
+
+    def test_mixed_local_icefall_python_does_not_override_remote_config(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.sure_config = {
+            "execution_env": {
+                "SURE_ICEFALL_PYTHON": "/opt/conda/envs/icefall/bin/python",
+                "SURE_MAX_DURATION": "300",
+            }
+        }
+
+        with patch.dict(
+            os.environ,
+            {
+                "SURE_ICEFALL_PYTHON": "/hpc_stor03/local/anaconda3/envs/icefall/bin/python",
+                "SURE_LOCAL_ICEFALL_PYTHON": "/hpc_stor03/local/anaconda3/envs/icefall/bin/python",
+            },
+            clear=True,
+        ):
+            env = playground._execution_env()
+
+        self.assertEqual(env["SURE_ICEFALL_PYTHON"], "/opt/conda/envs/icefall/bin/python")
+        self.assertEqual(
+            env["SURE_LOCAL_ICEFALL_PYTHON"],
+            "/hpc_stor03/local/anaconda3/envs/icefall/bin/python",
+        )
+
+    def test_remote_icefall_python_override_uses_remote_specific_env(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.sure_config = {
+            "execution_env": {
+                "SURE_ICEFALL_PYTHON": "/opt/conda/envs/icefall/bin/python",
+            }
+        }
+
+        with patch.dict(
+            os.environ,
+            {"SURE_REMOTE_ICEFALL_PYTHON": "/custom/container/icefall/bin/python"},
+            clear=True,
+        ):
+            env = playground._execution_env()
+
+        self.assertEqual(env["SURE_ICEFALL_PYTHON"], "/custom/container/icefall/bin/python")
+
+    def test_staged_axis_request_and_idea_extraction(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.sure_config = {"staged_axes": {"ideas_per_round": 4}}
+
+        request = playground._axis_research_request("arch")
+        self.assertIn("exactly 4 arch ideas", request)
+        self.assertIn('"arch"', request)
+        self.assertIn("[arch]", request)
+
+        train_plan = {
+            "fine_tune": {
+                "1": "[fine_tune] use a shorter warmup",
+                "2": "[fine_tune] use a smaller learning rate",
+            }
+        }
+        ideas = playground._extract_axis_ideas(train_plan, "train", round_index=2)
+        self.assertEqual(len(ideas), 2)
+        self.assertEqual(ideas[0]["idea_id"], "train_r2_1")
+        self.assertEqual(ideas[0]["candidate_type"], FINE_TUNE)
+        self.assertIn("warmup", ideas[0]["idea"])
+
+    def test_staged_records_max_workers_respects_candidate_location(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.sure_config = {
+            "execution_mode": "mixed_local_vc",
+            "remote_training": {
+                "enabled": True,
+                "candidate_types": ["training"],
+                "max_parallel": 4,
+            },
+        }
+        playground.config = {
+            "sure": playground.sure_config,
+            "session": {"local": {"parallel": {"max_parallel": 2}}},
+        }
+        playground.task_card = SureTaskCard(
+            task_id="tts_en_wer",
+            canonical_task="tts",
+            task_alias="tts",
+            primary_metric="tts_wer",
+        )
+
+        arch_records = [{"candidate_type": ARCH} for _ in range(8)]
+        inference_records = [{"candidate_type": INFERENCE} for _ in range(8)]
+        mixed_records = [{"candidate_type": ARCH} for _ in range(5)] + [
+            {"candidate_type": INFERENCE} for _ in range(5)
+        ]
+
+        self.assertEqual(playground._staged_records_max_workers(arch_records), 4)
+        self.assertEqual(playground._staged_records_max_workers(inference_records), 2)
+        self.assertEqual(playground._staged_records_max_workers(mixed_records), 6)
+
+    def test_staged_record_ranking_respects_metric_direction(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.task_card = SureTaskCard(
+            task_id="asr_en_wer",
+            canonical_task="asr",
+            task_alias="asr",
+            primary_metric="WER",
+            metric_direction="lower",
+        )
+        records = [
+            {"success": True, "score": 2.0, "idea_id": "bad"},
+            {"success": True, "score": 1.0, "idea_id": "good"},
+            {"success": False, "score": 0.1, "idea_id": "failed"},
+        ]
+        self.assertEqual(playground._rank_staged_records(records)[0]["idea_id"], "good")
+
+        playground.task_card = SureTaskCard(
+            task_id="kws_accuracy",
+            canonical_task="kws",
+            task_alias="kws",
+            primary_metric="accuracy",
+            metric_direction="higher",
+        )
+        self.assertEqual(playground._rank_staged_records(records)[0]["idea_id"], "bad")
+
+    def test_staged_system_failure_can_fallback_to_previous_rung(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.sure_config = {
+            "staged_axes": {
+                "failure_policy": "fallback_previous_rung_on_system_failure",
+            }
+        }
+        previous = [{"success": True, "score": 0.1, "idea_id": "short_best"}]
+        evaluated = [
+            {
+                "success": False,
+                "reason_code": "remote_result_missing",
+                "failure_category": "system_failure",
+            }
+        ]
+        self.assertTrue(
+            playground._should_fallback_to_previous_rung(
+                evaluated=evaluated,
+                previous_ranked=previous,
+            )
+        )
+        evaluated[0]["failure_category"] = "candidate_failure"
+        self.assertFalse(
+            playground._should_fallback_to_previous_rung(
+                evaluated=evaluated,
+                previous_ranked=previous,
+            )
+        )
+
+    def test_staged_continue_policy_falls_back_to_previous_rung_on_system_failures(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.sure_config = {
+            "staged_axes": {
+                "failure_policy": "continue_on_system_failure",
+            }
+        }
+        previous = [{"success": True, "score": 0.1, "idea_id": "short_best"}]
+        evaluated = [
+            {
+                "success": False,
+                "reason_code": "remote_submit_timeout",
+                "failure_category": "system_failure",
+            }
+        ]
+        self.assertTrue(
+            playground._should_fallback_to_previous_rung(
+                evaluated=evaluated,
+                previous_ranked=previous,
+            )
+        )
+
+    def test_staged_final_candidate_failure_can_fallback_when_configured(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.sure_config = {
+            "staged_axes": {
+                "final_rung_candidate_failure_fallback": "previous_rung",
+            }
+        }
+        previous = [{"success": True, "score": 0.1, "idea_id": "medium_best"}]
+        evaluated = [
+            {
+                "success": False,
+                "reason_code": "duration_autotune_failed",
+                "failure_category": "candidate_failure",
+            }
+        ]
+        self.assertTrue(
+            playground._should_fallback_final_candidate_failure(
+                rung={"name": "final"},
+                previous_ranked=previous,
+                evaluated=evaluated,
+            )
+        )
+        self.assertFalse(
+            playground._should_fallback_final_candidate_failure(
+                rung={"name": "medium"},
+                previous_ranked=previous,
+                evaluated=evaluated,
+            )
+        )
+
+    def test_staged_axis_recovers_late_remote_records_before_ranking(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.sure_config = {
+            "staged_axes": {
+                "late_result_recovery": {"enabled": True},
+            }
+        }
+        playground.logger = SimpleNamespace(debug=lambda *args, **kwargs: None)
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            result_path = workspace / "metric" / "remote_training_result.json"
+            result_path.parent.mkdir(parents=True)
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "success": True,
+                        "score": 0.789,
+                        "code": "print('recovered')",
+                        "details": {"reason_code": "success"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            records = [
+                {
+                    "success": False,
+                    "reason_code": "remote_submit_timeout",
+                    "failure_category": "system_failure",
+                    "workspace": str(workspace),
+                    "code": "print('old')",
+                }
+            ]
+            recovered = playground._recover_late_remote_records(records)
+
+        self.assertTrue(recovered[0]["success"])
+        self.assertEqual(recovered[0]["score"], 0.789)
+        self.assertEqual(recovered[0]["code"], "print('recovered')")
+        self.assertTrue(recovered[0]["recovered_late_remote_result"])
+        self.assertEqual(recovered[0]["original_reason_code"], "remote_submit_timeout")
+
+    def test_staged_checkpoint_extraction_and_promotion(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.logger = SimpleNamespace(warning=lambda *args, **kwargs: None, debug=lambda *args, **kwargs: None)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            staged_dir = root / "staged_axes"
+            source = root / "exp" / "models" / "epoch-1.pt"
+            source.parent.mkdir(parents=True)
+            source.write_text("checkpoint", encoding="utf-8")
+            playground._staged_output_dir = lambda: staged_dir
+            record = {
+                "success": True,
+                "idea_id": "arch/r1:1",
+                "candidate_type": ARCH,
+                "workspace": str(root / "exp"),
+                "details": {
+                    "nested": {
+                        "produced_artifacts": {
+                            "candidate_checkpoint": str(source),
+                            "checkpoint_dir": str(source.parent),
+                        }
+                    }
+                },
+            }
+
+            promoted = playground._staged_promote_checkpoints(
+                [record],
+                axis="arch",
+                rung={"name": "short"},
+            )
+
+            metadata = promoted[0]["staged_checkpoint"]
+            retained = Path(metadata["path"])
+            self.assertEqual(metadata["epoch"], 1)
+            self.assertEqual(metadata["rung"], "short")
+            self.assertTrue(retained.is_file())
+            self.assertEqual(retained.read_text(encoding="utf-8"), "checkpoint")
+            self.assertIn("checkpoints/arch/arch_r1_1/short/epoch-1.pt", str(retained))
+
+    def test_staged_checkpoint_extraction_falls_back_to_candidate_changes(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.logger = SimpleNamespace(debug=lambda *args, **kwargs: None)
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            checkpoint = workspace / "models" / "epoch-2.pt"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_text("checkpoint", encoding="utf-8")
+            changes_path = workspace / "artifacts" / "candidate_changes.json"
+            changes_path.parent.mkdir(parents=True)
+            changes_path.write_text(
+                json.dumps(
+                    {
+                        "produced_artifacts": {
+                            "candidate_checkpoint": str(checkpoint),
+                            "checkpoint_dir": str(checkpoint.parent),
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            extracted = playground._staged_extract_checkpoint({"workspace": str(workspace)})
+
+        self.assertIsNotNone(extracted)
+        self.assertEqual(extracted["path"], str(checkpoint))
+        self.assertEqual(extracted["epoch"], 2)
+
+    def test_staged_resume_env_uses_previous_rung_checkpoint_for_training_axes(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.logger = SimpleNamespace(warning=lambda *args, **kwargs: None)
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "staged_axes" / "checkpoints" / "arch" / "idea" / "short" / "epoch-1.pt"
+            checkpoint.parent.mkdir(parents=True)
+            checkpoint.write_text("checkpoint", encoding="utf-8")
+            previous = {
+                "idea_id": "arch_r1_1",
+                "candidate_type": ARCH,
+                "staged_checkpoint": {
+                    "path": str(checkpoint),
+                    "epoch": 1,
+                    "rung": "short",
+                },
+            }
+
+            env = playground._staged_resume_env(
+                previous,
+                axis="arch",
+                current_rung={
+                    "name": "medium",
+                    "execution_env": {"SURE_STAGED_TARGET_EPOCH": "2"},
+                },
+            )
+
+        self.assertEqual(env["SURE_STAGED_RESUME_ENABLED"], "1")
+        self.assertEqual(env["SURE_STAGED_RESUME_CHECKPOINT"], str(checkpoint))
+        self.assertEqual(env["SURE_STAGED_RESUME_EPOCH"], "1")
+        self.assertEqual(env["SURE_STAGED_RESUME_SOURCE_RUNG"], "short")
+        self.assertEqual(env["SURE_STAGED_TARGET_EPOCH"], "2")
+
+    def test_staged_resume_env_uses_medium_checkpoint_for_final_rung(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.logger = SimpleNamespace(warning=lambda *args, **kwargs: None)
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "epoch-2.pt"
+            checkpoint.write_text("checkpoint", encoding="utf-8")
+            previous = {
+                "idea_id": "train_r2_1",
+                "candidate_type": FINE_TUNE,
+                "staged_checkpoint": {"path": str(checkpoint), "epoch": 2, "rung": "medium"},
+            }
+            env = playground._staged_resume_env(
+                previous,
+                axis="train",
+                current_rung={
+                    "name": "final",
+                    "execution_env": {"SURE_STAGED_TARGET_EPOCH": "3"},
+                },
+            )
+
+        self.assertEqual(env["SURE_STAGED_RESUME_EPOCH"], "2")
+        self.assertEqual(env["SURE_STAGED_RESUME_SOURCE_RUNG"], "medium")
+        self.assertEqual(env["SURE_STAGED_TARGET_EPOCH"], "3")
+
+    def test_staged_resume_env_skips_inference_axis(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        record = {
+            "candidate_type": INFERENCE,
+            "staged_checkpoint": {"path": "/tmp/epoch-1.pt", "epoch": 1, "rung": "short"},
+        }
+        self.assertEqual(
+            playground._staged_resume_env(
+                record,
+                axis="inference",
+                current_rung={"name": "medium", "execution_env": {"SURE_STAGED_TARGET_EPOCH": "2"}},
+            ),
+            {},
+        )
+
+    def test_combination_candidate_type_respects_neutral_fallback_axes(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        baseline_code = "print('baseline')"
+        neutral_arch = {"is_axis_fallback": True}
+        neutral_train = {"is_axis_fallback": True}
+        real_train = {"is_axis_fallback": False}
+        real_inference = {"is_axis_fallback": False}
+
+        self.assertEqual(
+            playground._combination_candidate_type(
+                neutral_arch,
+                real_train,
+                real_inference,
+                baseline_code,
+            ),
+            FINE_TUNE,
+        )
+        self.assertEqual(
+            playground._combination_candidate_type(
+                neutral_arch,
+                neutral_train,
+                real_inference,
+                baseline_code,
+            ),
+            INFERENCE,
+        )
+
+    def test_parse_vc_info_partitions_extracts_free_gpu(self):
+        output = """
+-----------------------------------------------------------------------------------------
+Partition          | gpu(allocated/total) | cpu(allocated/total) | mem(allocated/total)
+-----------------------------------------------------------------------------------------
+pdgpu-3090         | 112/112              | 696/1080             | 3208Gi/6930.0Gi
+pdgpu-4090         | 56/64                | 448/752              | 1792Gi/3452.0Gi
+pdgpu-a10          | 184/184              | 1152/1748            | 3648Gi/11385.0Gi
+"""
+        snapshot = parse_vc_info_partitions(output)
+        self.assertEqual(snapshot["pdgpu-3090"]["free_gpu"], 0)
+        self.assertEqual(snapshot["pdgpu-4090"]["free_gpu"], 8)
+        self.assertEqual(snapshot["pdgpu-a10"]["total_gpu"], 184)
+
+    def test_remote_training_selects_partition_with_most_free_gpu(self):
+        config = {
+            "sure": {
+                "execution_mode": "mixed_local_vc",
+                "task_id": "tts_en_wer",
+                "remote_training": {
+                    "enabled": True,
+                    "image": "docker.v2.aispeech.com/sjtu/sjtu_yukai-chaolei-suremaster_f5tts:v1.3",
+                    "partition": "pdgpu-a10",
+                    "qos": "30m",
+                    "num_task": 1,
+                    "gpu_per_task": 8,
+                    "cpu_per_task": 64,
+                    "mem_per_task": "256G",
+                    "volumes": ["/host:/host"],
+                    "workdir": "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster",
+                    "sync": True,
+                    "debug": True,
+                },
+            }
+        }
+        vc_info_output = """
+Partition          | gpu(allocated/total) | cpu(allocated/total) | mem(allocated/total)
+pdgpu-3090         | 112/112              | 696/1080             | 3208Gi/6930.0Gi
+pdgpu-4090         | 56/64                | 448/752              | 1792Gi/3452.0Gi
+pdgpu-a10          | 184/184              | 1152/1748            | 3648Gi/11385.0Gi
+"""
+        env = {
+            "SURE_REMOTE_PARTITION": "",
+            "SURE_REMOTE_PARTITIONS": "pdgpu-3090,pdgpu-4090,pdgpu-a10",
+            "SURE_REMOTE_PARTITION_POLICY": "most_free_gpu",
+            "SURE_REMOTE_GPU_PER_TASK": "8",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "playground.sure_master.core.utils.vc_remote.subprocess.run",
+            return_value=subprocess.CompletedProcess(["vc", "info"], 0, stdout=vc_info_output),
+        ):
+            executor = VcRemoteTrainingExecutor(config, config_path=Path(__file__))
+            command = executor._build_vc_command(
+                workspace=Path("/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/workspace_f5tts_mixed/exp_1"),
+                result_path=Path("/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/workspace_f5tts_mixed/exp_1/metric/remote_training_result.json"),
+                exp_name="exp_1_improve",
+                execution_timeout=21600,
+            )
+
+        command_text = " ".join(shlex.quote(part) for part in command)
+        self.assertIn("--partition pdgpu-4090", command_text)
+        self.assertFalse(executor.last_partition_selection["fallback_used"])
+        self.assertEqual(executor.last_partition_selection["selected_partition"], "pdgpu-4090")
+        self.assertEqual(
+            executor.last_partition_selection["partition_snapshot"]["pdgpu-4090"]["free_gpu"],
+            8,
+        )
+
+    def test_remote_training_partition_probe_failure_falls_back_to_first_candidate(self):
+        config = {
+            "sure": {
+                "execution_mode": "mixed_local_vc",
+                "task_id": "tts_en_wer",
+                "remote_training": {
+                    "enabled": True,
+                    "image": "docker.v2.aispeech.com/sjtu/sjtu_yukai-chaolei-suremaster_f5tts:v1.3",
+                    "partition": "pdgpu-a10",
+                    "gpu_per_task": 8,
+                    "workdir": "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster",
+                },
+            }
+        }
+        env = {
+            "SURE_REMOTE_PARTITION": "",
+            "SURE_REMOTE_PARTITIONS": "pdgpu-3090,pdgpu-4090,pdgpu-a10",
+            "SURE_REMOTE_PARTITION_POLICY": "most_free_gpu",
+            "SURE_REMOTE_PARTITION_FALLBACK": "queue_first",
+            "SURE_REMOTE_GPU_PER_TASK": "8",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "playground.sure_master.core.utils.vc_remote.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                ["vc", "info"],
+                1,
+                stdout="PermissionError: [Errno 1] Operation not permitted",
+            ),
+        ):
+            executor = VcRemoteTrainingExecutor(config, config_path=Path(__file__))
+            command = executor._build_vc_command(
+                workspace=Path("/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/workspace_f5tts_mixed/exp_1"),
+                result_path=Path("/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/workspace_f5tts_mixed/exp_1/metric/remote_training_result.json"),
+                exp_name="exp_1_improve",
+                execution_timeout=21600,
+            )
+
+        command_text = " ".join(shlex.quote(part) for part in command)
+        self.assertIn("--partition pdgpu-3090", command_text)
+        self.assertTrue(executor.last_partition_selection["fallback_used"])
+        self.assertIn("vc info exited non-zero", executor.last_partition_selection["partition_probe_error"])
+
+    def test_remote_submit_timeout_recovers_late_result(self):
+        config = {
+            "sure": {
+                "remote_training": {
+                    "enabled": True,
+                    "image": "image:test",
+                    "partition": "pdgpu-a10",
+                    "workdir": str(Path.cwd()),
+                    "runner": "playground/sure_master/tools/run_vc_sure_candidate.py",
+                    "submit_timeout": 1,
+                    "result_recovery": {
+                        "enabled": True,
+                        "grace_seconds": 0.1,
+                        "poll_seconds": 0.01,
+                    },
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            result_path = workspace / "metric" / "remote_training_result.json"
+            result_path.parent.mkdir(parents=True)
+
+            def timeout_after_result(*args, **kwargs):
+                result_path.write_text(
+                    json.dumps(
+                        {
+                            "success": True,
+                            "score": 0.123,
+                            "code": "print('ok')",
+                            "details": {"reason_code": "success"},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                raise subprocess.TimeoutExpired(args[0], timeout=1, output="still running")
+
+            executor = VcRemoteTrainingExecutor(config, config_path=Path(__file__))
+            with patch(
+                "playground.sure_master.core.utils.vc_remote.subprocess.run",
+                side_effect=timeout_after_result,
+            ):
+                payload = executor.run(
+                    workspace_path=workspace,
+                    exp_name="exp_1",
+                    execution_timeout=60,
+                )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["score"], 0.123)
+        self.assertTrue(payload["execution_info"]["submit_timed_out"])
+        self.assertTrue(payload["execution_info"]["recovered_after_submit_timeout"])
+
+    def test_remote_submit_timeout_remains_structured_failure_without_late_result(self):
+        config = {
+            "sure": {
+                "remote_training": {
+                    "enabled": True,
+                    "image": "image:test",
+                    "partition": "pdgpu-a10",
+                    "workdir": str(Path.cwd()),
+                    "runner": "playground/sure_master/tools/run_vc_sure_candidate.py",
+                    "submit_timeout": 1,
+                    "result_recovery": {
+                        "enabled": True,
+                        "grace_seconds": 0.01,
+                        "poll_seconds": 0.001,
+                    },
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            (workspace / "metric").mkdir(parents=True)
+            executor = VcRemoteTrainingExecutor(config, config_path=Path(__file__))
+            with patch(
+                "playground.sure_master.core.utils.vc_remote.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["vc", "submit"], timeout=1, output="queued"),
+            ):
+                payload = executor.run(
+                    workspace_path=workspace,
+                    exp_name="exp_1",
+                    execution_timeout=60,
+                )
+
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["reason_code"], "remote_submit_timeout")
+
+    def test_remote_missing_result_can_recover_after_submit_returns(self):
+        config = {
+            "sure": {
+                "remote_training": {
+                    "enabled": True,
+                    "image": "image:test",
+                    "partition": "pdgpu-a10",
+                    "workdir": str(Path.cwd()),
+                    "runner": "playground/sure_master/tools/run_vc_sure_candidate.py",
+                    "sync": True,
+                    "debug": True,
+                    "result_recovery": {
+                        "enabled": True,
+                        "grace_seconds": 0.1,
+                        "poll_seconds": 0.01,
+                        "recover_missing_result": True,
+                    },
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            result_path = workspace / "metric" / "remote_training_result.json"
+            result_path.parent.mkdir(parents=True)
+
+            def write_delayed_result(seconds):
+                result_path.write_text(
+                    json.dumps(
+                        {
+                            "success": True,
+                            "score": 0.456,
+                            "code": "print('late')",
+                            "details": {"reason_code": "success"},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            executor = VcRemoteTrainingExecutor(config, config_path=Path(__file__))
+            with patch(
+                "playground.sure_master.core.utils.vc_remote.subprocess.run",
+                return_value=subprocess.CompletedProcess(["vc", "submit"], 0, stdout="job done"),
+            ), patch("playground.sure_master.core.utils.vc_remote.time.sleep", side_effect=write_delayed_result):
+                payload = executor.run(
+                    workspace_path=workspace,
+                    exp_name="exp_1",
+                    execution_timeout=60,
+                )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["score"], 0.456)
+        self.assertTrue(payload["execution_info"]["recovered_after_missing_result"])
+
+    def test_remote_training_missing_result_is_structured_failure(self):
+        config = {
+            "sure": {
+                "remote_training": {
+                    "enabled": True,
+                    "image": "image:test",
+                    "partition": "pdgpu-a10",
+                    "workdir": str(Path.cwd()),
+                    "runner": "playground/sure_master/tools/run_vc_sure_candidate.py",
+                    "sync": True,
+                    "debug": True,
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            (workspace / "metric").mkdir(parents=True)
+            executor = VcRemoteTrainingExecutor(config, config_path=Path(__file__))
+            with patch(
+                "playground.sure_master.core.utils.vc_remote.subprocess.run",
+                return_value=subprocess.CompletedProcess(["vc", "submit"], 0, stdout="job done"),
+            ):
+                payload = executor.run(
+                    workspace_path=workspace,
+                    exp_name="exp_1",
+                    execution_timeout=60,
+                )
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["reason_code"], "remote_result_missing")
+        self.assertEqual(payload["execution_info"]["vc_exit_code"], 0)
+        self.assertIn("job done", payload["execution_info"]["vc_submit_log_tail"])
+
+    def test_remote_candidate_context_filters_local_icefall_python(self):
+        sanitized = run_vc_sure_candidate.sanitize_remote_execution_env(
+            {
+                "SURE_ICEFALL_PYTHON": "/hpc/local/anaconda3/envs/icefall/bin/python",
+                "SURE_LOCAL_ICEFALL_PYTHON": "/hpc/local/anaconda3/envs/icefall/bin/python",
+                "SURE_REMOTE_ICEFALL_PYTHON": "/opt/conda/envs/icefall/bin/python",
+                "SURE_MAX_DURATION": "300",
+            }
+        )
+
+        self.assertEqual(sanitized["SURE_ICEFALL_PYTHON"], "/opt/conda/envs/icefall/bin/python")
+        self.assertNotIn("SURE_LOCAL_ICEFALL_PYTHON", sanitized)
+        self.assertEqual(sanitized["SURE_MAX_DURATION"], "300")
+
+    def test_remote_candidate_cudnn_failure_gets_training_runtime_reason(self):
+        output = "RuntimeError: cuDNN error: CUDNN_STATUS_EXECUTION_FAILED"
+        self.assertEqual(
+            run_vc_sure_candidate.execution_failure_reason_code(output),
+            "training_runtime_failed",
+        )
+        details = run_vc_sure_candidate.execution_failure_details({"exit_code": 1}, output)
+        self.assertEqual(details["fatal_error"], "cudnn_status_execution_failed")
+
+    def test_remote_candidate_duration_startup_failure_gets_specific_reason(self):
+        output = (
+            "[candidate:error] duration_autotune failed with exit code 1\n"
+            "ModuleNotFoundError: No module named 'icefall'\n"
+        )
+        self.assertEqual(
+            run_vc_sure_candidate.execution_failure_reason_code(output),
+            "duration_probe_startup_failed",
+        )
+        details = run_vc_sure_candidate.execution_failure_details({"exit_code": 1}, output)
+        self.assertEqual(details["fatal_error"], "duration_probe_startup_failed")
+
+    def test_remote_candidate_timeout_takes_precedence_over_duration_log_text(self):
+        output = "export SURE_DURATION_CACHE_DIR=/tmp/duration_autotune"
+        execution_info = {"exit_code": -1, "timed_out": True}
+
+        self.assertEqual(
+            run_vc_sure_candidate.execution_failure_reason_code(
+                output,
+                execution_info,
+            ),
+            "candidate_execution_timeout",
+        )
+        details = run_vc_sure_candidate.execution_failure_details(
+            execution_info,
+            output,
+        )
+        self.assertEqual(details["fatal_error"], "candidate_execution_timeout")
+        self.assertEqual(
+            SureMasterPlayground._failure_category_from_reason(
+                "candidate_execution_timeout"
+            ),
+            "system_failure",
+        )
+
+    def test_remote_candidate_bpe_validation_failure_takes_precedence(self):
+        output = (
+            "export SURE_DURATION_CACHE_DIR=/tmp/duration_autotune\n"
+            "ValueError: Zipformer train/decode BPE mismatch: "
+            "train_decode candidates must decode with the same BPE model used for training.\n"
+        )
+        self.assertEqual(
+            run_vc_sure_candidate.execution_failure_reason_code(output),
+            "candidate_bpe_validation_failed",
+        )
+        details = run_vc_sure_candidate.execution_failure_details({"exit_code": 1}, output)
+        self.assertEqual(details["fatal_error"], "candidate_bpe_validation_failed")
+
+    def test_remote_child_zero_timeout_waits_without_deadline(self):
+        proc = Mock()
+        proc.wait.return_value = 0
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            run_vc_sure_candidate.subprocess,
+            "Popen",
+            return_value=proc,
+        ):
+            result = run_vc_sure_candidate.run_logged(
+                "python run_sure.py",
+                cwd=Path(tmp),
+                timeout=0,
+                log_path=Path(tmp) / "run.log",
+            )
+
+        proc.wait.assert_called_once_with(timeout=None)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertFalse(result["timed_out"])
+
+    def test_remote_training_source_snapshot_uses_snapshot_for_runner_not_workspace(self):
+        snapshot = Path("/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/runs/demo/source_snapshot")
+        workdir = Path("/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster")
+        config = {
+            "sure": {
+                "source_snapshot": {"enabled": True, "path": str(snapshot)},
+                "remote_training": {
+                    "enabled": True,
+                    "image": "image:test",
+                    "partition": "pdgpu-a10",
+                    "workdir": str(workdir),
+                    "runner": "playground/sure_master/tools/run_vc_sure_candidate.py",
+                },
+            }
+        }
+        executor = VcRemoteTrainingExecutor(config, config_path=Path(__file__))
+        workspace = Path(
+            "/mnt/cloudstorfs/sjtu_home/chaolei.liu/Agent/EvoMaster/runs/demo/workspaces/task_0/exp_1"
+        )
+        command = executor._build_vc_command(
+            workspace=workspace,
+            result_path=workspace / "metric" / "remote_training_result.json",
+            exp_name="exp_1",
+            execution_timeout=60,
+        )
+        command_text = " ".join(shlex.quote(part) for part in command)
+        self.assertIn(f"--dir {shlex.quote(str(snapshot))}", command_text)
+        self.assertIn(f"cd {shlex.quote(str(snapshot))}", command_text)
+        self.assertIn("playground/sure_master/tools/run_vc_sure_candidate.py", command_text)
+        self.assertIn(str(workdir / "runs/demo/workspaces/task_0/exp_1"), command_text)
+
+    def test_zipformer_baseline_normalizes_librispeech_cut_ids(self):
+        self.assertEqual(
+            normalize_librispeech_cut_id("1089-134686-0000-0"),
+            "1089-134686-0000",
+        )
+        self.assertEqual(normalize_librispeech_cut_id("custom-utt"), "custom-utt")
+
+    def test_asr_librispeech_ref_splitter_keeps_tiers_disjoint(self):
+        rows = [
+            RefRow("dev-clean", f"spk1-1-{index:04d}", "TEXT", "spk1")
+            for index in range(2)
+        ]
+        rows += [
+            RefRow("dev-clean", f"spk2-1-{index:04d}", "TEXT", "spk2")
+            for index in range(3)
+        ]
+        rows += [
+            RefRow("dev-clean", f"spk3-1-{index:04d}", "TEXT", "spk3")
+            for index in range(4)
+        ]
+
+        selected = select_tiered_rows(
+            rows,
+            {"smoke": 2, "early": 3},
+            seed=20260714,
+            split="dev-clean",
+        )
+
+        self.assertEqual(len(selected["smoke"]), 2)
+        self.assertEqual(len(selected["early"]), 3)
+        self.assertEqual(len(selected["selection"]), 4)
+        tier_keys = [
+            {row.key for row in selected[tier]}
+            for tier in ("smoke", "early", "selection")
+        ]
+        self.assertFalse(tier_keys[0] & tier_keys[1])
+        self.assertFalse(tier_keys[0] & tier_keys[2])
+        self.assertFalse(tier_keys[1] & tier_keys[2])
+        tier_groups = [
+            {row.group for row in selected[tier]}
+            for tier in ("smoke", "early", "selection")
+        ]
+        self.assertFalse(tier_groups[0] & tier_groups[1])
+        self.assertFalse(tier_groups[0] & tier_groups[2])
+        self.assertFalse(tier_groups[1] & tier_groups[2])
+
+    def test_asr_profile_ref_builder_uses_tedlium3_identity_keys(self):
+        profile = get_asr_dataset_profile("tedlium3")
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_dir = Path(tmp) / "manifests"
+            output_dir = Path(tmp) / "refs"
+            manifest_dir.mkdir()
+            rows = [
+                {
+                    "id": f"talk-{index}",
+                    "recording": {"id": f"talk-{index // 4}"},
+                    "supervisions": [
+                        {
+                            "id": f"speaker-{index}-segment-{index}",
+                            "speaker": f"speaker-{index}",
+                            "text": f"TEDLIUM TEXT {index}",
+                        }
+                    ],
+                }
+                for index in range(8)
+            ]
+            manifest_path = manifest_dir / profile.manifest_patterns["dev"]
+            import gzip
+
+            with gzip.open(manifest_path, "wt", encoding="utf-8") as f:
+                for row in rows:
+                    f.write(json.dumps(row) + "\n")
+
+            counts = build_asr_refs.build_refs(
+                "tedlium3",
+                manifest_dir,
+                output_dir,
+                seed=20260714,
+                tier_sizes={"smoke": 2, "early": 2, "regular": 2},
+            )
+            build_asr_refs.validate_refs(output_dir, profile)
+
+            regular_ref = output_dir / "asr_tedlium3_regular_ref.txt"
+            regular_text = regular_ref.read_text(encoding="utf-8")
+
+        self.assertEqual(counts["regular"], 2)
+        self.assertIn("-segment-", regular_text)
+        self.assertEqual(normalize_asr_cut_id("speaker-1-segment-9", profile), "speaker-1-segment-9")
+
+    def test_sure_auto_gpu_config_treats_null_as_all_visible_gpus(self):
+        local_config = {
+            "gpu_devices": None,
+            "parallel": {
+                "enabled": True,
+                "max_parallel": 1,
+            },
+        }
+        with patch.object(
+            sure_playground_module,
+            "_discover_gpu_devices",
+            return_value=["0", "1", "2", "3"],
+        ):
+            resolved = sure_playground_module._apply_auto_gpu_config(
+                local_config,
+                sure_playground_module.logging.getLogger("test"),
+            )
+
+        self.assertEqual(resolved["gpu_devices"], ["0", "1", "2", "3"])
+        self.assertEqual(resolved["parallel"]["max_parallel"], 1)
+        self.assertEqual(resolved["parallel"]["gpus_per_exp"], 4)
+        self.assertTrue(resolved["parallel"]["set_asr_world_size"])
+
+    def test_sure_auto_gpu_config_derives_parallel_from_gpus_per_exp(self):
+        local_config = {
+            "gpu_devices": "auto",
+            "parallel": {
+                "enabled": True,
+                "max_parallel": "auto",
+                "gpus_per_exp": 4,
+            },
+        }
+        with patch.object(
+            sure_playground_module,
+            "_discover_gpu_devices",
+            return_value=["0", "1", "2", "3", "4", "5", "6", "7"],
+        ):
+            resolved = sure_playground_module._apply_auto_gpu_config(
+                local_config,
+                sure_playground_module.logging.getLogger("test"),
+            )
+
+        self.assertEqual(resolved["gpu_devices"], ["0", "1", "2", "3", "4", "5", "6", "7"])
+        self.assertEqual(resolved["parallel"]["max_parallel"], 2)
+        self.assertEqual(resolved["parallel"]["gpus_per_exp"], 4)
+
+    def test_sure_idle_gpu_config_filters_busy_gpus_and_shrinks_parallel(self):
+        local_config = {
+            "gpu_devices": "idle",
+            "idle_gpu_min_free_mib": 9000,
+            "idle_gpu_max_utilization": 20,
+            "parallel": {
+                "enabled": True,
+                "max_parallel": 4,
+                "gpus_per_exp": 1,
+                "set_asr_world_size": False,
+            },
+        }
+        smi = "\n".join(
+            [
+                "0, 11264, 10426, 838, 100",
+                "1, 11264, 4, 11260, 0",
+                "2, 11264, 100, 11164, 5",
+                "3, 11264, 5000, 6264, 0",
+            ]
+        )
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0,1,2,3"}, clear=False), patch.object(
+            sure_playground_module.subprocess,
+            "run",
+            return_value=SimpleNamespace(returncode=0, stdout=smi, stderr=""),
+        ):
+            resolved = sure_playground_module._apply_auto_gpu_config(
+                local_config,
+                sure_playground_module.logging.getLogger("test"),
+            )
+
+        self.assertEqual(resolved["gpu_devices"], ["1", "2"])
+        self.assertEqual(resolved["parallel"]["max_parallel"], 2)
+        self.assertEqual(resolved["parallel"]["gpus_per_exp"], 1)
+        self.assertFalse(resolved["parallel"]["set_asr_world_size"])
+        self.assertTrue(resolved["parallel"]["refresh_idle_gpu_before_exec"])
+        self.assertEqual(resolved["parallel"]["idle_gpu_min_free_mib"], 9000)
+        self.assertEqual(resolved["parallel"]["idle_gpu_max_utilization"], 20)
+        self.assertFalse(resolved["parallel"]["idle_gpu_allow_busy_fallback"])
+        self.assertTrue(resolved["parallel"]["gpu_lock_enabled"])
+
+    def test_sure_idle_gpu_config_fails_when_no_idle_gpu(self):
+        local_config = {
+            "gpu_devices": "idle",
+            "idle_gpu_min_free_mib": 9000,
+            "idle_gpu_max_utilization": 20,
+            "parallel": {"enabled": True, "max_parallel": 4, "gpus_per_exp": 1},
+        }
+        smi = "\n".join(
+            [
+                "0, 11264, 10426, 838, 100",
+                "1, 11264, 9000, 2264, 80",
+            ]
+        )
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0,1"}, clear=False), patch.object(
+            sure_playground_module.subprocess,
+            "run",
+            return_value=SimpleNamespace(returncode=0, stdout=smi, stderr=""),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "below min_count"):
+                sure_playground_module._apply_auto_gpu_config(
+                    local_config,
+                    sure_playground_module.logging.getLogger("test"),
+                )
+
+    def test_local_resource_allocator_splits_comma_separated_gpu_string(self):
+        allocator = ResourceAllocator(
+            gpu_devices="0,1,2",
+            cpu_devices=None,
+            max_parallel=3,
+            gpus_per_exp=1,
+        )
+
+        self.assertEqual(allocator.allocate_resources(0)[0], "0")
+        self.assertEqual(allocator.allocate_resources(1)[0], "1")
+        self.assertEqual(allocator.allocate_resources(2)[0], "2")
+
+    def test_resource_allocator_reselects_idle_gpu_before_execution(self):
+        allocator = ResourceAllocator(
+            gpu_devices=["0", "1", "2"],
+            cpu_devices=None,
+            max_parallel=3,
+            gpus_per_exp=1,
+            refresh_idle_gpus=True,
+            idle_gpu_min_free_mib=9000,
+            idle_gpu_max_utilization=20,
+            idle_gpu_allow_busy_fallback=False,
+            gpu_lock_enabled=False,
+        )
+        smi = "\n".join(
+            [
+                "0, 11264, 10426, 838, 100",
+                "1, 11264, 4, 11260, 0",
+                "2, 11264, 100, 11164, 5",
+            ]
+        )
+        with patch.object(
+            evomaster_local_env_module.subprocess,
+            "run",
+            return_value=SimpleNamespace(returncode=0, stdout=smi, stderr=""),
+        ):
+            selected, handles = allocator.prepare_gpu_allocation("0")
+
+        self.assertEqual(selected, "1")
+        self.assertEqual(handles, [])
+
+    def test_resource_allocator_skips_cross_process_locked_gpu(self):
+        smi = "\n".join(
+            [
+                "1, 11264, 4, 11260, 0",
+                "2, 11264, 100, 11164, 5",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            first = ResourceAllocator(
+                gpu_devices=["1", "2"],
+                cpu_devices=None,
+                max_parallel=2,
+                gpus_per_exp=1,
+                refresh_idle_gpus=True,
+                idle_gpu_min_free_mib=9000,
+                idle_gpu_max_utilization=20,
+                idle_gpu_allow_busy_fallback=False,
+                gpu_lock_enabled=True,
+                gpu_lock_dir=tmp,
+                gpu_lock_wait_seconds=0,
+            )
+            second = ResourceAllocator(
+                gpu_devices=["1", "2"],
+                cpu_devices=None,
+                max_parallel=2,
+                gpus_per_exp=1,
+                refresh_idle_gpus=True,
+                idle_gpu_min_free_mib=9000,
+                idle_gpu_max_utilization=20,
+                idle_gpu_allow_busy_fallback=False,
+                gpu_lock_enabled=True,
+                gpu_lock_dir=tmp,
+                gpu_lock_wait_seconds=0,
+            )
+            handles1 = []
+            handles2 = []
+            try:
+                with patch.object(
+                    evomaster_local_env_module.subprocess,
+                    "run",
+                    return_value=SimpleNamespace(returncode=0, stdout=smi, stderr=""),
+                ):
+                    selected1, handles1 = first.prepare_gpu_allocation("1")
+                    selected2, handles2 = second.prepare_gpu_allocation("1")
+            finally:
+                first.release_gpu_locks(handles1)
+                second.release_gpu_locks(handles2)
+
+        self.assertEqual(selected1, "1")
+        self.assertEqual(selected2, "2")
+        self.assertTrue(handles1)
+        self.assertTrue(handles2)
+
+    def test_sure_serial_tasks_can_use_all_gpus(self):
+        self.assertTrue(
+            sure_playground_module._use_all_gpus_for_serial_tasks(
+                {"serial_gpus_per_exp": "all"},
+                max_workers=1,
+            )
+        )
+        self.assertFalse(
+            sure_playground_module._use_all_gpus_for_serial_tasks(
+                {"serial_gpus_per_exp": "all"},
+                max_workers=2,
+            )
+        )
+
+    def test_zipformer_zero_train_timeout_means_unlimited(self):
+        with patch.dict(
+            zipformer_baseline.os.environ,
+            {"SURE_BASELINE_TRAIN_TIMEOUT": "0"},
+            clear=False,
+        ):
+            self.assertIsNone(
+                zipformer_baseline.timeout_env(
+                    "SURE_BASELINE_TRAIN_TIMEOUT",
+                    43200,
+                )
+            )
+
+        with patch.dict(
+            zipformer_baseline.os.environ,
+            {"SURE_BASELINE_TRAIN_TIMEOUT": "123"},
+            clear=False,
+        ):
+            self.assertEqual(
+                zipformer_baseline.timeout_env(
+                    "SURE_BASELINE_TRAIN_TIMEOUT",
+                    43200,
+                ),
+                123,
+            )
+
+        with patch.dict(zipformer_baseline.os.environ, {}, clear=True):
+            self.assertEqual(
+                zipformer_baseline.timeout_env(
+                    "SURE_BASELINE_TRAIN_TIMEOUT",
+                    43200,
+                ),
+                43200,
+            )
+
+    def test_zipformer_candidate_zero_train_timeout_reaches_subprocess_wait(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            run_icefall_zipformer_candidate,
+            "selected_train_duration",
+            return_value=300,
+        ), patch.object(
+            zipformer_baseline,
+            "duration_retry_sequence",
+            return_value=[300],
+        ), patch.object(
+            run_icefall_zipformer_candidate,
+            "train_command",
+            return_value=["python", "train.py"],
+        ), patch.object(
+            zipformer_baseline,
+            "run_command",
+            return_value=Path(tmp) / "train.log",
+        ) as run_command, patch.object(
+            zipformer_baseline,
+            "parse_max_memory_mb",
+            return_value=None,
+        ), patch.dict(
+            os.environ,
+            {"SURE_BASELINE_TRAIN_TIMEOUT": "0"},
+            clear=False,
+        ):
+            run_icefall_zipformer_candidate.run_training(
+                exp_dir=Path(tmp),
+                train_epochs=1,
+                start_epoch=1,
+                final_train_args=[],
+            )
+
+        run_command.assert_called_once_with(
+            "train",
+            ["python", "train.py"],
+            timeout=None,
+        )
+
+    def test_runtime_duration_uses_a10_memory_bucket(self):
+        self.assertEqual(runtime_env.duration_from_gpu_memory(24_000, use_fp16=True), 1000)
+        self.assertEqual(runtime_env.duration_from_gpu_memory(16_000, use_fp16=True), 600)
+        self.assertEqual(runtime_env.duration_from_gpu_memory(48_000, use_fp16=True), 2400)
+
+    def test_runtime_duration_auto_uses_visible_min_memory(self):
+        with patch.object(runtime_env, "visible_gpu_memory_mb", return_value=[24_000, 48_000]):
+            with patch.dict(
+                runtime_env.os.environ,
+                {"SURE_USE_FP16": "1", "SURE_DURATION_AUTOTUNE": "0"},
+                clear=False,
+            ):
+                self.assertEqual(runtime_env.resolve_max_duration(), 1000)
+
+    def test_runtime_duration_autotune_returns_last_successful_probe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "SURE_USE_FP16": "1",
+                "SURE_DURATION_AUTOTUNE": "1",
+                "SURE_DURATION_AUTOTUNE_MAX": "1100",
+                "SURE_DURATION_AUTOTUNE_STEP": "100",
+                "SURE_DURATION_CACHE_DIR": tmp,
+            }
+            with patch.object(runtime_env, "visible_gpu_memory_mb", return_value=[24_000]):
+                with patch.object(runtime_env, "_probe_duration", side_effect=[True, False]):
+                    with patch.dict(runtime_env.os.environ, env, clear=False):
+                        self.assertEqual(runtime_env.resolve_max_duration(), 1000)
+
+    def test_runtime_duration_autotune_returns_upper_when_all_upward_probes_succeed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "SURE_USE_FP16": "1",
+                "SURE_DURATION_AUTOTUNE": "1",
+                "SURE_DURATION_AUTOTUNE_MAX": "1100",
+                "SURE_DURATION_AUTOTUNE_STEP": "100",
+                "SURE_DURATION_CACHE_DIR": tmp,
+            }
+            with patch.object(runtime_env, "visible_gpu_memory_mb", return_value=[24_000]):
+                with patch.object(runtime_env, "_probe_duration", side_effect=[True, True]) as probe:
+                    with patch.dict(runtime_env.os.environ, env, clear=False):
+                        self.assertEqual(runtime_env.resolve_max_duration(), 1100)
+                        self.assertEqual(probe.call_count, 2)
+
+    def test_runtime_duration_autotune_falls_back_to_lower_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "SURE_USE_FP16": "1",
+                "SURE_DURATION_AUTOTUNE": "1",
+                "SURE_DURATION_AUTOTUNE_MAX": "1000",
+                "SURE_DURATION_AUTOTUNE_MIN": "800",
+                "SURE_DURATION_AUTOTUNE_STEP": "100",
+                "SURE_DURATION_CACHE_DIR": tmp,
+            }
+            with patch.object(runtime_env, "visible_gpu_memory_mb", return_value=[24_000]):
+                with patch.object(runtime_env, "_probe_duration", side_effect=[False, False, True]):
+                    with patch.dict(runtime_env.os.environ, env, clear=False):
+                        self.assertEqual(runtime_env.resolve_max_duration(), 800)
+
+    def test_runtime_duration_autotune_fails_closed_when_all_probes_fail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "SURE_USE_FP16": "1",
+                "SURE_DURATION_AUTOTUNE": "1",
+                "SURE_DURATION_AUTOTUNE_MAX": "1000",
+                "SURE_DURATION_AUTOTUNE_MIN": "800",
+                "SURE_DURATION_AUTOTUNE_STEP": "100",
+                "SURE_DURATION_CACHE_DIR": tmp,
+            }
+            with patch.object(runtime_env, "visible_gpu_memory_mb", return_value=[24_000]):
+                with patch.object(runtime_env, "_probe_duration", side_effect=[False, False, False]):
+                    with patch.dict(runtime_env.os.environ, env, clear=False):
+                        with self.assertRaisesRegex(RuntimeError, "all duration probes failed"):
+                            runtime_env.resolve_max_duration()
+
+    def test_runtime_duration_autotune_uses_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "SURE_USE_FP16": "1",
+                "SURE_DURATION_AUTOTUNE": "1",
+                "SURE_DURATION_AUTOTUNE_MAX": "1100",
+                "SURE_DURATION_AUTOTUNE_STEP": "100",
+                "SURE_DURATION_CACHE_DIR": tmp,
+            }
+            with patch.object(runtime_env, "visible_gpu_memory_mb", return_value=[24_000]):
+                with patch.dict(runtime_env.os.environ, env, clear=False):
+                    with patch.object(runtime_env, "_probe_duration", side_effect=[True, False]) as first_probe:
+                        self.assertEqual(runtime_env.resolve_max_duration(), 1000)
+                        self.assertEqual(first_probe.call_count, 2)
+                    with patch.object(runtime_env, "_probe_duration") as second_probe:
+                        self.assertEqual(runtime_env.resolve_max_duration(), 1000)
+                        second_probe.assert_not_called()
+
+    def test_runtime_duration_autotune_isolates_probe_dir_by_cache_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(runtime_env, "_probe_duration", return_value=True) as probe:
+                self.assertEqual(
+                    runtime_env._autotune_uncached(
+                        start=300,
+                        lower_limit=100,
+                        upper_limit=300,
+                        step=100,
+                        timeout=30,
+                        world_size=2,
+                        use_fp16=True,
+                        cache_dir=Path(tmp),
+                        cache_key="candidate-cache-key",
+                        probe_args=[],
+                    ),
+                    300,
+                )
+
+        self.assertEqual(probe.call_args.args[4], Path(tmp) / "probes" / "candidate-cache-key")
+
+    def test_runtime_duration_probe_args_prefers_json_over_shell_string(self):
+        env = {
+            "SURE_DURATION_TRAIN_ARGS_JSON": json.dumps(["--encoder-dim", "160"]),
+            "SURE_DURATION_TRAIN_ARGS": "--encoder-dim 768",
+        }
+        with patch.dict(runtime_env.os.environ, env, clear=False):
+            self.assertEqual(runtime_env._duration_probe_args(), ["--encoder-dim", "160"])
+
+    def test_runtime_duration_probe_env_includes_workspace_icefall_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            recipe_dir = workspace / "base_model" / "recipe"
+            root_dir = workspace / "base_model" / "root"
+            recipe_dir.mkdir(parents=True)
+            root_dir.mkdir(parents=True)
+            with patch.dict(runtime_env.os.environ, {"PYTHONPATH": "/existing/path"}, clear=True):
+                env = runtime_env._probe_command_env(recipe_dir)
+
+        pythonpath = env["PYTHONPATH"].split(os.pathsep)
+        self.assertIn(str(root_dir), pythonpath)
+        self.assertIn(str(recipe_dir), pythonpath)
+        self.assertIn("/existing/path", pythonpath)
+
+    def test_runtime_duration_probe_raises_on_non_resource_startup_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "import_fail.py"
+            script.write_text(
+                "print(\"ModuleNotFoundError: No module named 'icefall'\", flush=True)\n"
+                "raise SystemExit(1)\n",
+                encoding="utf-8",
+            )
+            log_path = Path(tmp) / "probe.log"
+
+            with self.assertRaisesRegex(RuntimeError, "before proving a resource limit"):
+                runtime_env._run_logged_command(
+                    [sys.executable, str(script)],
+                    cwd=Path(tmp),
+                    timeout=10,
+                    log_path=log_path,
+                )
+            log_text = log_path.read_text(encoding="utf-8")
+
+        self.assertIn("PYTHONPATH:", log_text)
+        self.assertIn("ModuleNotFoundError", log_text)
+
+    def test_runtime_duration_short_probe_accepts_after_training_batches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "emit_batches.py"
+            script.write_text(
+                "\n".join(
+                    [
+                        "import time",
+                        "print('Epoch 1, batch 1, loss=1.0', flush=True)",
+                        "print('Epoch 1, batch 2, loss=0.9', flush=True)",
+                        "time.sleep(30)",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            log_path = Path(tmp) / "probe.log"
+
+            ok = runtime_env._run_logged_command(
+                [sys.executable, str(script)],
+                cwd=Path(tmp),
+                timeout=10,
+                log_path=log_path,
+                success_batch_count=2,
+            )
+            log_text = log_path.read_text(encoding="utf-8")
+
+        self.assertTrue(ok)
+        self.assertIn("probe accepted after 2 unique training batch log", log_text)
+
+    def test_runtime_duration_probe_counts_duplicate_ddp_batch_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "emit_duplicate_batch.py"
+            script.write_text(
+                "\n".join(
+                    [
+                        "import time",
+                        "for _ in range(4):",
+                        "    print('Epoch 1, batch 1, loss=1.0', flush=True)",
+                        "time.sleep(30)",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            log_path = Path(tmp) / "probe.log"
+
+            ok = runtime_env._run_logged_command(
+                [sys.executable, str(script)],
+                cwd=Path(tmp),
+                timeout=2,
+                log_path=log_path,
+                success_batch_count=2,
+            )
+            log_text = log_path.read_text(encoding="utf-8")
+
+        self.assertFalse(ok)
+        self.assertNotIn("probe accepted after", log_text)
+
+    def test_runtime_duration_probe_rejects_low_memory_headroom(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "emit_memory.py"
+            script.write_text(
+                "\n".join(
+                    [
+                        "import time",
+                        "print('Epoch 1, batch 1, max memory allocated so far is 23500 MiB', flush=True)",
+                        "time.sleep(30)",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            log_path = Path(tmp) / "probe.log"
+
+            ok = runtime_env._run_logged_command(
+                [sys.executable, str(script)],
+                cwd=Path(tmp),
+                timeout=10,
+                log_path=log_path,
+                success_batch_count=1,
+                memory_headroom_mb=1000,
+                gpu_memory_mb=[24000],
+            )
+            log_text = log_path.read_text(encoding="utf-8")
+
+        self.assertFalse(ok)
+        self.assertIn("peak memory 23500MB", log_text)
+
+    def test_runtime_duration_probe_uses_real_args_and_disables_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recipe_dir = Path(tmp) / "recipe"
+            recipe_dir.mkdir()
+            (recipe_dir / "train.py").write_text(
+                "import sys\n"
+                "if '--help' in sys.argv:\n"
+                "    print('--log-interval')\n",
+                encoding="utf-8",
+            )
+            env = {
+                "SURE_DURATION_RECIPE_DIR": str(recipe_dir),
+                "SURE_DURATION_TRAIN_ARGS": (
+                    "--use-cr-ctc 1 --encoder-dim 192 "
+                    "--full-libri 1 --max-duration 900 --log-interval 99"
+                ),
+                "SURE_DURATION_PRINT_DIAGNOSTICS": "0",
+                "SURE_DURATION_PROBE_LOG_INTERVAL": "1",
+            }
+            with patch.dict(runtime_env.os.environ, env, clear=False):
+                extra_args = runtime_env._duration_probe_args()
+                with patch.object(runtime_env, "_run_logged_command", return_value=True) as run:
+                    self.assertTrue(
+                        runtime_env._probe_duration(
+                            300,
+                            2,
+                            True,
+                            30,
+                            Path(tmp) / "probes",
+                            extra_args,
+                        )
+                    )
+            command = run.call_args.args[0]
+            diagnostics_index = command.index("--print-diagnostics")
+            self.assertEqual(command[diagnostics_index + 1], "false")
+            self.assertIn("--use-cr-ctc", command)
+            self.assertIn("--encoder-dim", command)
+            full_libri_index = command.index("--full-libri")
+            self.assertEqual(command[full_libri_index + 1], "0")
+            max_duration_index = command.index("--max-duration")
+            self.assertEqual(command[max_duration_index + 1], "300")
+            self.assertEqual(command.count("--max-duration"), 1)
+            log_interval_index = command.index("--log-interval")
+            self.assertEqual(command[log_interval_index + 1], "1")
+            self.assertEqual(command.count("--log-interval"), 1)
+
+    def test_runtime_duration_probe_omits_unsupported_log_interval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recipe_dir = Path(tmp) / "recipe"
+            recipe_dir.mkdir()
+            (recipe_dir / "train.py").write_text(
+                "import sys\n"
+                "if '--help' in sys.argv:\n"
+                "    print('--world-size')\n",
+                encoding="utf-8",
+            )
+            env = {
+                "SURE_DURATION_RECIPE_DIR": str(recipe_dir),
+                "SURE_DURATION_TRAIN_ARGS": "--encoder-dim 192 --log-interval 99",
+                "SURE_DURATION_PROBE_LOG_INTERVAL": "1",
+            }
+            runtime_env._TRAIN_HELP_OPTION_CACHE.clear()
+            with patch.dict(runtime_env.os.environ, env, clear=False):
+                extra_args = runtime_env._duration_probe_args()
+                with patch.object(runtime_env, "_run_logged_command", return_value=True) as run:
+                    self.assertTrue(
+                        runtime_env._probe_duration(
+                            300,
+                            2,
+                            True,
+                            30,
+                            Path(tmp) / "probes",
+                            extra_args,
+                        )
+                    )
+            command = run.call_args.args[0]
+            self.assertNotIn("--log-interval", command)
+            self.assertIn("--encoder-dim", command)
+
+    def test_runtime_duration_probe_raises_on_incompatible_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "reject_args.py"
+            script.write_text(
+                "print('train.py: error: unrecognized arguments: --log-interval 1')\n",
+                encoding="utf-8",
+            )
+            log_path = Path(tmp) / "probe.log"
+
+            with self.assertRaisesRegex(RuntimeError, "incompatible with train.py"):
+                runtime_env._run_logged_command(
+                    [sys.executable, str(script)],
+                    cwd=Path(tmp),
+                    timeout=10,
+                    log_path=log_path,
+                )
+
+    def test_asr_baseline_resolves_auto_duration_with_candidate_train_args(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            helper = Path(tmp) / "runtime_env.py"
+            helper.write_text("# helper\n", encoding="utf-8")
+            log_path = Path(tmp) / "duration_autotune.log"
+            log_path.write_text("[sure_runtime] probe\n700\n", encoding="utf-8")
+            env = {
+                "SURE_MAX_DURATION": "auto",
+                "SURE_RUNTIME_ENV_HELPER": str(helper),
+            }
+            with patch.dict(os.environ, env, clear=True):
+                with patch.object(zipformer_baseline, "run_command", return_value=log_path) as run:
+                    self.assertEqual(
+                        zipformer_baseline.max_duration(
+                            1400,
+                            cap=1400,
+                            train_args=["--encoder-dim", "160"],
+                        ),
+                        700,
+                    )
+
+            extra_env = run.call_args.kwargs["extra_env"]
+            self.assertEqual(
+                json.loads(extra_env["SURE_DURATION_TRAIN_ARGS_JSON"]),
+                ["--encoder-dim", "160"],
+            )
+
+    def test_asr_baseline_auto_duration_fails_without_final_integer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            helper = Path(tmp) / "runtime_env.py"
+            helper.write_text("# helper\n", encoding="utf-8")
+            log_path = Path(tmp) / "duration_autotune.log"
+            log_path.write_text("[sure_runtime] probe complete without value\n", encoding="utf-8")
+            env = {
+                "SURE_MAX_DURATION": "auto",
+                "SURE_RUNTIME_ENV_HELPER": str(helper),
+            }
+            with patch.dict(os.environ, env, clear=True):
+                with patch.object(zipformer_baseline, "run_command", return_value=log_path):
+                    with self.assertRaisesRegex(RuntimeError, "standalone positive integer"):
+                        zipformer_baseline.max_duration(
+                            1400,
+                            cap=1400,
+                            train_args=["--encoder-dim", "160"],
+                        )
+
+    def test_asr_baseline_auto_duration_clamps_to_floor_for_training(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            helper = Path(tmp) / "runtime_env.py"
+            helper.write_text("# helper\n", encoding="utf-8")
+            log_path = Path(tmp) / "duration_autotune.log"
+            log_path.write_text("[sure_runtime] probe\n16\n", encoding="utf-8")
+            env = {
+                "SURE_MAX_DURATION": "auto",
+                "SURE_RUNTIME_ENV_HELPER": str(helper),
+                "SURE_DURATION_AUTOTUNE_MIN": "100",
+                "SURE_TRAIN_DURATION_MIN": "100",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                with patch.object(zipformer_baseline, "run_command", return_value=log_path):
+                    self.assertEqual(
+                        zipformer_baseline.max_duration(
+                            1400,
+                            cap=1400,
+                            train_args=["--encoder-dim", "160"],
+                            enforce_floor=True,
+                        ),
+                        100,
+                    )
+
+    def test_asr_baseline_duration_retry_sequence_descends_to_floor(self):
+        env = {
+            "SURE_TRAIN_DURATION_RETRY": "1",
+            "SURE_TRAIN_DURATION_MIN": "300",
+            "SURE_TRAIN_DURATION_RETRY_STEP": "100",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(duration_retry_sequence(600), [600, 500, 400, 300])
+
+    def test_asr_baseline_duration_retry_can_be_disabled(self):
+        with patch.dict(os.environ, {"SURE_TRAIN_DURATION_RETRY": "0"}, clear=True):
+            self.assertEqual(duration_retry_sequence(600), [600])
+
+    def test_asr_baseline_duration_retry_does_not_descend_below_floor(self):
+        env = {
+            "SURE_TRAIN_DURATION_RETRY": "1",
+            "SURE_TRAIN_DURATION_MIN": "100",
+            "SURE_TRAIN_DURATION_RETRY_VALUES": "80,100,120",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(duration_retry_sequence(200), [200, 120, 100])
+
+    def test_asr_baseline_detects_cuda_oom_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "train.log"
+            log_path.write_text("RuntimeError: CUDA out of memory.\n", encoding="utf-8")
+            self.assertTrue(is_oom_failure(log_path))
+
+    def test_asr_candidate_rejects_pipe_captured_subprocess_output(self):
+        code = """
+import subprocess
+subprocess.Popen(["python", "train.py"], stdout=subprocess.PIPE)
+subprocess.run(["python", "decode.py"], capture_output=True)
+"""
+        profile = BaseModelProfile(model_id="zipformer", framework="icefall")
+        errors = validate_sure_candidate_boundary(
+            code,
+            "/tmp/sure",
+            profile,
+            canonical_task="asr",
+        )
+        self.assertTrue(any("stdout=subprocess.PIPE" in error for error in errors))
+        self.assertTrue(any("capture_output=True" in error for error in errors))
+
+    def test_asr_candidate_rejects_bounded_lhotse_suffix_length(self):
+        code = """
+def normalize_key(key):
+    parts = key.split("-")
+    if len(parts) == 4 and all(x.isdigit() for x in parts) and len(parts[-1]) <= 3:
+        return "-".join(parts[:-1])
+    return key
+
+cmd = ["python", "base_model/recipe/decode.py"]
+"""
+        profile = BaseModelProfile(model_id="zipformer", framework="icefall")
+        errors = validate_sure_candidate_boundary(
+            code,
+            "/tmp/sure",
+            profile,
+            canonical_task="asr",
+        )
+        self.assertTrue(any("Lhotse numeric suffix length" in error for error in errors))
+
+    def test_asr_candidate_rejects_bounded_lhotse_suffix_variable(self):
+        code = """
+def normalize_key(key):
+    parts = key.split("-")
+    suffix = parts[-1]
+    if len(parts) == 4 and suffix.isdigit() and len(suffix) < 4:
+        return "-".join(parts[:-1])
+    return key
+
+cmd = ["python", "base_model/recipe/decode.py"]
+"""
+        profile = BaseModelProfile(model_id="zipformer", framework="icefall")
+        errors = validate_sure_candidate_boundary(
+            code,
+            "/tmp/sure",
+            profile,
+            canonical_task="asr",
+        )
+        self.assertTrue(any("Lhotse numeric suffix length" in error for error in errors))
+
+    def test_asr_candidate_allows_unbounded_lhotse_suffix_normalization(self):
+        code = """
+def normalize_key(key):
+    parts = key.rsplit("-", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return parts[0]
+    return key
+
+cmd = ["python", "base_model/recipe/decode.py"]
+"""
+        profile = BaseModelProfile(model_id="zipformer", framework="icefall")
+        errors = validate_sure_candidate_boundary(
+            code,
+            "/tmp/sure",
+            profile,
+            canonical_task="asr",
+        )
+        self.assertFalse(any("Lhotse numeric suffix length" in error for error in errors))
+
+    def test_tts_candidate_rejects_raw_f5_training_entrypoint(self):
+        code = """
+import subprocess
+cmd = ["python", "base_model/root/src/f5_tts/train/finetune_cli.py", "--finetune"]
+subprocess.run(cmd)
+"""
+        profile = BaseModelProfile(model_id="f5tts", framework="f5-tts")
+        errors = validate_sure_candidate_boundary(
+            code,
+            "/tmp/sure",
+            profile,
+            canonical_task="tts",
+        )
+        self.assertTrue(any("raw F5-TTS training entrypoint" in error for error in errors))
+
+    def test_tts_candidate_rejects_raw_f5_infer_cli(self):
+        code = """
+import subprocess
+cmd = ["python", "base_model/root/src/f5_tts/infer/infer_cli.py", "--gen_text", "hello"]
+subprocess.run(cmd)
+"""
+        profile = BaseModelProfile(model_id="f5tts", framework="f5-tts")
+        errors = validate_sure_candidate_boundary(
+            code,
+            "/tmp/sure",
+            profile,
+            canonical_task="tts",
+        )
+        self.assertTrue(any("raw F5-TTS infer_cli.py" in error for error in errors))
+
+    def test_candidate_changes_validator_requires_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            errors = validate_candidate_changes(workspace)
+            self.assertTrue(errors)
+            changes_path = workspace / "artifacts" / "candidate_changes.json"
+            changes_path.parent.mkdir(parents=True)
+            changes_path.write_text(
+                json.dumps(
+                    {
+                        "candidate_type": "inference",
+                        "idea_text": "adjust nfe",
+                        "changed_fields": ["inference_config.nfe_step"],
+                        "arch_config": {},
+                        "training_config": {},
+                        "inference_config": {"nfe_step": 32},
+                        "defaults": {},
+                        "diff_from_defaults": {},
+                        "produced_artifacts": {"samples_jsonl": "artifacts/samples.jsonl"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(validate_candidate_changes(workspace), [])
+
+    def test_arch_candidate_changes_validator_requires_arch_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            changes_path = workspace / "artifacts" / "candidate_changes.json"
+            changes_path.parent.mkdir(parents=True)
+            changes_path.write_text(
+                json.dumps(
+                    {
+                        "candidate_type": "arch",
+                        "idea_text": "change depth",
+                        "changed_fields": ["arch_config.depth"],
+                        "arch_config": {"depth": 20},
+                        "training_config": {},
+                        "inference_config": {},
+                        "defaults": {"arch_config": {"depth": 22}},
+                        "diff_from_defaults": {
+                            "arch_config": {"depth": {"default": 22, "used": 20}}
+                        },
+                        "produced_artifacts": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(validate_candidate_changes(workspace), [])
+            self.assertEqual(validate_arch_candidate_changes(workspace), [])
+
+    def test_arch_candidate_changes_validator_backfills_legacy_nested_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            changes_path = workspace / "artifacts" / "candidate_changes.json"
+            changes_path.parent.mkdir(parents=True)
+            changes_path.write_text(
+                json.dumps(
+                    {
+                        "candidate_type": "arch",
+                        "idea_text": "legacy arch change",
+                        "changed_fields": ["arch_config.depth"],
+                        "arch_config": {"depth": 20},
+                        "training_config": {},
+                        "inference_config": {},
+                        "defaults": {"arch_config": {"depth": 22}},
+                        "diff_from_defaults": {},
+                        "produced_artifacts": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(validate_arch_candidate_changes(workspace), [])
+            payload = json.loads(changes_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                payload["diff_from_defaults"]["arch_config"]["depth"]["default"],
+                22,
+            )
+            self.assertEqual(
+                payload["diff_from_defaults"]["arch_config"]["depth"]["value"],
+                20,
+            )
+
+    def test_run_vc_candidate_setup_failure_writes_remote_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            (workspace / "metric").mkdir(parents=True)
+            result = workspace / "metric" / "remote_training_result.json"
+            argv = [
+                "run_vc_sure_candidate.py",
+                "--config",
+                str(Path(tmp) / "missing.yaml"),
+                "--workspace",
+                str(workspace),
+                "--result",
+                str(result),
+                "--timeout",
+                "60",
+            ]
+            with patch.object(sys, "argv", argv), patch.object(
+                run_vc_sure_candidate,
+                "ensure_project_imports",
+                side_effect=RuntimeError("import failed"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    run_vc_sure_candidate.main()
+            payload = json.loads(result.read_text(encoding="utf-8"))
+            self.assertFalse(payload["success"])
+            self.assertEqual(payload["reason_code"], "remote_exception")
+            self.assertEqual(payload["details"]["exception_type"], "RuntimeError")
+            status = json.loads((workspace / "artifacts" / "candidate_status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["reason_code"], "remote_exception")
+
+    def test_f5tts_batch_infer_preserves_existing_arch_candidate_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            artifacts = workspace / "artifacts"
+            artifacts.mkdir(parents=True)
+            (artifacts / "candidate_changes.json").write_text(
+                json.dumps(
+                    {
+                        "candidate_type": "arch",
+                        "idea_text": "reduce depth",
+                        "changed_fields": ["arch_config.depth"],
+                        "arch_config": {"depth": 20},
+                        "training_config": {"action": "arch_finetune_short"},
+                        "inference_config": {},
+                        "defaults": {"arch_config": {"depth": 22}},
+                        "diff_from_defaults": {
+                            "arch_config": {"depth": {"default": 22, "used": 20}}
+                        },
+                        "produced_artifacts": {"checkpoint": "models/f5tts_arch/final_checkpoint.pt"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = SimpleNamespace(
+                candidate_type="auto",
+                idea_text="arch inference",
+                training_action="no_train",
+                arch_action="no_arch",
+                nfe_step=16,
+                cfg_strength=2.0,
+                sway_sampling_coef=-1.0,
+                speed=1.0,
+                remove_silence="0",
+                text_cleanup="none",
+                model="F5TTS_v1_Base",
+                ckpt_file="models/f5tts_arch/final_checkpoint.pt",
+                vocab_file="",
+                model_cfg="models/f5tts_arch/model_cfg.yaml",
+            )
+            with patch.object(run_f5tts_batch_infer, "WORKSPACE", workspace), patch.object(
+                run_f5tts_batch_infer,
+                "ARTIFACTS",
+                artifacts,
+            ):
+                run_f5tts_batch_infer.write_candidate_changes(
+                    args,
+                    [{"reference_audio": "base_model/eval_data/ref.wav"}],
+                    workers=1,
+                )
+
+            payload = json.loads((artifacts / "candidate_changes.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["candidate_type"], "arch")
+            self.assertEqual(payload["diff_from_defaults"]["arch_config"]["depth"]["used"], 20)
+            self.assertIn("arch_config.depth", payload["changed_fields"])
+            self.assertEqual(payload["produced_artifacts"]["checkpoint"], "models/f5tts_arch/final_checkpoint.pt")
+            self.assertEqual(validate_arch_candidate_changes(workspace), [])
+
+    def test_f5tts_arch_candidate_changes_records_init_mode(self):
+        args = SimpleNamespace(
+            action="arch_finetune_short",
+            init_mode="scratch",
+            train_manifest="libritts_train_clean_100_1h",
+            max_steps=1000,
+            learning_rate="3e-6",
+            effective_batch_size=8,
+            early_stop=True,
+            idea_text="scratch screen smaller depth",
+            vocab_file=Path("/models/vocab.txt"),
+        )
+        arch_config = {
+            **run_f5tts_arch_finetune.DEFAULT_ARCH,
+            "depth": 20,
+        }
+
+        payload = run_f5tts_arch_finetune.candidate_changes_payload(
+            args=args,
+            arch_config=arch_config,
+            output_dir=Path("models/f5tts_arch"),
+            model_cfg_path=Path("models/f5tts_arch/model_cfg.yaml"),
+            final_checkpoint=Path("models/f5tts_arch/final_checkpoint.pt"),
+        )
+
+        self.assertEqual(payload["candidate_type"], "arch")
+        self.assertEqual(payload["training_config"]["init_mode"], "scratch")
+        self.assertIn("training_config.init_mode", payload["changed_fields"])
+        self.assertEqual(
+            payload["diff_from_defaults"]["training_config"]["init_mode"]["default"],
+            "partial_load",
+        )
+        self.assertEqual(payload["diff_from_defaults"]["arch_config"]["depth"]["value"], 20)
+
+    def test_f5tts_arch_force_init_mode_overrides_candidate_arg(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            f5_root = root / "F5-TTS"
+            manifest_dir = root / "f5tts_train_manifests" / "libritts_train_clean_100_1h"
+            f5_root.mkdir()
+            manifest_dir.mkdir(parents=True)
+            (manifest_dir / "metadata.csv").write_text("audio_path|text\n", encoding="utf-8")
+            args = SimpleNamespace(
+                action="arch_finetune_short",
+                init_mode="partial_load",
+                depth=22,
+                ff_mult=2,
+                conv_layers=4,
+                qk_norm="none",
+                attn_mask_enabled=False,
+                checkpoint_activations=False,
+                match_threshold=0.70,
+                early_stop_ema_alpha=0.05,
+                early_stop_min_relative_delta=0.002,
+                base_ckpt=None,
+                vocab_file=None,
+                train_manifest="libritts_train_clean_100_1h",
+                max_steps=1000,
+                effective_batch_size=8,
+                learning_rate="3e-6",
+                f5_root=f5_root,
+                train_data_root=root / "f5tts_train_manifests",
+            )
+
+            with patch.dict(os.environ, {"SURE_TTS_ARCH_FORCE_INIT_MODE": "scratch"}):
+                learning_rate = run_f5tts_arch_finetune.validate_args(args)
+
+        self.assertEqual(learning_rate, 3e-6)
+        self.assertEqual(args.init_mode, "scratch")
+
+    def test_f5tts_official_baseline_code_is_inference_candidate(self):
+        code = Path(f5tts_official_baseline.__file__).read_text(encoding="utf-8")
+        self.assertEqual(candidate_type_from_code(code, default=INFERENCE), INFERENCE)
+        self.assertNotIn("SURE_TTS_TRAIN_ACTION", code)
+        self.assertNotIn("SURE_TTS_FINETUNE_WRAPPER", code)
+
+    def test_f5tts_official_baseline_builds_batch_wrapper_command(self):
+        env = {
+            "SURE_TTS_PYTHON": "/env/f5/bin/python",
+            "SURE_TTS_BATCH_INFER_WRAPPER": "/repo/run_f5tts_batch_infer.py",
+            "SURE_TTS_ROOT": "base_model/root",
+            "SURE_TTS_EVAL_DATA": "base_model/eval_data/prompts.jsonl",
+            "SURE_TTS_MAX_SAMPLES": "20",
+            "SURE_TTS_CKPT_FILE": "/models/F5TTS_v1_Base/model_1250000.safetensors",
+            "SURE_TTS_VOCAB_FILE": "/models/F5TTS_v1_Base/vocab.txt",
+            "SURE_RUN_TIMEOUT": "1234",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            command = f5tts_official_baseline.build_batch_infer_command()
+
+        self.assertEqual(command[0], "/env/f5/bin/python")
+        self.assertEqual(command[1], "/repo/run_f5tts_batch_infer.py")
+        self.assertIn("--candidate-type", command)
+        self.assertEqual(command[command.index("--candidate-type") + 1], "inference")
+        self.assertIn("--training-action", command)
+        self.assertEqual(command[command.index("--training-action") + 1], "no_train")
+        self.assertEqual(command[command.index("--timeout") + 1], "1234")
+
+    def test_f5tts_official_baseline_writes_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            artifacts = Path(tmp) / "artifacts"
+            env = {
+                "SURE_TTS_MODEL": "F5TTS_v1_Base",
+                "SURE_TTS_CKPT_FILE": "/models/model_1250000.safetensors",
+                "SURE_TTS_VOCAB_FILE": "/models/vocab.txt",
+                "SURE_TTS_EVAL_DATA": "base_model/eval_data/prompts.jsonl",
+            }
+            with patch.object(f5tts_official_baseline, "ARTIFACTS_DIR", artifacts), patch.dict(
+                os.environ,
+                env,
+                clear=True,
+            ):
+                f5tts_official_baseline.write_official_baseline_record(
+                    command=["python", "wrapper.py"],
+                    sample_count=3,
+                    elapsed_seconds=1.25,
+                )
+
+            payload = json.loads((artifacts / "official_baseline.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["baseline_type"], "official")
+        self.assertEqual(payload["task_id"], "tts_en_wer")
+        self.assertEqual(payload["model_id"], "SWivid/F5-TTS/F5TTS_v1_Base")
+        self.assertEqual(payload["sample_count"], 3)
+
+    def test_local_env_timeout_kills_child_process_group_and_unregisters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = LocalSessionConfig(
+                workspace_path=tmp,
+                timeout=10,
+                parallel={"enabled": True, "max_parallel": 1},
+            )
+            env = LocalEnv(LocalEnvConfig(session_config=config))
+            env.setup()
+            marker = Path(tmp) / "child_done"
+            child_command = f"sleep 2; touch {shlex.quote(str(marker))}"
+            python_code = (
+                "import subprocess, time; "
+                f"subprocess.Popen(['sh', '-c', {child_command!r}]); "
+                "time.sleep(10)"
+            )
+            command = f"{shlex.quote(sys.executable)} -c {shlex.quote(python_code)}"
+            result = env.local_exec(command, timeout=1, parallel_index=0)
+            time.sleep(2.5)
+            self.assertEqual(result["exit_code"], -1)
+            self.assertFalse(marker.exists())
+            assert env._resource_allocator is not None
+            self.assertEqual(env._resource_allocator._active_executions, {})
+
+    def test_local_env_nonzero_exit_kills_leftover_child_process_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = LocalSessionConfig(workspace_path=tmp, timeout=10)
+            env = LocalEnv(LocalEnvConfig(session_config=config))
+            env.setup()
+            marker = Path(tmp) / "nonzero_child_done"
+            child_command = f"sleep 2; touch {shlex.quote(str(marker))}"
+            python_code = (
+                "import subprocess, sys; "
+                f"subprocess.Popen(['sh', '-c', {child_command!r}]); "
+                "sys.exit(7)"
+            )
+            command = f"{shlex.quote(sys.executable)} -c {shlex.quote(python_code)}"
+            result = env.local_exec(command, timeout=5)
+            time.sleep(2.5)
+            self.assertEqual(result["exit_code"], 7)
+            self.assertFalse(marker.exists())
+
+    def test_metric_direction_defaults(self):
+        self.assertEqual(infer_metric_direction("WER"), "lower")
+        self.assertEqual(infer_metric_direction("tts_cer"), "lower")
+        self.assertEqual(infer_metric_direction("accuracy"), "higher")
+        self.assertEqual(infer_metric_direction("BLEU"), "higher")
+
+    def test_load_repo_task_cards(self):
+        path = Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml"
+        cards = load_task_cards(path)
+        self.assertIn("asr_en_wer", cards)
+        self.assertIn("tts_en_wer", cards)
+        self.assertTrue(cards["asr_en_wer"].is_lower_better)
+        self.assertFalse(cards["classification_accuracy"].is_lower_better)
+
+    def test_required_roles_have_artifact_contracts(self):
+        path = Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml"
+        cards = load_task_cards(path)
+        for task_id, card in cards.items():
+            with self.subTest(task_id=task_id):
+                for role in card.required_roles:
+                    self.assertIn(role, card.artifact_contract)
+        self.assertEqual(cards["slu_accuracy"].required_roles, ["ref", "hyp", "prompt_jsonl"])
+
+    def test_resolve_unknown_task_card_reports_available(self):
+        path = Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml"
+        with self.assertRaisesRegex(KeyError, "Available task cards"):
+            resolve_task_card(path, "missing_task")
+
+    def test_asr_en_wer_declares_required_zipformer_base_model(self):
+        path = Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml"
+        card = resolve_task_card(path, "asr_en_wer")
+        self.assertIsNotNone(card.base_model)
+        assert card.base_model is not None
+        self.assertEqual(card.base_model.model_id, "icefall_zipformer_asr")
+        self.assertEqual(card.base_model.framework, "icefall")
+        self.assertTrue(card.base_model.is_required)
+        self.assertIn("dataset profile", card.base_model.prompt_guidance)
+        self.assertIn("recipe profile", card.base_model.prompt_guidance)
+        self.assertNotIn("LibriSpeech", card.base_model.prompt_guidance)
+        self.assertEqual(card.base_model.required_paths["recipe"], "base_model/recipe")
+        self.assertEqual(card.base_model.entrypoints["infer"], "base_model/recipe/decode.py")
+
+    def test_base_model_config_override_adds_source_paths(self):
+        path = Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml"
+        card = resolve_task_card(path, "asr_en_wer")
+        profile = merge_base_model_profile(
+            card.base_model,
+            {
+                "source_paths": {
+                    "recipe": "/tmp/icefall/zipformer",
+                    "data": "/tmp/icefall/data",
+                    "root": "/tmp/icefall",
+                }
+            },
+        )
+        validate_base_model_profile(profile, "asr_en_wer")
+        assert profile is not None
+        self.assertEqual(profile.source_paths["recipe"], "/tmp/icefall/zipformer")
+        self.assertEqual(profile.required_paths["recipe"], "base_model/recipe")
+
+    def test_required_base_model_without_source_paths_fails_validation(self):
+        path = Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml"
+        card = resolve_task_card(path, "asr_en_wer")
+        with self.assertRaisesRegex(ValueError, "requires base_model source_paths"):
+            validate_base_model_profile(card.base_model, "asr_en_wer")
+
+    def test_playground_requires_base_model_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "sure": {
+                            "task_cards_path": str(
+                                Path(__file__).resolve().parents[2]
+                                / "task_cards"
+                                / "sure_tasks.yaml"
+                            ),
+                            "task_id": "slu_accuracy",
+                        },
+                        "session": {"type": "local", "local": {"working_dir": str(Path(tmp) / "workspace")}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "requires a base_model profile"):
+                SureMasterPlayground(config_path=config_path)
+
+    def test_playground_accepts_configured_base_model_for_other_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "sure": {
+                            "task_cards_path": str(
+                                Path(__file__).resolve().parents[2]
+                                / "task_cards"
+                                / "sure_tasks.yaml"
+                            ),
+                            "task_id": "slu_accuracy",
+                            "base_models": {
+                                "slu_accuracy": {
+                                    "model_id": "example_slu_model",
+                                    "model_type": "classification_model",
+                                    "framework": "custom",
+                                    "usage_policy": "required",
+                                    "required_paths": {"model": "base_model/model"},
+                                    "source_paths": {"model": "/tmp/example_slu_model"},
+                                    "entrypoints": {"infer": "base_model/model/infer.py"},
+                                }
+                            },
+                        },
+                        "session": {"type": "local", "local": {"working_dir": str(Path(tmp) / "workspace")}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            pg = SureMasterPlayground(config_path=config_path)
+            assert pg.base_model_profile is not None
+            self.assertEqual(pg.base_model_profile.model_id, "example_slu_model")
+
+
+class WorkspaceCleanupTest(unittest.TestCase):
+    def test_workspace_cleanup_config_allows_env_overrides(self):
+        config = {
+            "sure": {
+                "workspace_cleanup": {
+                    "enabled": False,
+                    "on_failure": False,
+                    "log_tail_bytes": 100,
+                }
+            }
+        }
+        env = {
+            "SURE_WORKSPACE_CLEANUP_ENABLED": "1",
+            "SURE_WORKSPACE_CLEANUP_ON_FAILURE": "1",
+            "SURE_WORKSPACE_CLEANUP_LOG_TAIL_BYTES": "2048",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            cleanup_config = workspace_cleanup_config(config)
+
+        self.assertTrue(cleanup_config.enabled)
+        self.assertTrue(cleanup_config.on_failure)
+        self.assertEqual(cleanup_config.log_tail_bytes, 2048)
+
+    def test_cleanup_candidate_workspace_compacts_heavy_candidate_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            (workspace / "models").mkdir(parents=True)
+            (workspace / "working" / "decode").mkdir(parents=True)
+            (workspace / ".sure_runtime" / "duration_autotune").mkdir(parents=True)
+            (workspace / ".sure_runtime" / "duration_autotune" / "probes" / "k" / "duration_100").mkdir(parents=True)
+            (workspace / "artifacts").mkdir(parents=True)
+            (workspace / "metric").mkdir(parents=True)
+
+            (workspace / "run_sure.py").write_text("print('ok')\n", encoding="utf-8")
+            (workspace / "models" / "epoch-1.pt").write_bytes(b"x" * 1024)
+            (workspace / "working" / "decode" / "train.log").write_text(
+                "start\n" + ("middle\n" * 100) + "final-error\n",
+                encoding="utf-8",
+            )
+            (workspace / ".sure_runtime" / "duration_autotune" / "probe.json").write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+            (
+                workspace
+                / ".sure_runtime"
+                / "duration_autotune"
+                / "probes"
+                / "k"
+                / "duration_100"
+                / "probe.log"
+            ).write_text(
+                "probe-start\nModuleNotFoundError: No module named icefall\n",
+                encoding="utf-8",
+            )
+            (workspace / "artifacts" / "hyp.txt").write_text("utt\ttext\n", encoding="utf-8")
+            (workspace / "artifacts" / "candidate_status.json").write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+            (workspace / "metric" / "score_summary.json").write_text(
+                '{"score": 12.3}\n',
+                encoding="utf-8",
+            )
+            (workspace / "metric" / "remote_training_vc_submit.log").write_text(
+                "submit-start\n" + ("submit-middle\n" * 100) + "submit-end\n",
+                encoding="utf-8",
+            )
+
+            manifest = cleanup_candidate_workspace(
+                workspace,
+                WorkspaceCleanupConfig(
+                    enabled=True,
+                    on_success=True,
+                    on_failure=True,
+                    log_tail_bytes=64,
+                ),
+                success=True,
+                reason_code="success",
+                score=12.3,
+            )
+
+            self.assertTrue(manifest["cleaned"])
+            self.assertGreater(manifest["removed_bytes"], 0)
+            self.assertTrue((workspace / "run_sure.py").is_file())
+            self.assertTrue((workspace / "artifacts" / "hyp.txt").is_file())
+            self.assertTrue((workspace / "artifacts" / "candidate_status.json").is_file())
+            self.assertTrue((workspace / "metric" / "score_summary.json").is_file())
+            self.assertTrue((workspace / "metric" / "cleanup_manifest.json").is_file())
+            self.assertFalse((workspace / "models").exists())
+            self.assertFalse((workspace / "working").exists())
+            self.assertFalse((workspace / ".sure_runtime").exists())
+            self.assertFalse((workspace / "metric" / "remote_training_vc_submit.log").exists())
+
+            tail_files = sorted((workspace / "metric" / "log_tails").glob("*.tail.log"))
+            self.assertGreaterEqual(len(tail_files), 2)
+            tail_text = "\n".join(path.read_text(encoding="utf-8") for path in tail_files)
+            self.assertIn("final-error", tail_text)
+            self.assertIn("submit-end", tail_text)
+            self.assertIn("ModuleNotFoundError", tail_text)
+
+    def test_cleanup_workspace_finder_includes_outer_heavy_candidate_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "run"
+            outer = root / "workspaces" / "task_0" / "exp_1_draft"
+            inner = outer / "exp_1_draft"
+            (outer / "artifacts").mkdir(parents=True)
+            (outer / "models" / "zipformer_candidate").mkdir(parents=True)
+            (outer / "working").mkdir()
+            (outer / "artifacts" / "hyp.txt").write_text("utt\ttext\n", encoding="utf-8")
+            (inner / "artifacts").mkdir(parents=True)
+            (inner / "run_sure.py").write_text("print('ok')\n", encoding="utf-8")
+
+            workspaces = find_candidate_workspaces(root)
+
+            self.assertIn(outer, workspaces)
+            self.assertIn(inner, workspaces)
+
+
+class SureMetricRunnerTest(unittest.TestCase):
+    def test_local_env_creates_icefall_data_compatibility_links(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            recipe = workspace / "base_model" / "recipe"
+            data = workspace / "base_model" / "data"
+            recipe.mkdir(parents=True)
+            data.mkdir(parents=True)
+
+            env = SureMasterLocalEnv(
+                LocalEnvConfig(
+                    session_config=LocalSessionConfig(workspace_path=str(workspace))
+                )
+            )
+            env._ensure_base_data_links(workspace)
+
+            recipe_data = recipe / "data"
+            workspace_data = workspace / "data"
+            self.assertTrue(recipe_data.is_symlink())
+            self.assertEqual(recipe_data.readlink(), Path("../data"))
+            self.assertTrue(workspace_data.is_symlink())
+            self.assertEqual(workspace_data.readlink(), Path("base_model/data"))
+
+    def test_run_exp_copies_configured_required_input_to_workspace_default(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "asr_en_wer",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            source = Path(tmp) / "ref_source.txt"
+            source.write_text("utt1\tHELLO WORLD\n", encoding="utf-8")
+            DummyAgent.session.config.workspace_path = str(Path(tmp))
+
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+            )
+            exp.workspace_path = str(workspace)
+            exp._ensure_workspace_dirs()
+            exp._prepare_workspace_inputs({"ref": str(source), "hyp": "artifacts/hyp.txt"})
+
+            copied = workspace / "input" / "ref.txt"
+            self.assertTrue(copied.exists())
+            self.assertEqual(copied.read_text(encoding="utf-8"), "utt1\tHELLO WORLD\n")
+
+    def test_run_exp_does_not_duplicate_session_exp_workspace(self):
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+        card = SureTaskCard(
+            task_id="asr_en_wer",
+            canonical_task="asr",
+            task_alias="asr",
+            primary_metric="WER",
+            required_roles=["hyp", "ref"],
+            artifact_contract={"hyp": "artifacts/hyp.txt", "ref": "input/ref.txt"},
+        )
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            exp_workspace = Path(tmp) / "task_0" / "exp_1_draft"
+            DummyAgent.session.config.workspace_path = str(exp_workspace)
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp_1_draft",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+            )
+
+            self.assertEqual(exp._resolve_workspace_path(), str(exp_workspace))
+
+            with patch.object(exp, "_ensure_workspace_dirs"), patch.object(
+                exp,
+                "_prepare_base_model_source_overrides",
+            ), patch.object(exp, "_prepare_workspace_inputs"), patch.object(
+                exp,
+                "_execute_and_score",
+                return_value=(False, None, {"stub": True}),
+            ):
+                exp.run_existing_code(code="print('ok')", role_paths={"hyp": "artifacts/hyp.txt"})
+
+            self.assertEqual(exp.workspace_path, str(exp_workspace))
+
+    def test_run_exp_applies_base_model_source_override_symlink(self):
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+        profile = BaseModelProfile(
+            model_id="f5tts",
+            usage_policy="required",
+            required_paths={"eval_data": "base_model/eval_data"},
+            source_paths={"eval_data": "/tmp/default_eval_data"},
+        )
+        card = SureTaskCard(
+            task_id="tts_en_wer",
+            canonical_task="tts",
+            task_alias="tts",
+            primary_metric="tts_wer",
+            required_roles=["samples_jsonl"],
+            artifact_contract={"samples_jsonl": "artifacts/samples.jsonl"},
+        )
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            selection_eval = Path(tmp) / "selection_eval"
+            selection_eval.mkdir()
+            DummyAgent.session.config.workspace_path = str(Path(tmp))
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=profile,
+                metric_runner=runner,
+            )
+            exp.workspace_path = str(workspace)
+            exp.base_model_source_overrides = {"eval_data": str(selection_eval)}
+            exp._ensure_workspace_dirs()
+            exp._prepare_base_model_source_overrides()
+
+            link = workspace / "base_model" / "eval_data"
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(link.resolve(), selection_eval.resolve())
+
+    def test_run_vc_candidate_ensures_base_model_profile_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_recipe = tmp_path / "icefall" / "recipe"
+            source_data = tmp_path / "icefall" / "data"
+            source_root = tmp_path / "icefall" / "root"
+            for source in (source_recipe, source_data, source_root):
+                source.mkdir(parents=True)
+            profile = BaseModelProfile(
+                model_id="zipformer",
+                usage_policy="required",
+                required_paths={
+                    "recipe": "base_model/recipe",
+                    "data": "base_model/data",
+                    "root": "base_model/root",
+                },
+                source_paths={
+                    "recipe": str(source_recipe),
+                    "data": str(source_data),
+                    "root": str(source_root),
+                },
+            )
+            workspace = tmp_path / "workspace"
+            workspace.mkdir()
+
+            missing = ensure_base_model_paths(workspace, profile)
+
+            self.assertEqual(missing, [])
+            self.assertEqual((workspace / "base_model" / "recipe").resolve(), source_recipe.resolve())
+            self.assertEqual((workspace / "base_model" / "data").resolve(), source_data.resolve())
+            self.assertEqual((workspace / "base_model" / "root").resolve(), source_root.resolve())
+            self.assertTrue((workspace / "base_model" / "recipe" / "data").is_symlink())
+            self.assertTrue((workspace / "data").is_symlink())
+
+    def test_run_exp_writes_remote_candidate_context(self):
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+        card = SureTaskCard(
+            task_id="asr_en_wer",
+            canonical_task="asr",
+            task_alias="asr",
+            primary_metric="WER",
+        )
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            DummyAgent.session.config.workspace_path = str(Path(tmp))
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+                execution_env={"SURE_RUN_TIMEOUT": "123"},
+            )
+            exp.workspace_path = str(workspace)
+            exp._ensure_workspace_dirs()
+            exp._current_role_paths = {"ref": "/selection/ref.txt", "hyp": "artifacts/hyp.txt"}
+            exp.base_model_source_overrides = {"eval_data": "/selection/prompts"}
+            exp.candidate_type_hint = ARCH
+            exp._write_remote_candidate_context()
+
+            payload = load_remote_candidate_context(workspace)
+            self.assertEqual(payload["execution_env"]["SURE_RUN_TIMEOUT"], "123")
+            self.assertEqual(payload["role_paths"]["ref"], "/selection/ref.txt")
+            self.assertEqual(payload["base_model_source_overrides"]["eval_data"], "/selection/prompts")
+            self.assertEqual(payload["candidate_type_hint"], ARCH)
+
+    def test_run_exp_enforces_staged_candidate_type_before_execution(self):
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+        card = SureTaskCard(
+            task_id="tts_en_wer",
+            canonical_task="tts",
+            task_alias="tts",
+            primary_metric="tts_wer",
+            required_roles=["samples_jsonl"],
+            artifact_contract={"samples_jsonl": "artifacts/samples.jsonl"},
+        )
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+            def get_workspace_path(self):
+                return None
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            DummyAgent.session.config.workspace_path = str(Path(tmp))
+            exp = SureRunExp(
+                stage="improve",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+            )
+            exp.workspace_path = str(workspace)
+            exp.enforce_candidate_type = True
+            code = "import os\nprint(os.environ.get('SURE_TTS_FINETUNE_WRAPPER'))\n"
+            ok, score, _uid, _code, details = exp.run_existing_code(
+                code=code,
+                role_paths={"samples_jsonl": "artifacts/samples.jsonl"},
+                candidate_type_hint=INFERENCE,
+            )
+
+            self.assertFalse(ok)
+            self.assertIsNone(score)
+            self.assertEqual(details["candidate_type_error"]["required"], INFERENCE)
+            self.assertEqual(details["candidate_type_error"]["detected"], FINE_TUNE)
+
+    def test_run_exp_rejects_asr_hypothesis_that_copies_reference(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "asr_en_wer",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            DummyAgent.session.config.workspace_path = str(Path(tmp))
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+            )
+            exp.workspace_path = str(workspace)
+            (workspace / "input").mkdir(parents=True)
+            (workspace / "artifacts").mkdir(parents=True)
+            lines = "".join(f"utt-{i}\tTHE SAME TEXT {i}\n" for i in range(120))
+            (workspace / "input" / "ref.txt").write_text(lines, encoding="utf-8")
+            (workspace / "artifacts" / "hyp.txt").write_text(lines, encoding="utf-8")
+
+            errors = exp._artifact_guard_errors(
+                {"ref": "input/ref.txt", "hyp": "artifacts/hyp.txt"}
+            )
+
+            self.assertTrue(errors)
+            self.assertIn("copy the reference transcript", errors[0])
+
+    def test_run_exp_rejects_low_diversity_asr_placeholder(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "asr_en_wer",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            DummyAgent.session.config.workspace_path = str(Path(tmp))
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+            )
+            exp.workspace_path = str(workspace)
+            (workspace / "input").mkdir(parents=True)
+            (workspace / "artifacts").mkdir(parents=True)
+            ref_lines = "".join(f"utt-{i}\tREAL REFERENCE TEXT {i}\n" for i in range(120))
+            hyp_lines = "".join(f"utt-{i}\tTHE\n" for i in range(120))
+            (workspace / "input" / "ref.txt").write_text(ref_lines, encoding="utf-8")
+            (workspace / "artifacts" / "hyp.txt").write_text(hyp_lines, encoding="utf-8")
+
+            errors = exp._artifact_guard_errors(
+                {"ref": "input/ref.txt", "hyp": "artifacts/hyp.txt"}
+            )
+
+            self.assertTrue(errors)
+            self.assertIn("low transcript diversity", errors[0])
+
+    def test_run_exp_allows_blank_asr_hypothesis_from_decoder(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "asr_en_wer",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            DummyAgent.session.config.workspace_path = str(Path(tmp))
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+            )
+            exp.workspace_path = str(workspace)
+            (workspace / "input").mkdir(parents=True)
+            (workspace / "artifacts").mkdir(parents=True)
+            ref_lines = "".join(f"utt-{i}\tREAL REFERENCE TEXT {i}\n" for i in range(120))
+            hyp_lines = "".join(
+                f"utt-{i}\t{'HYPOTHESIS ' + str(i) if i != 37 else ''}\n"
+                for i in range(120)
+            )
+            (workspace / "input" / "ref.txt").write_text(ref_lines, encoding="utf-8")
+            (workspace / "artifacts" / "hyp.txt").write_text(hyp_lines, encoding="utf-8")
+
+            errors = exp._artifact_guard_errors(
+                {"ref": "input/ref.txt", "hyp": "artifacts/hyp.txt"}
+            )
+
+            self.assertEqual(errors, [])
+
+    def test_run_exp_rejects_asr_training_candidate_with_baseline_checkpoint_only(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "asr_en_wer",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "exp"
+            baseline_dir = root / "baseline_exp"
+            baseline_dir.mkdir(parents=True)
+            baseline_checkpoint = baseline_dir / "epoch-50.pt"
+            baseline_checkpoint.write_bytes(b"official baseline checkpoint")
+            candidate_dir = workspace / "models" / "candidate"
+            candidate_dir.mkdir(parents=True)
+            (candidate_dir / "epoch-50.pt").symlink_to(baseline_checkpoint)
+            DummyAgent.session.config.workspace_path = str(root)
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+                execution_env={
+                    "SURE_ASR_REQUIRE_LOCAL_CHECKPOINT": "1",
+                    "SURE_ASR_FORBID_BASELINE_CHECKPOINT_FOR_TRAINING": "1",
+                    "SURE_BASELINE_CHECKPOINT_DIR": str(baseline_dir),
+                },
+            )
+            exp.workspace_path = str(workspace)
+            exp.candidate_type_hint = ARCH
+            exp.code = "cmd = ['train.py', '--encoder-dim', '192']"
+
+            errors = exp._artifact_guard_errors(
+                {"ref": "input/ref.txt", "hyp": "artifacts/hyp.txt"}
+            )
+
+        self.assertTrue(errors)
+        self.assertIn("workspace-local epoch checkpoint", errors[0])
+
+    def test_run_exp_rejects_asr_training_candidate_with_copied_baseline_checkpoint(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "asr_en_wer",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "exp"
+            baseline_dir = root / "baseline_exp"
+            baseline_dir.mkdir(parents=True)
+            payload = b"official baseline checkpoint"
+            (baseline_dir / "epoch-50.pt").write_bytes(payload)
+            candidate_dir = workspace / "models" / "candidate"
+            candidate_dir.mkdir(parents=True)
+            (candidate_dir / "epoch-50.pt").write_bytes(payload)
+            DummyAgent.session.config.workspace_path = str(root)
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+                execution_env={
+                    "SURE_ASR_REQUIRE_LOCAL_CHECKPOINT": "1",
+                    "SURE_ASR_FORBID_BASELINE_CHECKPOINT_FOR_TRAINING": "1",
+                    "SURE_BASELINE_CHECKPOINT_DIR": str(baseline_dir),
+                },
+            )
+            exp.workspace_path = str(workspace)
+            exp.candidate_type_hint = ARCH
+            exp.code = "cmd = ['train.py', '--encoder-dim', '192']"
+
+            errors = exp._artifact_guard_errors(
+                {"ref": "input/ref.txt", "hyp": "artifacts/hyp.txt"}
+            )
+
+        self.assertTrue(errors)
+        self.assertIn("workspace-local epoch checkpoint", errors[0])
+
+    def test_run_exp_allows_asr_training_candidate_with_local_checkpoint(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "asr_en_wer",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "exp"
+            baseline_dir = root / "baseline_exp"
+            baseline_dir.mkdir(parents=True)
+            (baseline_dir / "epoch-50.pt").write_bytes(b"official baseline checkpoint")
+            candidate_dir = workspace / "models" / "candidate"
+            candidate_dir.mkdir(parents=True)
+            (candidate_dir / "epoch-1.pt").write_bytes(b"candidate checkpoint")
+            DummyAgent.session.config.workspace_path = str(root)
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+                execution_env={
+                    "SURE_ASR_REQUIRE_LOCAL_CHECKPOINT": "1",
+                    "SURE_ASR_FORBID_BASELINE_CHECKPOINT_FOR_TRAINING": "1",
+                    "SURE_BASELINE_CHECKPOINT_DIR": str(baseline_dir),
+                },
+            )
+            exp.workspace_path = str(workspace)
+            exp.candidate_type_hint = ARCH
+            exp.code = "cmd = ['train.py', '--encoder-dim', '192']"
+
+            errors = exp._artifact_guard_errors(
+                {"ref": "input/ref.txt", "hyp": "artifacts/hyp.txt"}
+            )
+
+        self.assertEqual(errors, [])
+
+    def test_run_exp_rejects_asr_training_duration_below_floor(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "asr_en_wer",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "exp"
+            artifacts = workspace / "artifacts"
+            artifacts.mkdir(parents=True)
+            (artifacts / "candidate_changes.json").write_text(
+                json.dumps(
+                    {
+                        "candidate_type": "arch",
+                        "training_config": {
+                            "actual_train_max_duration": 16,
+                            "train_epochs": 1,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            DummyAgent.session.config.workspace_path = str(root)
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+                execution_env={
+                    "SURE_DURATION_AUTOTUNE_MIN": "100",
+                    "SURE_ASR_REQUIRE_LOCAL_CHECKPOINT": "1",
+                },
+            )
+            exp.workspace_path = str(workspace)
+            exp.candidate_type_hint = ARCH
+            exp.code = "cmd = ['train.py', '--encoder-dim', '192']"
+
+            errors = exp._artifact_guard_errors(
+                {"ref": "input/ref.txt", "hyp": "artifacts/hyp.txt"}
+            )
+
+        self.assertTrue(errors)
+        self.assertIn("max-duration below the configured floor", errors[0])
+
+    def test_run_exp_allows_official_asr_baseline_draft(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "asr_en_wer",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "exp"
+            baseline_dir = root / "baseline_exp"
+            baseline_dir.mkdir(parents=True)
+            payload = b"official baseline checkpoint"
+            (baseline_dir / "epoch-50.pt").write_bytes(payload)
+            candidate_dir = workspace / "models" / "candidate"
+            candidate_dir.mkdir(parents=True)
+            (candidate_dir / "epoch-50.pt").write_bytes(payload)
+            (workspace / "artifacts").mkdir(parents=True)
+            (workspace / "artifacts" / "official_baseline.json").write_text(
+                json.dumps({"baseline_type": "official"}),
+                encoding="utf-8",
+            )
+            DummyAgent.session.config.workspace_path = str(root)
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+                execution_env={
+                    "SURE_ASR_REQUIRE_LOCAL_CHECKPOINT": "1",
+                    "SURE_ASR_FORBID_BASELINE_CHECKPOINT_FOR_TRAINING": "1",
+                    "SURE_BASELINE_CHECKPOINT_DIR": str(baseline_dir),
+                },
+            )
+            exp.workspace_path = str(workspace)
+            exp.candidate_type_hint = FINE_TUNE
+
+            errors = exp._artifact_guard_errors(
+                {"ref": "input/ref.txt", "hyp": "artifacts/hyp.txt"}
+            )
+
+        self.assertEqual(errors, [])
+
+    def test_run_exp_rejects_asr_training_fatal_without_later_checkpoint(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "asr_en_wer",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "exp"
+            (workspace / "working").mkdir(parents=True)
+            (workspace / "working" / "train.log").write_text(
+                "RuntimeError: CUDA out of memory\n",
+                encoding="utf-8",
+            )
+            DummyAgent.session.config.workspace_path = str(root)
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+                execution_env={"SURE_ASR_FAIL_ON_TRAIN_FATAL_WITHOUT_CHECKPOINT": "1"},
+            )
+            exp.workspace_path = str(workspace)
+            exp.candidate_type_hint = FINE_TUNE
+
+            errors = exp._artifact_guard_errors(
+                {"ref": "input/ref.txt", "hyp": "artifacts/hyp.txt"}
+            )
+
+        self.assertTrue(errors)
+        self.assertIn("fatal CUDA/CUBLAS training failure", errors[0])
+
+    def test_run_exp_rejects_tts_prediction_that_copies_reference_audio(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "tts_en_wer",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            DummyAgent.session.config.workspace_path = str(Path(tmp))
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+            )
+            exp.workspace_path = str(workspace)
+            (workspace / "artifacts" / "wavs").mkdir(parents=True)
+            (workspace / "input").mkdir(parents=True)
+            payload = b"RIFF" + (b"0" * 2048)
+            (workspace / "artifacts" / "wavs" / "out.wav").write_bytes(payload)
+            (workspace / "input" / "ref.wav").write_bytes(payload)
+            row = {
+                "sample_id": "tts-1",
+                "prediction_audio": "wavs/out.wav",
+                "reference_audio": "../input/ref.wav",
+                "reference_text": "hello world",
+                "language": "en",
+            }
+            (workspace / "artifacts" / "samples.jsonl").write_text(
+                json.dumps(row) + "\n",
+                encoding="utf-8",
+            )
+
+            errors = exp._artifact_guard_errors({"samples_jsonl": "artifacts/samples.jsonl"})
+
+            self.assertTrue(errors)
+            self.assertTrue(any("byte-identical" in error for error in errors))
+
+    def test_run_exp_rejects_tts_reusing_one_prediction_for_all_samples(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "tts_en_wer",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            DummyAgent.session.config.workspace_path = str(Path(tmp))
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+            )
+            exp.workspace_path = str(workspace)
+            (workspace / "artifacts" / "wavs").mkdir(parents=True)
+            (workspace / "artifacts" / "wavs" / "shared.wav").write_bytes(
+                b"RIFF" + (b"1" * 2048)
+            )
+            rows = [
+                {
+                    "sample_id": "tts-1",
+                    "prediction_audio": "wavs/shared.wav",
+                    "reference_text": "first target",
+                    "language": "en",
+                },
+                {
+                    "sample_id": "tts-2",
+                    "prediction_audio": "wavs/shared.wav",
+                    "reference_text": "second target",
+                    "language": "en",
+                },
+            ]
+            (workspace / "artifacts" / "samples.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+
+            errors = exp._artifact_guard_errors({"samples_jsonl": "artifacts/samples.jsonl"})
+
+            self.assertTrue(errors)
+            self.assertTrue(any("reuses the same prediction_audio" in error for error in errors))
+
+    def test_run_exp_requires_tts_candidate_changes_when_configured(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "tts_en_wer",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            DummyAgent.session.config.workspace_path = str(Path(tmp))
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+                execution_env={"SURE_REQUIRE_CANDIDATE_CHANGES": "1"},
+            )
+            exp.workspace_path = str(workspace)
+            (workspace / "artifacts" / "wavs").mkdir(parents=True)
+            (workspace / "artifacts" / "wavs" / "out.wav").write_bytes(
+                b"RIFF" + (b"2" * 2048)
+            )
+            row = {
+                "sample_id": "tts-1",
+                "prediction_audio": "wavs/out.wav",
+                "reference_text": "target",
+                "language": "en",
+            }
+            (workspace / "artifacts" / "samples.jsonl").write_text(
+                json.dumps(row) + "\n",
+                encoding="utf-8",
+            )
+
+            errors = exp._artifact_guard_errors({"samples_jsonl": "artifacts/samples.jsonl"})
+            self.assertTrue(any("candidate change record is missing" in error for error in errors))
+
+            (workspace / "artifacts" / "candidate_changes.json").write_text(
+                json.dumps(
+                    {
+                        "candidate_type": "inference",
+                        "idea_text": "baseline inference",
+                        "changed_fields": [],
+                        "arch_config": {},
+                        "training_config": {},
+                        "inference_config": {},
+                        "defaults": {},
+                        "diff_from_defaults": {},
+                        "produced_artifacts": {"samples_jsonl": "artifacts/samples.jsonl"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(exp._artifact_guard_errors({"samples_jsonl": "artifacts/samples.jsonl"}), [])
+
+    def test_run_exp_uses_configured_execution_timeout(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "classification_accuracy",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        exp = SureRunExp(
+            stage="draft",
+            main_agent=DummyAgent(),
+            debug_agent=DummyAgent(),
+            config={},
+            exp_name="exp",
+            task_card=card,
+            base_model_profile=None,
+            metric_runner=runner,
+            execution_env={"SURE_RUN_TIMEOUT": "123.0"},
+        )
+
+        self.assertEqual(exp._execution_timeout(), "123")
+
+    def test_run_exp_zero_execution_timeout_means_unlimited(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "classification_accuracy",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+        agent = SimpleNamespace(
+            session=SimpleNamespace(config=SimpleNamespace(workspace_path=""))
+        )
+        exp = SureRunExp(
+            stage="draft",
+            main_agent=agent,
+            debug_agent=agent,
+            config={},
+            exp_name="exp",
+            task_card=card,
+            base_model_profile=None,
+            metric_runner=runner,
+            execution_env={"SURE_RUN_TIMEOUT": "0"},
+        )
+
+        self.assertEqual(exp._execution_timeout(), "0")
+
+    def test_run_exp_exports_runtime_helper_without_pre_resolving_duration(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "asr_en_wer",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            DummyAgent.session.config.workspace_path = str(Path(tmp))
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+                execution_env={"SURE_MAX_DURATION": "auto"},
+            )
+            exp.code = "print('candidate')\n"
+            command = exp._execution_command()
+
+        self.assertIn("SURE_RUNTIME_ENV_HELPER", command)
+        self.assertIn("SURE_MAX_DURATION=auto", command)
+        self.assertNotIn("resolve-max-duration", command)
+
+    def test_run_exp_uses_configured_initial_solution_for_draft(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "classification_accuracy",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            solution = Path(tmp) / "baseline.py"
+            solution.write_text("print('fixed draft')\n", encoding="utf-8")
+            DummyAgent.session.config.workspace_path = str(Path(tmp))
+
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={"sure": {"initial_solution_path": str(solution)}},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+            )
+
+            response = exp._initial_solution_response()
+
+        self.assertIsNotNone(response)
+        self.assertIn("print('fixed draft')", response or "")
+
+    def test_run_exp_initial_solution_failure_does_not_enter_debug_loop(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "classification_accuracy",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            solution = Path(tmp) / "baseline.py"
+            solution.write_text("print('fixed draft')\n", encoding="utf-8")
+            DummyAgent.session.config.workspace_path = str(Path(tmp))
+
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={"sure": {"initial_solution_path": str(solution)}},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+            )
+            with patch.object(
+                exp,
+                "_execute_and_score",
+                return_value=(False, None, {"error": "baseline failed"}),
+            ) as execute_mock, patch.object(
+                exp,
+                "_run_debug_agent",
+                side_effect=AssertionError("debug should not run for locked initial solution"),
+            ):
+                result = exp.run(
+                    task_description="task",
+                    data_preview="preview",
+                    role_paths={"hyp": "artifacts/hyp.txt", "ref": "input/ref.txt"},
+                )
+
+        self.assertFalse(result[0])
+        self.assertEqual(result[4], {"error": "baseline failed"})
+        execute_mock.assert_called_once()
+
+    def test_run_exp_initial_solution_keeps_candidate_type_hint(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "asr_en_wer",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        exp = SureRunExp(
+            stage="draft",
+            main_agent=DummyAgent(),
+            debug_agent=DummyAgent(),
+            config={"sure": {"initial_solution_path": "/tmp/baseline.py"}},
+            exp_name="exp",
+            task_card=card,
+            base_model_profile=None,
+            metric_runner=runner,
+        )
+        exp.candidate_type_hint = INFERENCE
+        exp._current_response_is_initial_solution = True
+
+        code = "cmd = ['base_model/recipe/train.py', '--num-encoder-layers', '2,2,4,5,4,2']"
+        self.assertEqual(exp._candidate_type_from_code(code), INFERENCE)
+
+        exp.candidate_type_hint = FINE_TUNE
+        self.assertEqual(exp._candidate_type_from_code(code), FINE_TUNE)
+
+    def test_run_exp_does_not_use_initial_solution_for_improve(self):
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "classification_accuracy",
+        )
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            solution = Path(tmp) / "baseline.py"
+            solution.write_text("print('fixed draft')\n", encoding="utf-8")
+            DummyAgent.session.config.workspace_path = str(Path(tmp))
+
+            exp = SureRunExp(
+                stage="improve",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={"sure": {"initial_solution_path": str(solution)}},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=None,
+                metric_runner=runner,
+            )
+
+            response = exp._initial_solution_response()
+
+        self.assertIsNone(response)
+
+    def test_build_run_args_resolves_workspace_relative_paths(self):
+        path = Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml"
+        card = resolve_task_card(path, "asr_en_wer")
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            args = runner._build_run_args(
+                card,
+                workspace,
+                {"ref": "input/ref.txt", "hyp": "artifacts/hyp.txt"},
+            )
+        self.assertEqual(set(args), {"ref_file", "hyp_file"})
+        self.assertTrue(args["ref_file"].endswith("input/ref.txt"))
+        self.assertTrue(args["hyp_file"].endswith("artifacts/hyp.txt"))
+
+    def test_run_uses_fake_sure_module_without_touching_sure_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            saved_sure_modules = {
+                name: module
+                for name, module in sys.modules.items()
+                if name == "sure_eval" or name.startswith("sure_eval.")
+            }
+            for name in list(saved_sure_modules):
+                sys.modules.pop(name, None)
+
+            root = Path(tmp) / "sure"
+            src = root / "src"
+            pkg = src / "sure_eval" / "evaluation"
+            pkg.mkdir(parents=True)
+            (src / "sure_eval" / "__init__.py").write_text("", encoding="utf-8")
+            (pkg / "__init__.py").write_text("", encoding="utf-8")
+            (pkg / "cli_adapters.py").write_text(
+                """
+def build_pipeline_spec(task, language=None, metric=None, output_path=None):
+    return {"task": task, "language": language, "metric": metric, "pipeline_id": "fake"}
+
+def run_pipeline_spec(pipeline, output_dir, **kwargs):
+    return {
+        "status": "ok",
+        "task": pipeline["task"],
+        "metric": pipeline["metric"],
+        "score": 12.5,
+        "pipeline_id": "fake",
+        "output_dir": output_dir,
+        "report_path": output_dir + "/report.json",
+        "pipeline_description_path": output_dir + "/pipeline_description.json",
+    }
+""",
+                encoding="utf-8",
+            )
+            workspace = Path(tmp) / "workspace"
+            (workspace / "input").mkdir(parents=True)
+            (workspace / "artifacts").mkdir()
+            (workspace / "input" / "ref.txt").write_text("utt1\tHELLO\n", encoding="utf-8")
+            (workspace / "artifacts" / "hyp.txt").write_text("utt1\tHELLO\n", encoding="utf-8")
+
+            card = resolve_task_card(
+                Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+                "asr_en_wer",
+            )
+            try:
+                result = SureMetricRunner(root, pythonpath=src, device="cpu").run(
+                    task_card=card,
+                    workspace_path=workspace,
+                    output_dir=workspace / "metric",
+                    role_paths={},
+                )
+            finally:
+                for name in [
+                    name
+                    for name in list(sys.modules)
+                    if name == "sure_eval" or name.startswith("sure_eval.")
+                ]:
+                    sys.modules.pop(name, None)
+                sys.modules.update(saved_sure_modules)
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.score, 12.5)
+            self.assertTrue((workspace / "metric" / "pipeline_spec.json").exists())
+            self.assertTrue((workspace / "metric" / "score_summary.json").exists())
+
+    def test_metric_gpu_sets_cuda_visible_devices_and_restores_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            saved_sure_modules = {
+                name: module
+                for name, module in sys.modules.items()
+                if name == "sure_eval" or name.startswith("sure_eval.")
+            }
+            for name in list(saved_sure_modules):
+                sys.modules.pop(name, None)
+
+            root = Path(tmp) / "sure"
+            src = root / "src"
+            pkg = src / "sure_eval" / "evaluation"
+            pkg.mkdir(parents=True)
+            (src / "sure_eval" / "__init__.py").write_text("", encoding="utf-8")
+            (pkg / "__init__.py").write_text("", encoding="utf-8")
+            (pkg / "cli_adapters.py").write_text(
+                """
+import os
+
+def build_pipeline_spec(task, language=None, metric=None, output_path=None):
+    return {"task": task, "language": language, "metric": metric, "pipeline_id": "fake"}
+
+def run_pipeline_spec(pipeline, output_dir, **kwargs):
+    return {
+        "status": "ok",
+        "metric": pipeline["metric"],
+        "score": 7.0,
+        "pipeline_id": "fake",
+        "seen_cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+    }
+""",
+                encoding="utf-8",
+            )
+            workspace = Path(tmp) / "workspace"
+            (workspace / "input").mkdir(parents=True)
+            (workspace / "artifacts").mkdir()
+            (workspace / "input" / "ref.txt").write_text("utt1\tHELLO\n", encoding="utf-8")
+            (workspace / "artifacts" / "hyp.txt").write_text("utt1\tHELLO\n", encoding="utf-8")
+            card = resolve_task_card(
+                Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+                "asr_en_wer",
+            )
+
+            try:
+                with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0,2"}, clear=False):
+                    result = SureMetricRunner(
+                        root,
+                        pythonpath=src,
+                        device="cuda",
+                        metric_gpu={
+                            "enabled": True,
+                            "devices": "2",
+                            "lock_dir": str(Path(tmp) / "locks"),
+                        },
+                    ).run(
+                        task_card=card,
+                        workspace_path=workspace,
+                        output_dir=workspace / "metric",
+                        role_paths={},
+                    )
+                    self.assertEqual(os.environ.get("CUDA_VISIBLE_DEVICES"), "0,2")
+            finally:
+                for name in [
+                    name
+                    for name in list(sys.modules)
+                    if name == "sure_eval" or name.startswith("sure_eval.")
+                ]:
+                    sys.modules.pop(name, None)
+                sys.modules.update(saved_sure_modules)
+
+            self.assertTrue(result.success)
+            summary = json.loads((workspace / "metric" / "score_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["seen_cuda_visible_devices"], "2")
+            self.assertTrue((workspace / "metric" / "metric_gpu_attempts.json").exists())
+
+    def test_metric_gpu_retries_cuda_oom_on_next_device(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            saved_sure_modules = {
+                name: module
+                for name, module in sys.modules.items()
+                if name == "sure_eval" or name.startswith("sure_eval.")
+            }
+            for name in list(saved_sure_modules):
+                sys.modules.pop(name, None)
+
+            root = Path(tmp) / "sure"
+            src = root / "src"
+            pkg = src / "sure_eval" / "evaluation"
+            pkg.mkdir(parents=True)
+            (src / "sure_eval" / "__init__.py").write_text("", encoding="utf-8")
+            (pkg / "__init__.py").write_text("", encoding="utf-8")
+            (pkg / "cli_adapters.py").write_text(
+                """
+import os
+
+attempts = []
+
+def build_pipeline_spec(task, language=None, metric=None, output_path=None):
+    return {"task": task, "language": language, "metric": metric, "pipeline_id": "fake"}
+
+def run_pipeline_spec(pipeline, output_dir, **kwargs):
+    cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
+    attempts.append(cuda)
+    if cuda == "0":
+        raise RuntimeError("CUDA out of memory while loading scorer")
+    return {
+        "status": "ok",
+        "metric": pipeline["metric"],
+        "score": 6.0,
+        "pipeline_id": "fake",
+        "seen_cuda_visible_devices": cuda,
+        "attempt_count": len(attempts),
+    }
+""",
+                encoding="utf-8",
+            )
+            workspace = Path(tmp) / "workspace"
+            (workspace / "input").mkdir(parents=True)
+            (workspace / "artifacts").mkdir()
+            (workspace / "input" / "ref.txt").write_text("utt1\tHELLO\n", encoding="utf-8")
+            (workspace / "artifacts" / "hyp.txt").write_text("utt1\tHELLO\n", encoding="utf-8")
+            card = resolve_task_card(
+                Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+                "asr_en_wer",
+            )
+
+            try:
+                with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0,1"}, clear=False):
+                    result = SureMetricRunner(
+                        root,
+                        pythonpath=src,
+                        device="cuda",
+                        metric_gpu={
+                            "enabled": True,
+                            "devices": "0,1",
+                            "oom_retry": True,
+                            "max_retries": 1,
+                            "lock_dir": str(Path(tmp) / "locks"),
+                        },
+                    ).run(
+                        task_card=card,
+                        workspace_path=workspace,
+                        output_dir=workspace / "metric",
+                        role_paths={},
+                    )
+                    self.assertEqual(os.environ.get("CUDA_VISIBLE_DEVICES"), "0,1")
+            finally:
+                for name in [
+                    name
+                    for name in list(sys.modules)
+                    if name == "sure_eval" or name.startswith("sure_eval.")
+                ]:
+                    sys.modules.pop(name, None)
+                sys.modules.update(saved_sure_modules)
+
+            self.assertTrue(result.success)
+            summary = json.loads((workspace / "metric" / "score_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["seen_cuda_visible_devices"], "1")
+            self.assertEqual(summary["attempt_count"], 2)
+            attempts = json.loads(
+                (workspace / "metric" / "metric_gpu_attempts.json").read_text(encoding="utf-8")
+            )
+            starts = [item["metric_gpu"]["cuda_visible_devices"] for item in attempts if item["event"] == "attempt_start"]
+            self.assertEqual(starts, ["0", "1"])
+            self.assertTrue(any(item.get("is_cuda_oom") for item in attempts))
+
+    def test_candidate_boundary_rejects_direct_sure_access(self):
+        errors = validate_sure_candidate_boundary(
+            """
+import sure_eval.evaluation.cli_adapters
+SURE = "/hpc_stor03/sjtu_home/chaolei.liu/sure"
+""",
+            "/hpc_stor03/sjtu_home/chaolei.liu/sure",
+        )
+        self.assertTrue(any("imports SURE module" in error for error in errors))
+        self.assertTrue(any("read-only SURE root" in error for error in errors))
+
+    def test_candidate_boundary_allows_workspace_model_code(self):
+        errors = validate_sure_candidate_boundary(
+            """
+from pathlib import Path
+import torch
+
+class Model(torch.nn.Module):
+    pass
+
+Path("models").mkdir(exist_ok=True)
+Path("artifacts").mkdir(exist_ok=True)
+""",
+            "/hpc_stor03/sjtu_home/chaolei.liu/sure",
+        )
+        self.assertEqual(errors, [])
+
+    def test_run_sure_script_validation_rejects_comment_only_script(self):
+        errors = validate_run_sure_script(
+            """
+# Corrected run_sure.py has been written to the current workspace.
+# It writes artifacts/hyp.txt and candidate_changes.json.
+""",
+            {"ref": "input/ref.txt", "hyp": "artifacts/hyp.txt"},
+        )
+        self.assertTrue(any("no executable Python statements" in error for error in errors))
+
+    def test_run_sure_script_validation_allows_top_level_artifact_writer(self):
+        errors = validate_run_sure_script(
+            """
+from pathlib import Path
+Path("artifacts").mkdir(exist_ok=True)
+Path("artifacts/hyp.txt").write_text("utt1\\tHELLO\\n")
+""",
+            {"ref": "input/ref.txt", "hyp": "artifacts/hyp.txt"},
+        )
+        self.assertEqual(errors, [])
+
+    def test_candidate_boundary_requires_base_model_reference(self):
+        path = Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml"
+        card = resolve_task_card(path, "asr_en_wer")
+        profile = merge_base_model_profile(
+            card.base_model,
+            {
+                "source_paths": {
+                    "recipe": "/tmp/icefall/zipformer",
+                    "data": "/tmp/icefall/data",
+                    "root": "/tmp/icefall",
+                }
+            },
+        )
+        errors = validate_sure_candidate_boundary(
+            """
+from pathlib import Path
+Path("artifacts/hyp.txt").write_text("utt1\\tHELLO\\n")
+""",
+            "/hpc_stor03/sjtu_home/chaolei.liu/sure",
+            profile,
+        )
+        self.assertTrue(any("required base model profile is not referenced" in error for error in errors))
+
+    def test_candidate_boundary_allows_joined_base_model_reference(self):
+        path = Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml"
+        card = resolve_task_card(path, "asr_en_wer")
+        profile = merge_base_model_profile(
+            card.base_model,
+            {
+                "source_paths": {
+                    "recipe": "/tmp/icefall/zipformer",
+                    "data": "/tmp/icefall/data",
+                    "root": "/tmp/icefall",
+                }
+            },
+        )
+        errors = validate_sure_candidate_boundary(
+            """
+from pathlib import Path
+WORK = Path.cwd()
+RECIPE = WORK / "base_model" / "recipe"
+DATA = WORK / "base_model" / "data"
+ROOT = WORK / "base_model" / "root"
+Path("artifacts/hyp.txt").write_text("utt1\\tHELLO\\n")
+""",
+            "/hpc_stor03/sjtu_home/chaolei.liu/sure",
+            profile,
+        )
+        self.assertEqual(errors, [])
+
+    def test_candidate_boundary_rejects_lang_dir_for_zipformer_train(self):
+        path = Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml"
+        card = resolve_task_card(path, "asr_en_wer")
+        profile = merge_base_model_profile(
+            card.base_model,
+            {
+                "source_paths": {
+                    "recipe": "/tmp/icefall/zipformer",
+                    "data": "/tmp/icefall/data",
+                    "root": "/tmp/icefall",
+                }
+            },
+        )
+        errors = validate_sure_candidate_boundary(
+            """
+cmd = ["python", "base_model/recipe/train.py", "--lang-dir", "base_model/data/lang_bpe_500"]
+""",
+            "/hpc_stor03/sjtu_home/chaolei.liu/sure",
+            profile,
+        )
+        self.assertTrue(any("passes --lang-dir to zipformer train.py" in error for error in errors))
+
+    def test_candidate_boundary_allows_lang_dir_for_zipformer_decode(self):
+        path = Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml"
+        card = resolve_task_card(path, "asr_en_wer")
+        profile = merge_base_model_profile(
+            card.base_model,
+            {
+                "source_paths": {
+                    "recipe": "/tmp/icefall/zipformer",
+                    "data": "/tmp/icefall/data",
+                    "root": "/tmp/icefall",
+                }
+            },
+        )
+        errors = validate_sure_candidate_boundary(
+            """
+cmd = ["python", "base_model/recipe/decode.py", "--lang-dir", "base_model/data/lang_bpe_500"]
+""",
+            "/hpc_stor03/sjtu_home/chaolei.liu/sure",
+            profile,
+        )
+        self.assertEqual(errors, [])
+
+    def test_candidate_boundary_rejects_train_only_args_for_zipformer_decode(self):
+        path = Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml"
+        card = resolve_task_card(path, "asr_en_wer")
+        profile = merge_base_model_profile(
+            card.base_model,
+            {
+                "source_paths": {
+                    "recipe": "/tmp/icefall/zipformer",
+                    "data": "/tmp/icefall/data",
+                    "root": "/tmp/icefall",
+                }
+            },
+        )
+        errors = validate_sure_candidate_boundary(
+            """
+cmd = [
+    "python",
+    "base_model/recipe/decode.py",
+    "--ctc-loss-scale",
+    "0.1",
+    "--time-mask-ratio",
+    "2.5",
+]
+""",
+            "/hpc_stor03/sjtu_home/chaolei.liu/sure",
+            profile,
+            canonical_task="asr",
+        )
+        self.assertTrue(
+            any("training-only argument(s) to decode.py" in error for error in errors)
+        )
+
+    def test_candidate_boundary_rejects_failed_duration_log_recovery(self):
+        errors = validate_sure_candidate_boundary(
+            r"""
+import re
+
+def parse_any_integer_from_log(log_path):
+    text = log_path.read_text()
+    return int(re.search(r"(?:resolved|max[-_ ]duration|selected|final)[^\d]{0,80}(\d{2,5})", text).group(1))
+
+def resolve_duration():
+    try:
+        cmd = ["python", "runtime_env.py", "resolve-max-duration"]
+        raise RuntimeError("duration_autotune failed")
+    except Exception:
+        return parse_any_integer_from_log(Path("working/duration_autotune.log"))
+
+cmd = ["python", "base_model/recipe/train.py", "--encoder-dim", "192"]
+""",
+            "/hpc_stor03/sjtu_home/chaolei.liu/sure",
+            canonical_task="asr",
+        )
+
+        self.assertTrue(any("failed helper logs" in error for error in errors))
+
+    def test_candidate_boundary_rejects_direct_duration_helper_invocation(self):
+        errors = validate_sure_candidate_boundary(
+            """
+import os
+import subprocess
+
+helper = os.environ["SURE_RUNTIME_ENV_HELPER"]
+subprocess.run([helper, "resolve-max-duration"])
+cmd = ["python", "base_model/recipe/train.py", "--encoder-dim", "192"]
+""",
+            "/hpc_stor03/sjtu_home/chaolei.liu/sure",
+            canonical_task="asr",
+        )
+
+        self.assertTrue(any("invokes SURE_RUNTIME_ENV_HELPER directly" in error for error in errors))
+
+    def test_candidate_boundary_allows_official_zipformer_baseline_source(self):
+        profile = BaseModelProfile(model_id="zipformer", framework="icefall")
+        baseline_source = Path(zipformer_baseline.__file__).read_text(encoding="utf-8")
+        errors = validate_sure_candidate_boundary(
+            baseline_source,
+            "/hpc_stor03/sjtu_home/chaolei.liu/sure",
+            profile,
+            canonical_task="asr",
+            require_asr_wrapper=True,
+        )
+        self.assertEqual(errors, [])
+
+    def test_candidate_boundary_requires_asr_zipformer_wrapper_when_configured(self):
+        direct_errors = validate_sure_candidate_boundary(
+            """
+import subprocess
+cmd = ["python", "base_model/recipe/train.py", "--encoder-dim", "192"]
+subprocess.run(cmd)
+""",
+            "/hpc_stor03/sjtu_home/chaolei.liu/sure",
+            canonical_task="asr",
+            require_asr_wrapper=True,
+        )
+        self.assertTrue(any("SURE_ASR_ZIPFORMER_WRAPPER" in error for error in direct_errors))
+
+        wrapper_errors = validate_sure_candidate_boundary(
+            """
+import os
+import subprocess
+cmd = [os.environ["SURE_ASR_ZIPFORMER_WRAPPER"], "--candidate-type", "arch"]
+subprocess.run(cmd)
+""",
+            "/hpc_stor03/sjtu_home/chaolei.liu/sure",
+            canonical_task="asr",
+            require_asr_wrapper=True,
+        )
+        self.assertEqual(wrapper_errors, [])
+
+    def test_candidate_boundary_rejects_zipformer_wrapper_plus_duration_helper(self):
+        errors = validate_sure_candidate_boundary(
+            """
+import os
+import subprocess
+helper_cmd = [os.environ["SURE_RUNTIME_ENV_HELPER"], "resolve-max-duration"]
+subprocess.run(helper_cmd)
+cmd = [os.environ["SURE_ASR_ZIPFORMER_WRAPPER"], "--candidate-type", "arch"]
+subprocess.run(cmd)
+""",
+            "/hpc_stor03/sjtu_home/chaolei.liu/sure",
+            canonical_task="asr",
+            require_asr_wrapper=True,
+        )
+        self.assertTrue(any("must not call the duration helper directly" in error for error in errors))
+
+    def test_candidate_boundary_rejects_direct_base_model_source_path(self):
+        path = Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml"
+        card = resolve_task_card(path, "asr_en_wer")
+        profile = merge_base_model_profile(
+            card.base_model,
+            {
+                "source_paths": {
+                    "recipe": "/tmp/icefall/zipformer",
+                    "data": "/tmp/icefall/data",
+                    "root": "/tmp/icefall",
+                }
+            },
+        )
+        errors = validate_sure_candidate_boundary(
+            """
+from pathlib import Path
+recipe = Path("base_model/recipe")
+external = "/tmp/icefall/zipformer"
+""",
+            "/hpc_stor03/sjtu_home/chaolei.liu/sure",
+            profile,
+        )
+        self.assertTrue(any("base model source path directly" in error for error in errors))
+
+    def test_generic_classification_pipeline_compatibility_with_sure(self):
+        sure_root = Path("/hpc_stor03/sjtu_home/chaolei.liu/sure")
+        sure_src = sure_root / "src"
+        if not sure_src.exists():
+            self.skipTest(f"SURE source tree is not available: {sure_src}")
+
+        runner = SureMetricRunner(sure_root, pythonpath=sure_src, device="cpu")
+        old_dont_write_bytecode = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            runner._prepare_import_path()
+            from sure_eval.evaluation.cli_adapters import build_pipeline_spec  # type: ignore
+        finally:
+            sys.dont_write_bytecode = old_dont_write_bytecode
+
+        card = resolve_task_card(
+            Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml",
+            "classification_accuracy",
+        )
+        spec = runner._build_pipeline_spec(build_pipeline_spec, card)
+        self.assertEqual(spec["task"], "classification")
+        self.assertEqual(spec["task_alias"], "classification")
+        self.assertEqual(spec["required_roles"], ["hyp", "ref"])
+        self.assertEqual(spec["pipeline_id"], "classification.accuracy.classify")
+
+    def test_all_repo_task_cards_match_sure_adapter_required_roles(self):
+        sure_root = Path("/hpc_stor03/sjtu_home/chaolei.liu/sure")
+        sure_src = sure_root / "src"
+        if not sure_src.exists():
+            self.skipTest(f"SURE source tree is not available: {sure_src}")
+
+        runner = SureMetricRunner(sure_root, pythonpath=sure_src, device="cpu")
+        old_dont_write_bytecode = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            runner._prepare_import_path()
+            from sure_eval.evaluation.cli_adapters import build_pipeline_spec  # type: ignore
+        finally:
+            sys.dont_write_bytecode = old_dont_write_bytecode
+
+        cards = load_task_cards(Path(__file__).resolve().parents[2] / "task_cards" / "sure_tasks.yaml")
+        self.assertEqual(len(cards), 15)
+        for task_id, card in cards.items():
+            with self.subTest(task_id=task_id):
+                spec = runner._build_pipeline_spec(build_pipeline_spec, card)
+                self.assertEqual(set(card.required_roles), set(spec["required_roles"]))
+                self.assertTrue(spec["pipeline_id"])
+                self.assertTrue(spec["metric"])
+
+
+if __name__ == "__main__":
+    unittest.main()

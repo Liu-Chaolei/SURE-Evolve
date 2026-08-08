@@ -1,0 +1,15 @@
+{
+  "name": "libritts_train_clean_100_10h",
+  "metadata_csv": "/mnt/cloudstorfs/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/f5tts_train_manifests/libritts_train_clean_100_10h/metadata.csv",
+  "source": "libritts",
+  "source_root": "/hpc_stor03/sjtu_home/chaolei.liu/data/tts/LibriTTS",
+  "splits": {
+    "train-clean-100": 6175
+  },
+  "sample_count": 6175,
+  "speaker_count": 245,
+  "duration_hours": 10.0015,
+  "min_duration": 1.02,
+  "max_duration": 14.99,
+  "seed": 20260714
+}

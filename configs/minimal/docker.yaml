@@ -1,0 +1,155 @@
+# Minimal Playground — Docker session configuration
+# Mirrors deepseek-v3.2-example.yaml but runs the agent inside a Docker
+# container. Run with:
+#   python run.py --agent minimal --config configs/minimal/docker.yaml --task "..."
+
+# ============================================
+# LLM Configuration
+# ============================================
+llm:
+  openai:
+    provider: "openai"
+    model: "${GPT_CHAT_MODEL}"
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "${GPT_BASE_URL}"
+    temperature: 0.7
+    max_tokens: 163840
+    timeout: 60
+    max_retries: 3
+    retry_delay: 1.0
+
+  anthropic:
+    provider: "anthropic"
+    model: "claude-haiku-4-5-20251001"
+    api_key: "${ANTHROPIC_API_KEY}"
+    base_url: "${ANTHROPIC_BASE_URL}"
+    temperature: 0.7
+    max_tokens: 16384
+    timeout: 60
+    max_retries: 3
+    retry_delay: 1.0
+
+  local_sglang:
+    provider: "deepseek"
+    model: "deepseek-v3.2"
+    api_key: "${DEEPSEEK_API_KEY}"
+    base_url: "${DEEPSEEK_API_BASE}"
+    temperature: 0.7
+    max_tokens: 16384
+    timeout: 300
+    max_retries: 3
+    retry_delay: 1.0
+
+  default: "openai"
+
+# ============================================
+# Agent Configuration
+# ============================================
+agents:
+  general:
+    llm: "openai"
+    max_turns: 50
+    tools:
+      builtin: ["*"]
+
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+
+    system_prompt_file: "prompts/system_prompt.txt"
+    user_prompt_file: "prompts/user_prompt.txt"
+
+# ============================================
+# Session Configuration
+# ============================================
+session:
+  type: "docker"
+
+  docker:
+    # Image — must include bash. `python:3.11` is universally available on
+    # Docker Hub; swap to your own image (e.g. `evomaster/base:latest`) for
+    # a richer toolset.
+    image: "evomaster/base:bohrium"
+
+    # When null we generate a unique name per run. Set this to a fixed name
+    # if you want to reuse the same container across runs (then also set
+    # auto_remove: false below).
+    container_name: null
+
+    # Attach to a pre-existing container instead of creating one. We never
+    # stop or remove containers we attach to.
+    use_existing_container: null
+
+    # Working directory inside the container. EvoMaster also mounts the
+    # run-specific workspace at this path (see BasePlayground._update_workspace_path).
+    working_dir: "/workspace"
+
+    # Resource limits. Set to null / 0 to disable a particular limit.
+    memory_limit: "16g"   # --memory cgroup cap (also applied as --memory-swap
+                          #  so the container can't spill to swap). Enforced
+                          #  by the kernel; note `htop` / `free` inside the
+                          #  container still show the host's total memory
+                          #  because `/proc/meminfo` is not namespaced.
+    cpu_limit: 16.0       # --cpus: throttles total CPU *time* the container
+                          #  can consume. It does NOT restrict which cores
+                          #  are visible — `htop` still lists every host CPU.
+                          #  Use `cpu_devices` below if you want visibility
+                          #  restriction too.
+    cpu_devices: "0-15"     # --cpuset-cpus (CPU pinning). Restricts which
+                          #  physical cores the container can see/use, so
+                          #  `htop` only shows the pinned subset. Accepts:
+                          #    - null    : no pinning (default)
+                          #    - "0-15"  : cores 0..15
+                          #    - "0,2,4" : cores 0, 2, 4
+                          #    - [0,1,2] : Python list form
+
+    # GPU spec: null disables GPUs; "all", a single index ("0"), a comma list
+    # ("0,1"), or a Python list (["0","1"]) selects them.
+    gpu_devices: ["0","1"]
+
+    # Network mode: "bridge" (default), "host", "none", or any user network.
+    network_mode: "host"
+
+    # Extra bind mounts {host_path: container_path}. Relative host paths
+    # ("e.g. ./assets") are resolved against the project root (the directory
+    # containing `evomaster/`), NOT the current working directory. Volumes
+    # whose container target nests inside `working_dir`
+    # (e.g. /workspace/data) are mirrored as host-side symlinks inside the
+    # run's workspace dir, so `runs/<run>/workspace/data` shows the same
+    # files that `/workspace/data` sees inside the container. The agent's
+    # workspace is mounted automatically by EvoMaster — you don't need to
+    # list it here.
+    volumes: {}
+
+    # Extra container environment variables.
+    env_vars: {}
+
+    # auto_remove=true  → `docker run --rm`; the container is stopped and
+    #                     removed when the session closes.
+    # auto_remove=false → the container is left running between runs so a
+    #                     subsequent open() can reuse it.
+    auto_remove: true
+
+    # Image pull policy: "missing" (default), "always", or "never".
+    pull_image: "missing"
+
+    # Default per-command timeout, in seconds.
+    timeout: 300
+
+# ============================================
+# LLM Output Display
+# ============================================
+llm_output:
+  show_in_console: true
+  log_to_file: true
+
+# ============================================
+# Logging
+# ============================================
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: null
+  console: true

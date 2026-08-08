@@ -1,0 +1,182 @@
+# Minimal Skill Task — Docker session configuration
+# RAG multi-agent pipeline (analyze → plan → search → summarize) with the
+# agent's tool calls running inside a Docker container.
+# Run with:
+#   python run.py --agent minimal_skill_task \
+#       --config configs/minimal_skill_task/docker.yaml --task "..."
+
+# ============================================
+# LLM Configuration
+# ============================================
+llm:
+  openai:
+    provider: "openai"
+    model: "${GPT_CHAT_MODEL}"
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "${GPT_BASE_URL}"
+    temperature: 0.7
+    max_tokens: 16384
+    timeout: 60
+    max_retries: 3
+    retry_delay: 1.0
+
+  anthropic:
+    provider: "anthropic"
+    model: "claude-haiku-4-5-20251001"
+    api_key: "${ANTHROPIC_API_KEY}"
+    base_url: "${ANTHROPIC_BASE_URL}"
+    temperature: 0.7
+    max_tokens: 16384
+    timeout: 60
+    max_retries: 3
+    retry_delay: 1.0
+
+  local_sglang:
+    provider: "deepseek"
+    model: "deepseek-v3.2"
+    api_key: "${DEEPSEEK_API_KEY}"
+    base_url: "${DEEPSEEK_API_BASE}"
+    temperature: 0.7
+    max_tokens: 16384
+    timeout: 300
+    max_retries: 3
+    retry_delay: 1.0
+
+  default: "local_sglang"
+
+# ============================================
+# Agents
+# ============================================
+agents:
+  analyze:
+    llm: "openai"
+    max_turns: 10
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/analyze_system_prompt.txt"
+    user_prompt_file: "prompts/analyze_user_prompt.txt"
+
+  plan:
+    llm: "openai"
+    max_turns: 10
+    tools:
+    skills:
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/plan_system_prompt.txt"
+    user_prompt_file: "prompts/plan_user_prompt.txt"
+
+  search:
+    llm: "openai"
+    max_turns: 30
+    tools: "default"
+    skills:
+      - "*"
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/search_system_prompt.txt"
+    user_prompt_file: "prompts/search_user_prompt.txt"
+
+  summarize:
+    llm: "openai"
+    max_turns: 20
+    tools:
+      builtin:
+        - "execute_bash"
+        - "think"
+        - "finish"
+      mcp: []
+    skills:
+      - "rag"
+      - "pdf"
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/summarize_system_prompt.txt"
+    user_prompt_file: "prompts/summarize_user_prompt.txt"
+
+# ============================================
+# Embedding Configuration (used for RAG)
+# ============================================
+embedding:
+  type: "openai"
+  openai:
+    model: "text-embedding-3-large"
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "${GPT_BASE_URL}"
+    dimensions: 3072
+  local:
+    model: "playground/minimal_skill_task/local_models/all-mpnet-base-v2"
+    device: "cpu"
+
+# ============================================
+# Session Configuration
+# ============================================
+session:
+  type: "docker"
+
+  docker:
+    image: "evomaster/base:bohrium"
+    container_name: null
+    use_existing_container: null
+
+    working_dir: "/workspace"
+
+    # Resource limits. `memory_limit` is a cgroup cap (paired with
+    # `--memory-swap` so the container can't mask it via swap), but note
+    # that `htop` / `free` inside the container still show the host's
+    # memory because `/proc/meminfo` is not namespaced. `cpu_limit` only
+    # throttles CPU time — to restrict which cores are visible set
+    # `cpu_devices` below.
+    memory_limit: "8g"
+    cpu_limit: 4.0
+    cpu_devices: null     # --cpuset-cpus. null = no pinning; "0-3",
+                          # "0,2", or [0,1,2] restricts visible cores.
+    gpu_devices: null
+    # The skill task agents may want network access for RAG / web fetches;
+    # bridge is the safe default.
+    network_mode: "bridge"
+
+    # Extra bind mounts {host_path: container_path}. Relative host paths
+    # ("./data") resolve against the project root (the directory
+    # containing `evomaster/`). Volumes whose container target nests
+    # inside `working_dir` are mirrored as host-side symlinks inside the
+    # run workspace, so the host view matches what the container sees.
+    #
+    # The ``search`` agent in this playground exposes skills via the
+    # ``use_skill`` tool. ``use_skill`` runs the skill's script inside the
+    # session (i.e. inside this container), so the script files must be
+    # visible from within the container. We mount the project's
+    # ``evomaster/`` tree at ``/workspace/evomaster`` and rely on the
+    # session's host→container path translation to rewrite the script
+    # path at call time. Without this mount ``use_skill`` run_script
+    # actions would fail with "file not found".
+    volumes:
+      "./evomaster": "/workspace/evomaster"
+      "./playground/minimal_skill_task": "/workspace/playground/minimal_skill_task" # better change to your abosolute path
+    env_vars: {}
+
+    auto_remove: true
+    pull_image: "missing"
+    timeout: 300
+
+llm_output:
+  show_in_console: true
+  log_to_file: true
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: null
+  console: true

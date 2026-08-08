@@ -1,0 +1,218 @@
+# SURE Master Docker configuration.
+# This config expects the vc task to mount:
+# /hpc_stor03/sjtu_home/chaolei.liu:/hpc_stor03/sjtu_home/chaolei.liu
+
+sure:
+  root: "/hpc_stor03/sjtu_home/chaolei.liu/sure"
+  pythonpath: "/hpc_stor03/sjtu_home/chaolei.liu/sure/src"
+  task_cards_path: "./playground/sure_master/task_cards/sure_tasks.yaml"
+  task_id: "asr_en_wer"
+  device: "cuda"
+  cache_dir: null
+  validate_env: false
+  require_base_model: true
+  workspace_cleanup:
+    enabled: true
+    on_success: true
+    on_failure: true
+    remove_models: true
+    remove_working: true
+    remove_runtime_cache: true
+    compact_metric_logs: true
+    keep_log_tails: true
+    log_tail_bytes: 65536
+  initial_solution_path: "playground/sure_master/baselines/zipformer_large_cr_ctc_rnnt_baseline.py"
+  inputs:
+    ref: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/asr_librispeech_regular_ref.txt"
+  execution_env:
+    SURE_ASR_EVAL_SPLITS: "dev-clean,dev-other"
+    SURE_MAX_TRAIN_EPOCHS: "1"
+    SURE_MAX_DURATION: "auto"
+    SURE_DURATION_AUTOTUNE: "1"
+    SURE_DURATION_AUTOTUNE_MIN: "100"
+    SURE_DURATION_AUTOTUNE_STEP: "100"
+    SURE_DURATION_AUTOTUNE_MAX: "1400"
+    SURE_DURATION_PROBE_TIMEOUT: "1800"
+    SURE_DURATION_PROBE_SUCCESS_BATCHES: "3"
+    SURE_DURATION_PROBE_LOG_INTERVAL: "1"
+    SURE_DURATION_HEADROOM_MB: "1000"
+    SURE_DURATION_PROBE_FULL_LIBRI: "0"
+    SURE_DURATION_PRINT_DIAGNOSTICS: "0"
+    SURE_DURATION_TRAIN_ARGS: >-
+      --use-cr-ctc 1 --use-ctc 1 --use-transducer 1 --use-attention-decoder 0
+      --ctc-loss-scale 0.1 --enable-spec-aug 0 --cr-loss-scale 0.02
+      --time-mask-ratio 2.5
+    SURE_TRAIN_DURATION_RETRY: "1"
+    SURE_TRAIN_DURATION_MIN: "100"
+    SURE_TRAIN_DURATION_RETRY_STEP: "100"
+    SURE_RUN_TIMEOUT: "43200"
+    SURE_USE_FP16: "1"
+    SURE_DECODE_ONLY: "0"
+    SURE_BASELINE_CHECKPOINT_DIR: "/hpc_stor03/sjtu_home/chaolei.liu/models/official_drafts/icefall-asr-librispeech-zipformer-large-transducer-with-CR-CTC-20241019/exp"
+    SURE_BASELINE_USE_PRETRAINED: "1"
+    SURE_ASR_REQUIRE_LOCAL_CHECKPOINT: "1"
+    SURE_ASR_FORBID_BASELINE_CHECKPOINT_FOR_TRAINING: "1"
+    SURE_ASR_FAIL_ON_TRAIN_FATAL_WITHOUT_CHECKPOINT: "1"
+    SURE_ENABLE_MUSAN: "0"
+    ASR_WORLD_SIZE: "8"
+    SURE_BASELINE_WORLD_SIZE: "8"
+    SURE_ICEFALL_PYTHON: "/opt/conda/envs/icefall/bin/python"
+    SURE_ASR_ZIPFORMER_WRAPPER: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_icefall_zipformer_candidate.py"
+    SURE_ASR_REQUIRE_ZIPFORMER_WRAPPER: "1"
+    SURE_BASELINE_EPOCH: "50"
+    SURE_BASELINE_AVG: "26"
+    SURE_BASELINE_TRAIN_MAX_DURATION: "1400"
+    SURE_BASELINE_DECODE_MAX_DURATION: "300"
+    PYTORCH_CUDA_ALLOC_CONF: "max_split_size_mb:128,garbage_collection_threshold:0.8"
+    PYTHONPATH: "/hpc_stor03/sjtu_home/chaolei.liu/ASR/icefall"
+  base_models:
+    asr_en_wer:
+      source_paths:
+        recipe: "/hpc_stor03/sjtu_home/chaolei.liu/ASR/icefall/egs/librispeech/ASR/zipformer"
+        data: "/hpc_stor03/sjtu_home/chaolei.liu/ASR/icefall/egs/librispeech/ASR/data"
+        root: "/hpc_stor03/sjtu_home/chaolei.liu/ASR/icefall"
+
+max_research_rounds: 3
+
+llm:
+  openai:
+    provider: "openai"
+    model: "${GPT_CHAT_MODEL}"
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "${GPT_BASE_URL}"
+    temperature: 1
+    max_tokens: 65536
+    timeout: 3600
+    max_retries: 3
+    retry_delay: 1.0
+
+  kimi:
+    provider: "openai"
+    model: "kimi-k2.6"
+    api_key: "${KIMI_API_KEY}"
+    base_url: "${KIMI_BASE_URL}"
+    temperature: 0.7
+    max_tokens: 65536
+    timeout: 3600
+    max_retries: 3
+    retry_delay: 1.0
+
+  default: "openai"
+
+agents:
+  prefetch:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/prefetch_system_prompt.txt"
+    user_prompt_file: "prompts/prefetch_user_prompt.txt"
+
+  draft:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/draft_system_prompt.txt"
+    user_prompt_file: "prompts/draft_user_prompt.txt"
+
+  debug:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/debug_system_prompt.txt"
+    user_prompt_file: "prompts/debug_user_prompt.txt"
+
+  improve:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/improve_system_prompt.txt"
+    user_prompt_file: "prompts/improve_user_prompt.txt"
+
+  reseach:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/reseach_system_prompt.txt"
+    user_prompt_file: "prompts/reseach_user_prompt.txt"
+
+  knowledge_promotion:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/knowledge_promotion_system_prompt.txt"
+    user_prompt_file: "prompts/knowledge_promotion_user_prompt.txt"
+
+  wisdom_promotion:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/wisdom_promotion_system_prompt.txt"
+    user_prompt_file: "prompts/wisdom_promotion_user_prompt.txt"
+
+session:
+  type: "local"
+  local:
+    working_dir: "./playground/sure_master/workspace"
+    timeout: 86400
+    gpu_devices: auto
+    cpu_devices: null
+    symlinks: {}
+    parallel:
+      enabled: true
+      max_parallel: auto
+      gpus_per_exp: 4
+      serial_gpus_per_exp: all
+      set_asr_world_size: true
+      split_workspace_for_exp: true
+
+llm_output:
+  show_in_console: true
+  log_to_file: true
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: null
+  console: true

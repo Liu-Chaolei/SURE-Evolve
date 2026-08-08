@@ -1,0 +1,222 @@
+tasks:
+  asr_zh_cer:
+    canonical_task: asr
+    task_alias: asr
+    language: zh
+    primary_metric: CER
+    metric_direction: lower
+    route: asr.zh.cer.aispeech_norm.wenet_cer
+    required_roles: [ref, hyp]
+    artifact_contract:
+      ref: input/ref.txt
+      hyp: artifacts/hyp.txt
+    prompt_guidance: Generate Chinese ASR hypotheses as key-tab-text lines matching the reference keys.
+    description: Chinese ASR evaluated by AISpeech normalization and WeNet CER.
+
+  asr_en_wer:
+    canonical_task: asr
+    task_alias: asr
+    language: en
+    primary_metric: WER
+    metric_direction: lower
+    route: asr.en.wer.whisper_norm.wenet_wer
+    required_roles: [ref, hyp]
+    artifact_contract:
+      ref: input/ref.txt
+      hyp: artifacts/hyp.txt
+    base_model:
+      model_id: icefall_zipformer_asr
+      model_type: asr_recipe
+      framework: icefall
+      required_paths:
+        recipe: base_model/recipe
+        data: base_model/data
+        root: base_model/root
+      entrypoints:
+        train: base_model/recipe/train.py
+        infer: base_model/recipe/decode.py
+      python: /hpc_stor03/sjtu_home/chaolei.liu/anaconda3/envs/icefall/bin/python
+      usage_policy: required
+      prompt_guidance: Use the configured icefall Zipformer ASR recipe, dataset profile, and recipe profile as the starting point. Optimize by changing workspace-local wrapper code, model overrides, training or decoding settings, checkpoints, and post-processing; do not switch to another ASR model family.
+    prompt_guidance: Generate English ASR hypotheses as key-tab-text lines matching the reference keys.
+    description: English ASR evaluated by Whisper English normalization and WeNet WER.
+
+  asr_cs_mer:
+    canonical_task: asr
+    task_alias: asr
+    language: cs
+    primary_metric: MER
+    metric_direction: lower
+    route: asr.cs.mer.aispeech_norm.wenet_mer
+    required_roles: [ref, hyp]
+    artifact_contract:
+      ref: input/ref.txt
+      hyp: artifacts/hyp.txt
+    prompt_guidance: Generate code-switch ASR hypotheses as key-tab-text lines matching the reference keys.
+    description: Code-switch ASR evaluated by AISpeech normalization and mixed error rate.
+
+  s2tt_bleu:
+    canonical_task: s2tt
+    task_alias: s2tt
+    language: zh
+    primary_metric: BLEU
+    metric_direction: higher
+    route: s2tt.{tokenizer_profile}.bleu.sacrebleu
+    required_roles: [ref, hyp]
+    optional_roles: [src]
+    artifact_contract:
+      ref: input/ref.txt
+      hyp: artifacts/hyp.txt
+      src: input/src.txt
+    prompt_guidance: Generate translated text hypotheses as key-tab-text lines matching the reference keys.
+    description: Speech-to-text translation evaluated with SacreBLEU.
+
+  kws_accuracy:
+    canonical_task: kws
+    task_alias: kws
+    primary_metric: accuracy
+    metric_direction: higher
+    route: kws.{profile}.accuracy.wekws_det
+    required_roles: [reference_jsonl, sample_output]
+    optional_roles: [keyword]
+    artifact_contract:
+      reference_jsonl: input/reference.jsonl
+      sample_output: artifacts/sample_output.jsonl
+    prompt_guidance: Generate KWS sample_output JSONL compatible with the selected SURE KWS route.
+    description: Keyword spotting evaluated with threshold accuracy; DET details remain in SURE reports.
+
+  slu_accuracy:
+    canonical_task: slu
+    task_alias: slu
+    primary_metric: accuracy
+    metric_direction: higher
+    route: normalization/prompt_norm -> scoring/classify
+    required_roles: [ref, hyp, prompt_jsonl]
+    optional_roles: [label_spec]
+    artifact_contract:
+      ref: input/ref.txt
+      prompt_jsonl: input/prompt.jsonl
+      hyp: artifacts/hyp.txt
+    prompt_guidance: Generate SLU predictions aligned by key; answers may be option letters or normalized choices.
+    description: Spoken language understanding evaluated as prompt-choice classification accuracy.
+
+  classification_accuracy:
+    canonical_task: classification
+    task_alias: classification
+    primary_metric: accuracy
+    metric_direction: higher
+    route: scoring/classify
+    required_roles: [ref, hyp]
+    optional_roles: [label_spec]
+    artifact_contract:
+      ref: input/ref.txt
+      hyp: artifacts/hyp.txt
+    prompt_guidance: Generate classification predictions as key-tab-label lines matching reference keys.
+    description: Generic classification evaluated by accuracy.
+
+  ser_accuracy:
+    canonical_task: classification
+    task_alias: ser
+    primary_metric: accuracy
+    metric_direction: higher
+    route: classification.accuracy.classify
+    required_roles: [ref, hyp]
+    optional_roles: [label_spec]
+    artifact_contract:
+      ref: input/ref.txt
+      hyp: artifacts/hyp.txt
+    prompt_guidance: Generate speech emotion labels as key-tab-label lines using the SER label spec.
+    description: Speech emotion recognition evaluated as classification accuracy.
+
+  gr_accuracy:
+    canonical_task: classification
+    task_alias: gr
+    primary_metric: accuracy
+    metric_direction: higher
+    route: classification.accuracy.classify
+    required_roles: [ref, hyp]
+    optional_roles: [label_spec]
+    artifact_contract:
+      ref: input/ref.txt
+      hyp: artifacts/hyp.txt
+    prompt_guidance: Generate gender labels as key-tab-label lines using the GR label spec.
+    description: Gender recognition evaluated as classification accuracy.
+
+  sd_der:
+    canonical_task: sd
+    task_alias: sd
+    primary_metric: DER
+    metric_direction: lower
+    route: scoring/meeteval
+    required_roles: [ref, hyp]
+    artifact_contract:
+      ref: input/ref.rttm
+      hyp: artifacts/hyp.rttm
+    prompt_guidance: Generate diarization output in the format expected by SURE/meeteval.
+    description: Speaker diarization evaluated by DER with SURE defaults.
+
+  sa_asr_cpwer:
+    canonical_task: sa_asr
+    task_alias: sa_asr
+    language: en
+    primary_metric: cpWER
+    metric_direction: lower
+    route: scoring/meeteval
+    required_roles: [ref, hyp]
+    artifact_contract:
+      ref: input/ref.stm
+      hyp: artifacts/hyp.stm
+    prompt_guidance: Generate speaker-attributed ASR output compatible with SURE cpWER scoring.
+    description: Speaker-attributed ASR evaluated by cpWER with companion DER in SURE reports.
+
+  tts_zh_cer:
+    canonical_task: tts
+    task_alias: tts
+    language: zh
+    primary_metric: tts_cer
+    metric_direction: lower
+    route: tts.zh.tts_cer.funasr_loader_16k_mono.paraformer_zh.asr_cer
+    required_roles: [samples_jsonl]
+    artifact_contract:
+      samples_jsonl: artifacts/samples.jsonl
+    prompt_guidance: Generate speech audio and a samples_jsonl file consumable by SURE TTS semantic scoring.
+    description: Chinese TTS semantic intelligibility evaluated through Paraformer transcription and CER.
+
+  tts_en_wer:
+    canonical_task: tts
+    task_alias: tts
+    language: en
+    primary_metric: tts_wer
+    metric_direction: lower
+    route: tts.en.tts_wer.whisper_large_v3.whisper_norm.wenet_wer
+    required_roles: [samples_jsonl]
+    artifact_contract:
+      samples_jsonl: artifacts/samples.jsonl
+    prompt_guidance: Generate speech audio and a samples_jsonl file consumable by SURE TTS semantic scoring; for F5-TTS use SURE_TTS_BATCH_INFER_WRAPPER instead of per-sample infer_cli.py.
+    description: English TTS semantic intelligibility evaluated through Whisper transcription and WER.
+
+  vc_zh_cer:
+    canonical_task: vc
+    task_alias: vc
+    language: zh
+    primary_metric: vc_cer
+    metric_direction: lower
+    route: vc.zh.vc_cer.funasr_loader_16k_mono.paraformer_zh.asr_cer
+    required_roles: [samples_jsonl]
+    artifact_contract:
+      samples_jsonl: artifacts/samples.jsonl
+    prompt_guidance: Generate converted audio and a samples_jsonl file consumable by SURE VC semantic scoring.
+    description: Chinese voice conversion content preservation evaluated through Paraformer and CER.
+
+  vc_en_wer:
+    canonical_task: vc
+    task_alias: vc
+    language: en
+    primary_metric: vc_wer
+    metric_direction: lower
+    route: vc.en.vc_wer.whisper_large_v3.whisper_norm.wenet_wer
+    required_roles: [samples_jsonl]
+    artifact_contract:
+      samples_jsonl: artifacts/samples.jsonl
+    prompt_guidance: Generate converted audio and a samples_jsonl file consumable by SURE VC semantic scoring.
+    description: English voice conversion content preservation evaluated through Whisper and WER.

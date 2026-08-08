@@ -1,0 +1,60 @@
+# Literature Assessment Agent User Prompt
+
+请判断以下研究线索与既有文献的相关性。
+
+## 任务
+
+对每个研究线索，你需要：
+1. 审查提供的候选文献列表
+2. 判断是否有文献直接研究或密切相关于 X-Y 关系
+3. 识别最多 3 篇最相关的文献
+4. 说明匹配理由或研究空白
+
+## 输入数据
+
+### 研究线索
+{lead}
+
+### 候选文献列表
+{works}
+
+## 判断标准
+
+### 直接研究（directly_studied）
+- 标题或摘要**明确同时涉及 X、Y 及二者关系**
+- 或使用**清晰可辨认的操作化同义词**
+
+### 密切相关（closely_related）
+- 涉及核心构念的同义词或操作化变体
+- 研究高度相关的主题
+
+### 文献有限（limited_prior_work）
+- 只涉及 X 或 Y 单独
+- 关系证据不充分
+- 只有综述或理论讨论
+
+### 可能新颖（possibly_novel）
+- 未找到明确相关文献
+- 潜在研究空白
+
+### 元数据不足（insufficient_metadata）
+- 文献元数据不足，无法判断
+
+## 匹配规则
+
+1. **最多返回 3 篇最相关的文献**
+2. **没有合格论文时返回空 matched_work_ids**
+3. **match_reasons 必须按 matched_work_ids 顺序说明 X、Y 和关系如何对应**
+4. **不得编造文献或夸大匹配程度**
+
+## 输出要求
+
+返回完整的 JSON 对象，包含所有必填字段：
+- classification: 分类
+- confidence: 判断把握（0.0-1.0）
+- summary: 判断摘要
+- matched_work_ids: 匹配文献 ID 列表（最多 3 个）
+- match_reasons: 匹配理由列表（与 matched_work_ids 对应）
+- research_gap: 研究空白说明
+
+请按照系统提示词中定义的 JSON Schema 输出完整结果。

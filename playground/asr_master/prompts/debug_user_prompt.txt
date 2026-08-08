@@ -1,0 +1,65 @@
+You are an ASR debugging expert. Your previous solution had a bug and/or did not produce a valid WER output, or the wrapper script failed during execution. Based on the information below, you should revise the wrapper script to fix the issue. Your response should be an implementation outline in natural language, followed by a single markdown code block which implements the bugfix/solution.
+
+# Task description
+You are working on optimizing a Zipformer ASR model using the icefall framework. Your wrapper script must:
+1. Train the model (call train.py)
+2. Decode the model (call decode.py)
+3. Parse and print the WER as `\boxed{{WER_value}}`
+
+FRAMEWORK SETUP
+------
+- **Codebase**: The icefall ASR framework is at the icefall root. The recipe directory has `train.py`, `decode.py`, and model modules.
+- **Data**: Lhotse cuts and BPE lang are already prepared. The cuts are physically under `./icefall_data/fbank`, but after changing into `./icefall_recipe` you must create or reuse `./data -> ../icefall_data` and pass `--manifest-dir ./data/fbank`; embedded Lhotse feature paths also start with `data/fbank/...`. Do NOT use `./icefall_data/manifests`, and do NOT run prepare.sh.
+- **Evaluation**: WER (Word Error Rate). Lower is better.
+- **Output format**: Your script MUST print the final WER as `\boxed{{WER_value}}`.
+
+COMPETITION INSTRUCTIONS
+------
+{task_description}
+
+# Instructions
+
+## Response format
+
+Your response should be a brief outline/sketch of your proposed bugfix in natural language (3-5 sentences), followed by a single markdown code block (wrapped in ```) which implements this bugfix and prints the final WER in `\boxed{{}}` format. There should be no additional headings or text in your response. Just natural language text followed by a newline and then the markdown code block.
+
+## Bugfix improvement sketch guideline
+
+- You should write a brief natural language description (3-5 sentences) of how the issue in the previous implementation can be fixed.
+- Don't suggest exploratory data analysis.
+- Keep the core ASR training/decoding approach the same. Do not change the fundamental method—just fix the code.
+- If the code failed because of a missing library import, try to fix the import path or avoid using that module. Do not try to install new packages with pip or conda.
+- All packages have been installed. You are not allowed to install anything with pip or conda. If something is missing, try another way.
+
+## Implementation guideline
+
+- The code must be a **single-file Python wrapper script** that:
+  1. Uses RELATIVE paths `./icefall_recipe`, `./icefall_data`, `./icefall_root` (NO `os.path.dirname(__file__)` needed)
+  2. Fixes the bug (incorrect hyperparameter, wrong path, missing import, subprocess error, etc.)
+  3. Calls `train.py` (via subprocess) with corrected arguments
+  4. Calls `decode.py` (via subprocess) with corrected arguments
+  5. Parses the decoding output to extract the final WER
+  6. Prints the WER in `\boxed{{WER_value}}` format
+- **CRITICAL**: The script MUST print `\boxed{{WER_value}}` at the end. Without this, the solution cannot be evaluated and will be considered invalid.
+- Use **1 epoch by default** for fast agent iteration. Only increase epochs after the wrapper can train and decode successfully.
+- If the wrapper runs multiple candidate configurations, preserve explicit per-candidate logs: candidate name, key configuration, real decoded WER, and failure reason if it fails. The final `\boxed{{WER_value}}` must come only from a successful candidate with real decoded WER. If all candidates fail, exit non-zero rather than printing a placeholder.
+- Support multi-GPU training. Detect `world_size` from `ASR_WORLD_SIZE` if set, otherwise from comma-separated `CUDA_VISIBLE_DEVICES`; fall back to 1. Pass `--world-size str(world_size)` to train.py and pass a unique `--master-port`. Keep decode.py single-process.
+- Save checkpoints to a unique `--exp-dir`.
+- When decoding, use `--decoding-method modified_beam_search` or `--decoding-method greedy_search`.
+- **CRITICAL**: Use the icefall conda environment Python: `/home/liuchaolei/anaconda3/envs/icefall/bin/python` for train.py and decode.py instead of sys.executable.
+- **CRITICAL**: If the previous failure mentions missing `librispeech_cuts_*.jsonl.gz`, fix `--manifest-dir` to point at the cuts directory, preferably `./data/fbank` after creating `./icefall_recipe/data -> ../icefall_data`.
+- **CRITICAL**: If the previous failure mentions missing `data/fbank/.../*.lca`, the manifests were found but feature archives were resolved relative to the wrong directory. Fix this by creating the recipe-local `data` symlink before training and decoding.
+- **CRITICAL**: Use a memory-aware `--max-duration` instead of a tiny fixed batch. Icefall's parser default is 200, but its own examples use larger values when memory allows. Choose the initial value from per-GPU memory, not summed memory: >=80GB -> 2200, >=48GB -> 1700, >=32GB -> 1400, >=24GB -> 1000, <24GB -> 800, and unknown memory -> 1000. Allow `ASR_MAX_DURATION` to override this. If the previous failure is CUDA OOM, retry with a smaller value (2200 -> 1700 -> 1400 -> 1000 -> 800 -> 500 -> 300 -> 200). If the previous failure is `grad_scale is too small`, `loss=inf`, `metric=nan`, or non-finite outputs/gradients, retry with `--use-fp16 0`; do not reduce `--max-duration` unless the error is OOM.
+- **CRITICAL**: Do NOT patch or replace icefall's optimizer or scheduler while debugging. Keep the Zipformer recipe's `ScaledAdam(get_parameter_groups_with_lrs(...), clipping_scale=2.0)` optimizer and `Eden` scheduler; if `loss=inf`/`metric=nan` appears after an optimizer change such as `AdamW`, revert that change instead of masking the failure.
+- **CRITICAL**: Do not hide failures by printing placeholder scores such as `\boxed{{999.0}}` with exit code 0. If no real WER was produced, exit non-zero after printing the diagnostic output so the outer debug loop can continue.
+
+# Data preview
+{data_preview}
+
+# Previous (buggy) implementation
+{buggy_code}
+
+# Execution output
+```
+{terminal_output}
+```

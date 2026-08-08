@@ -1,0 +1,31 @@
+# A2S2D Playground Dependencies
+# Install with: pip install -r playground/a2s2d/requirements.txt
+
+# Core scientific computing
+numpy>=1.24.0
+scipy>=1.10.0
+pandas>=2.0.0
+statsmodels>=0.14.0
+
+# Data file support
+openpyxl>=3.1.0  # Excel files
+pyreadstat>=1.2.0  # Stata files (optional, for .dta support)
+
+# LLM and API
+openai>=1.0.0
+requests>=2.28.0
+urllib3>=2.0.0
+
+# Configuration
+pyyaml>=6.0
+tomli>=2.0.0  # Python 3.10 compatibility
+
+# Logging and utilities
+tqdm>=4.65.0  # Progress bars
+
+# Optional: MCP for agent tools
+# mcp>=1.0.0  # Install if using EvoMaster agent framework
+
+# Testing
+pytest>=7.0.0
+pytest-cov>=4.0.0

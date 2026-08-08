@@ -1,0 +1,276 @@
+# ASR Master GPT Configuration File
+# An EvoMaster example demonstrating automated ASR (speech recognition) research
+# with multi-agent workflow, adapted from ml_master_2 for icefall Zipformer optimization.
+
+# ============================================
+# ASR Task Configuration
+# ============================================
+asr_task_id: "librispeech_zipformer"
+
+# Icefall framework paths
+icefall_root: "/home/liuchaolei/ASR/icefall"
+recipe_dir: "egs/librispeech/ASR/zipformer"
+data_dir: "egs/librispeech/ASR/data"
+
+# Iteration control
+max_research_rounds: 3       # Number of research->improve cycles (each round trains+decodes)
+
+# ============================================
+# LLM Configuration
+# ============================================
+llm:
+  openai:
+    provider: "openai"
+    model: "${GPT_CHAT_MODEL}"
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "${GPT_BASE_URL}"
+    temperature: 1
+    max_tokens: 65536
+    timeout: 3600
+    max_retries: 3
+    retry_delay: 1.0
+
+  anthropic:
+    provider: "anthropic"
+    model: "claude-haiku-4-5-20251001"
+    api_key: "${ANTHROPIC_API_KEY}"
+    base_url: "${ANTHROPIC_BASE_URL}"
+    temperature: 1
+    max_tokens: 65536
+    timeout: 3600
+    max_retries: 3
+    retry_delay: 1.0
+
+  # Kimi (Moonshot) configuration - OpenAI-compatible endpoint
+  kimi:
+    provider: "openai"
+    model: "kimi-k2.6"
+    api_key: "${KIMI_API_KEY}"
+    base_url: "${KIMI_BASE_URL}"
+    temperature: 0.7
+    max_tokens: 65536
+    timeout: 3600
+    max_retries: 3
+    retry_delay: 1.0
+
+  # GLM (Zhipu) configuration - OpenAI-compatible endpoint
+  glm:
+    provider: "openai"
+    model: "${GLM_MODEL}"
+    api_key: "${GLM_API_KEY}"
+    base_url: "${GLM_BASE_URL}"
+    temperature: 0.7
+    max_tokens: 65536
+    timeout: 3600
+    max_retries: 3
+    retry_delay: 1.0
+
+  default: "openai"
+
+# ============================================
+# Multi-Agent Configuration
+# ============================================
+agents:
+  # Prefetch Agent - Retrieves ASR knowledge from wisdom database (optional for ASR)
+  prefetch:
+    wisdom_file: "./playground/asr_master/example_wisdom/wisdom.json"
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+
+    system_prompt_file: "prompts/prefetch_system_prompt.txt"
+    user_prompt_file: "prompts/prefetch_user_prompt.txt"
+
+  # Draft Agent - Generates initial wrapper script
+  draft:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+
+    system_prompt_file: "prompts/draft_system_prompt.txt"
+    user_prompt_file: "prompts/draft_user_prompt.txt"
+
+  debug:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+
+    system_prompt_file: "prompts/debug_system_prompt.txt"
+    user_prompt_file: "prompts/debug_user_prompt.txt"
+
+  improve:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+
+    system_prompt_file: "prompts/improve_system_prompt.txt"
+    user_prompt_file: "prompts/improve_user_prompt.txt"
+
+  reseach:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+
+    system_prompt_file: "prompts/reseach_system_prompt.txt"
+    user_prompt_file: "prompts/reseach_user_prompt.txt"
+
+  knowledge_promotion:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+
+    system_prompt_file: "prompts/knowledge_promotion_system_prompt.txt"
+    user_prompt_file: "prompts/knowledge_promotion_user_prompt.txt"
+
+  wisdom_promotion:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+
+    system_prompt_file: "prompts/wisdom_promotion_system_prompt.txt"
+    user_prompt_file: "prompts/wisdom_promotion_user_prompt.txt"
+
+  # Metric Agent - Extracts WER from decode output
+  metric:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+
+    system_prompt_file: "prompts/metric_system_prompt.txt"
+    user_prompt_file: "prompts/metric_user_prompt.txt"
+
+# ============================================
+# Session Configuration
+# ============================================
+session:
+  type: "local"
+
+  local:
+    working_dir: "./playground/asr_master/workspace"
+    timeout: 86400
+
+    # GPU device configuration. Set auto_gpu_config=true to detect visible GPUs
+    # and derive max_parallel from available GPUs / gpus_per_exp.
+    auto_gpu_config: true
+    gpu_devices: auto
+
+    cpu_devices: "0-31"
+
+    # Symlink the icefall recipe + data into the workspace so the agent can access them
+    symlinks: {
+      "/home/liuchaolei/ASR/icefall/egs/librispeech/ASR/zipformer": "icefall_recipe",
+      "/home/liuchaolei/ASR/icefall/egs/librispeech/ASR/data": "icefall_data",
+      "/home/liuchaolei/ASR/icefall": "icefall_root"
+    }
+
+    parallel:
+      # Auto mode derives max_parallel from the detected GPU count and
+      # gpus_per_exp. Set max_parallel to a number for a manual cap.
+      enabled: true
+      max_parallel: auto
+      gpus_per_exp: 2
+      set_asr_world_size: true
+      split_workspace_for_exp: true
+
+  # Docker Session configuration (not supported for asr_master right now)
+  docker:
+    image: "evomaster/base:latest"
+    container_name: null
+    use_existing_container: null
+    working_dir: "/workspace"
+    memory_limit: "64g"
+    cpu_limit: 16.0
+    gpu_devices: "0"
+    network_mode: "host"
+    volumes: {"./playground/asr_master/workspace": "/workspace"}
+    env_vars: {}
+    auto_remove: false
+    timeout: 86400
+
+# ============================================
+# Embedding Configuration (for RAG vector retrieval)
+# ============================================
+embedding:
+  type: "local"
+
+  openai:
+    model: "text-embedding-3-large"
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "${GPT_BASE_URL}"
+    dimensions: 3072
+
+  local:
+    model: "evomaster/skills/rag/local_models/all-mpnet-base-v2"
+    device: "cpu"
+
+# ============================================
+# LLM Output Display Configuration
+# ============================================
+llm_output:
+  show_in_console: true
+  log_to_file: true
+
+# ============================================
+# Logging Configuration
+# ============================================
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: null
+  console: true

@@ -1,0 +1,159 @@
+# Minimal Multi-Agent Parallel Playground — Docker session configuration
+# Runs 3 parallel exps, each with its own Planning + Coding Agent.
+# Run with:
+#   python run.py --agent minimal_multi_agent_parallel \
+#       --config configs/minimal_multi_agent_parallel/docker.yaml --task "..."
+#
+# Per-exp container behavior is controlled by `fresh_container_per_exp`
+# below. When true (the default in this file), each parallel exp spins up
+# its own brand-new Docker container that is auto-removed when the exp
+# finishes
+
+# ============================================
+# LLM Configuration
+# ============================================
+llm:
+  openai:
+    provider: "openai"
+    model: "${GPT_CHAT_MODEL}"
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "${GPT_BASE_URL}"
+    temperature: 0.7
+    max_tokens: 163840
+    timeout: 60
+    max_retries: 3
+    retry_delay: 1.0
+
+  anthropic:
+    provider: "anthropic"
+    model: "claude-haiku-4-5-20251001"
+    api_key: "${ANTHROPIC_API_KEY}"
+    base_url: "${ANTHROPIC_BASE_URL}"
+    temperature: 0.7
+    max_tokens: 16384
+    timeout: 60
+    max_retries: 3
+    retry_delay: 1.0
+
+  local_sglang:
+    provider: "deepseek"
+    model: "deepseek-v3.2"
+    api_key: "${DEEPSEEK_API_KEY}"
+    base_url: "${DEEPSEEK_API_BASE}"
+    temperature: 0.7
+    max_tokens: 16384
+    timeout: 300
+    max_retries: 3
+    retry_delay: 1.0
+
+  default: "openai"
+
+# ============================================
+# Multi-Agent Configuration
+# ============================================
+agents:
+  planning:
+    llm: "openai"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/planning_system_prompt.txt"
+    user_prompt_file: "prompts/planning_user_prompt.txt"
+
+  coding:
+    llm: "openai"
+    max_turns: 50
+    tools:
+      builtin: ["*"]
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/coding_system_prompt.txt"
+    user_prompt_file: "prompts/coding_user_prompt.txt"
+
+# ============================================
+# Session Configuration
+# ============================================
+session:
+  type: "docker"
+
+  docker:
+    image: "evomaster/base:bohrium"
+
+    # Used as a *prefix* when fresh_container_per_exp=true (each exp gets
+    # `<container_name>-exp-<i>`). Leave null for an auto-generated prefix.
+    container_name: null
+    use_existing_container: null
+
+    working_dir: "/workspace"
+
+    # TOTAL resource budget across all parallel exps. When
+    # `parallel.max_parallel > 1`, these are divided per container:
+    #   memory_limit 48g, max_parallel 3 -> 16g per container
+    #   cpu_limit    36,  max_parallel 3 -> 12  per container
+    #   cpu_devices  0-35,max_parallel 3 -> 0-11 / 12-23 / 24-35
+    #   gpu_devices  [0,1,2], max_parallel 3 -> one GPU per container
+    memory_limit: "48g"
+    cpu_limit: 36.0
+
+    # CPU pinning (--cpuset-cpus). Unlike `cpu_limit` (--cpus), which only
+    # throttles CPU time, this actually restricts the visible CPU set, so
+    # `htop` inside the container only shows the pinned cores. Accepts the
+    # same shapes as the local session: "0-35", "0,2,4", or [0, 1, 2, 3].
+    # Leave unset for no pinning.
+    cpu_devices: "0-35"
+
+    gpu_devices: ["0", "1", "2"]
+    network_mode: "host"
+
+    # Volumes: {host_path: container_path}. Relative host paths
+    # ("./assets") are resolved against the project root (the directory
+    # containing `evomaster/`), not the current working directory.
+    # Volumes whose container target lives inside `working_dir`
+    # (e.g. /workspace/docker_images) are mirrored as host symlinks
+    # inside each exp's host workspace, so the host view matches the
+    # in-container view.
+    volumes: {"/data/xinyu/docker_images":"/workspace/docker_images"}
+    env_vars: {}
+
+    # When fresh_container_per_exp=true, the per-exp containers ALWAYS use
+    # `--rm` regardless of this value (the entire point of the mode is to
+    # tear them down). This auto_remove only applies if you flip
+    # fresh_container_per_exp to false.
+    auto_remove: true
+
+    pull_image: "missing"
+    timeout: 300
+
+    # Parallel mode (consumed by MultiAgentParallelPlayground): how many
+    # parallel exps to run. Defaults to 3 if omitted.
+    parallel:
+      max_parallel: 3
+
+    # === Per-exp container lifecycle ===
+    # true  → each parallel exp spins up its own Docker container, used
+    #          ONLY by that exp, and removed (`docker rm`) when the exp
+    #          finishes. Containers are named `<container_name|auto>-exp-<i>`.
+    #          Each exp's host workspace is `<run_dir>/workspaces/exp_<i>`,
+    #          mounted at `working_dir`.
+    # false → all parallel exps share the playground's single Docker
+    #          container. Each exp keeps its own working directory inside
+    #          the container (per-thread cwd state).
+    fresh_container_per_exp: true
+
+llm_output:
+  show_in_console: true
+  log_to_file: true
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: null
+  console: true

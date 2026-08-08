@@ -1,0 +1,36 @@
+Task description:
+{task_description}
+
+SURE task card:
+{task_card}
+
+Base model profile:
+{base_model_profile}
+
+Data and input preview:
+{data_preview}
+
+Initial code:
+{initial_code}
+
+Previous research attempts and results:
+{research_plan_and_result_text}
+
+Current best code:
+{best_code}
+
+Research request:
+{research_request}
+
+Candidate type guidance:
+{candidate_type_guidance}
+
+Constraints:
+- If the base model profile has `usage_policy: required`, every idea must optimize from that model/recipe instead of replacing it with an unrelated model family.
+- Do not suggest modifying SURE evaluator code.
+- Do not suggest writing to the external source directories behind the base model symlinks.
+- Do not suggest placeholder scores or metric spoofing.
+- Do not suggest changes that cannot be implemented in the candidate workspace.
+- Avoid ambiguous alternatives. Each idea should be directly implementable.
+
+Do not include markdown, shell commands, tool-call JSON such as `{{"cmd": ...}}`, or any text before or after the JSON object.

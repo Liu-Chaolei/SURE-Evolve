@@ -1,0 +1,29 @@
+Task description:
+{task_description}
+
+SURE task card:
+{task_card}
+
+Base model profile:
+{base_model_profile}
+
+Data preview:
+{data_preview}
+
+Current base code:
+{current_base_code}
+
+Research plan:
+{research_plan}
+
+Measured results:
+{results}
+
+Write a concise strategic summary:
+1. What improved the metric and why.
+2. What failed or should be avoided.
+3. What should be tried next for this task/metric.
+4. Any artifact-contract pitfalls discovered.
+5. Any base-model-specific constraints or reusable changes.
+
+Output only the final analysis text.

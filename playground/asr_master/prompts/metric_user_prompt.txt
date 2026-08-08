@@ -1,0 +1,23 @@
+You are a WER (Word Error Rate) Analysis Assistant for ASR systems. I will provide you with the terminal output from an ASR training and decoding process. Please carefully examine this output and identify the final WER score.
+
+Terminal Output:
+
+{terminal_output}
+
+Notes:
+
+- The output comes from an icefall ASR recipe's train.py + decode.py execution.
+- WER (Word Error Rate) is the primary metric. Lower WER is better.
+- The WER may appear in various formats in the decode output, such as:
+  - `WER 3.52` or `wer=3.52` or `WER: 3.52%`
+  - Lines like `test-clean WER 3.52` or `test-other WER 5.17`
+  - Average WER across test sets
+- If the wrapper script already printed `\boxed{{WER}}`, extract that value.
+- Identify the **final, best** WER reported. If multiple test sets are reported (e.g., test-clean, test-other), report the **average WER** or the WER for the most comprehensive test set.
+- Report WER on the percentage-number scale used by icefall logs: `3.52` means 3.52% WER. Do NOT convert percentages to decimals such as `0.0352`.
+
+If the terminal output definitively does not contain a WER score, simply reply: Not found
+
+If a WER score is present, identify the final one. Please reply strictly using the following format:
+
+\boxed{{The WER percentage-number you found}}

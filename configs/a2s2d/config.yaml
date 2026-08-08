@@ -1,0 +1,231 @@
+# A2S2D Configuration File (EvoMaster YAML format)
+# 社会科学研究线索发现系统配置
+
+# ============================================
+# LLM Configuration (EvoMaster style)
+# ============================================
+llm:
+  glm:
+    provider: "openai"
+    model: "${GLM_MODEL}"
+    api_key: "${GLM_API_KEY}"
+    base_url: "${GLM_BASE_URL}"
+    temperature: 0.7
+    max_tokens: 8192
+    timeout: 180
+    max_retries: 3
+  default: "glm"
+
+# ============================================
+# A2S2D-specific LLM Configuration (for structured outputs)
+# Uses OpenAI Responses API for native structured output support
+# ============================================
+llm_a2s2d:
+  provider: "openai_responses"
+  model: "${GPT_CHAT_MODEL}"
+  api_key_env: "OPENAI_API_KEY"
+  endpoint: "${GPT_BASE_URL}/v1/responses"
+  reasoning_effort: "low"
+  timeout_seconds: 180
+  batch_size: 20
+  max_retries: 3
+
+# ============================================
+# A2S2D Domain Configuration
+# ============================================
+project:
+  name: "a2s2d-cgss2023"
+  seed: 20260624
+  output_dir: "outputs"
+  language: "zh-CN"
+
+inputs:
+  data: "/home/liuchaolei/Agent/EvoMaster/playground/a2s2d/data/CGSS2023_test.dta"
+  codebook: "/home/liuchaolei/Agent/EvoMaster/playground/a2s2d/data/CGSS2023编码表_test.xlsx"
+  structure: "cross_section"
+
+columns:
+  year: ""
+  region: "s41"
+  person_id: "id"
+  family_id: ""
+  weight: "weight2"
+  age: "a3a"
+  gender: "a2"
+  urban: "isurban"
+  ethnicity: "a4"
+  marital: "a69"
+
+# ============================================
+# Multi-Agent Configuration (EvoMaster agents for stages 2, 4, 8)
+# ============================================
+agents:
+  variable_identification:
+    llm: "glm"
+    max_turns: 5
+    tools:
+      builtin: ["str_replace_editor", "think", "finish"]
+  model_selection:
+    llm: "glm"
+    max_turns: 10
+    tools:
+      builtin: ["str_replace_editor", "think", "finish"]
+  literature:
+    llm: "glm"
+    max_turns: 5
+    tools:
+      builtin: ["str_replace_editor", "think", "finish"]
+
+identification:
+  apply_agent_nonresponse_values: true
+  include_codebook_missing_values: true
+  max_missing_rate: 0.95
+  min_unique_values: 2
+
+controls:
+  basic: ["a3a", "a2", "a69", "isurban", "a4"]
+  extended: ["a7a", "a8a", "a53", "a1", "a62", "a15"]
+
+modeling:
+  min_n: 300
+  max_candidates: 40
+  specs: ["spec0", "spec1"]
+  cluster_preference: "auto"
+  fail_fast: false
+  approximation_fallback_can_be_lead: false
+  robust_covariance: "HC3"
+  min_sample_retention: 0.20
+  min_event_count: 20
+  min_category_count: 20
+  max_nominal_levels: 30
+  max_design_columns: 200
+  ordered_maxiter: 100
+  multinomial_maxiter: 100
+  max_model_seconds: 180
+
+model_selection:
+  enabled: true
+  max_control_candidates: 30
+
+framework:
+  strict: true
+  default_analysis_goal: "conditional_association"
+  allow_survey_weights: true
+  min_positive_weight_share: 0.95
+  causal_feasibility_guard: true
+  require_weighted_unweighted_comparison: true
+  run_bidirectional_models: true
+  max_interactions_per_relation: 2
+  max_subgroups_per_relation: 2
+  max_mediators_per_relation: 2
+
+cache:
+  enabled: true
+  llm_enabled: true
+  directory: ".a2s2d_cache"
+
+audit:
+  fdr_global_strict: 0.05
+  fdr_global_regular: 0.10
+  fdr_family_regular: 0.05
+  fdr_family_exploratory: 0.10
+  permutations: 3
+  bootstraps: 10
+  permutation_quantile: 0.95
+  bootstrap_direction_threshold: 0.80
+  bootstrap_selection_threshold: 0.70
+  max_group_levels: 20
+  null_test_mode: "model_aware"
+
+reporting:
+  generate_html: true
+  generate_markdown: true
+  llm_reports: false
+  max_full_reports: 30
+  save_stage_reports: true
+  show_progress: true
+
+literature:
+  enabled: true
+  provider: "openalex"
+  providers: ["openalex"]
+  openalex_endpoint: "https://api.openalex.org/works"
+  openalex_api_key_env: "OPENALEX_API_KEY"
+  max_leads: 20
+  results_per_query: 10
+  max_queries_per_lead: 2
+  timeout_seconds: 30
+  mailto: ""
+  require_controlled_model: true
+  require_confirmatory_model: true
+  max_matches_per_lead: 3
+  max_candidates_for_llm: 20
+  allowed_work_types: ["journal-article", "proceedings-article"]
+  require_venue: true
+
+# ============================================
+# Session Configuration
+# ============================================
+session:
+  type: "local"
+  local:
+    workspace_path: "./playground/a2s2d/workspace"
+    working_dir: "./playground/a2s2d/workspace"
+    timeout: 86400
+    symlinks: {}  # Will be set dynamically from inputs
+
+# ============================================
+# Workspace Configuration (EvoMaster standard - must be string path)
+# ============================================
+workspace: "./playground/a2s2d/workspace"
+
+# ============================================
+# A2S2D Custom Configuration (playground-specific)
+# ============================================
+a2s2d_options:
+  logs: true
+  trajectories: true
+  data_symlinks: true  # Symlink data files to workspace
+
+# ============================================
+# Logging
+# ============================================
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: null
+  console: true
+
+# ============================================
+# A2S2D Pipeline Configuration
+# ============================================
+pipeline:
+  schema_version: "2026-06-26.1"
+  stages:
+    - name: "input"
+      description: "读取数据、编码表并构建初始变量元数据"
+      use_agent: false
+    - name: "identification"
+      description: "调用变量识别Agent，处理无回答值"
+      use_agent: true
+      agent: "variable_identification"
+    - name: "candidates"
+      description: "生成候选关系集合"
+      use_agent: false
+    - name: "model_design"
+      description: "关系级设计与方向裁决"
+      use_agent: true
+      agent: "model_selection"
+    - name: "model_exec"
+      description: "执行固定模型注册表"
+      use_agent: false
+    - name: "audit"
+      description: "客观证据审计（FDR、置换、Bootstrap）"
+      use_agent: false
+    - name: "robustness"
+      description: "稳健性检查与扩展分析"
+      use_agent: false
+    - name: "literature"
+      description: "文献检索与匹配判断"
+      use_agent: true
+      agent: "literature"

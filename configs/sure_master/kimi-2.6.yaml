@@ -1,0 +1,114 @@
+# SURE Master Kimi configuration.
+# Same behavior as gpt-5-example.yaml, with Kimi selected for all agents.
+
+sure:
+  root: "/hpc_stor03/sjtu_home/chaolei.liu/sure"
+  pythonpath: "/hpc_stor03/sjtu_home/chaolei.liu/sure/src"
+  task_cards_path: "./playground/sure_master/task_cards/sure_tasks.yaml"
+  task_id: "asr_en_wer"
+  device: "cuda"
+  cache_dir: null
+  validate_env: false
+  require_base_model: true
+  inputs:
+    ref: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/asr_librispeech_regular_ref.txt"
+  execution_env:
+    SURE_ASR_EVAL_SPLITS: "dev-clean,dev-other"
+    SURE_MAX_TRAIN_EPOCHS: "1"
+    SURE_MAX_DURATION: "600"
+    SURE_USE_FP16: "1"
+    SURE_DECODE_ONLY: "0"
+    SURE_ENABLE_MUSAN: "0"
+    SURE_ICEFALL_PYTHON: "/hpc_stor03/sjtu_home/chaolei.liu/anaconda3/envs/icefall/bin/python"
+  base_models:
+    asr_en_wer:
+      source_paths:
+        recipe: "/hpc_stor03/sjtu_home/chaolei.liu/ASR/icefall/egs/librispeech/ASR/zipformer"
+        data: "/hpc_stor03/sjtu_home/chaolei.liu/ASR/icefall/egs/librispeech/ASR/data"
+        root: "/hpc_stor03/sjtu_home/chaolei.liu/ASR/icefall"
+
+max_research_rounds: 3
+
+llm:
+  kimi:
+    provider: "openai"
+    model: "kimi-k2.6"
+    api_key: "${KIMI_API_KEY}"
+    base_url: "${KIMI_BASE_URL}"
+    temperature: 0.7
+    max_tokens: 65536
+    timeout: 3600
+    max_retries: 3
+    retry_delay: 1.0
+
+  default: "kimi"
+
+agents:
+  prefetch: &agent_base
+    llm: "kimi"
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: "latest_half"
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: "prompts/prefetch_system_prompt.txt"
+    user_prompt_file: "prompts/prefetch_user_prompt.txt"
+
+  draft:
+    <<: *agent_base
+    system_prompt_file: "prompts/draft_system_prompt.txt"
+    user_prompt_file: "prompts/draft_user_prompt.txt"
+
+  debug:
+    <<: *agent_base
+    system_prompt_file: "prompts/debug_system_prompt.txt"
+    user_prompt_file: "prompts/debug_user_prompt.txt"
+
+  improve:
+    <<: *agent_base
+    system_prompt_file: "prompts/improve_system_prompt.txt"
+    user_prompt_file: "prompts/improve_user_prompt.txt"
+
+  reseach:
+    <<: *agent_base
+    system_prompt_file: "prompts/reseach_system_prompt.txt"
+    user_prompt_file: "prompts/reseach_user_prompt.txt"
+
+  knowledge_promotion:
+    <<: *agent_base
+    system_prompt_file: "prompts/knowledge_promotion_system_prompt.txt"
+    user_prompt_file: "prompts/knowledge_promotion_user_prompt.txt"
+
+  wisdom_promotion:
+    <<: *agent_base
+    system_prompt_file: "prompts/wisdom_promotion_system_prompt.txt"
+    user_prompt_file: "prompts/wisdom_promotion_user_prompt.txt"
+
+session:
+  type: "local"
+  local:
+    working_dir: "./playground/sure_master/workspace"
+    timeout: 86400
+    gpu_devices: null
+    cpu_devices: null
+    symlinks: {}
+    parallel:
+      enabled: true
+      max_parallel: 1
+      # With gpu_devices unset/null, SURE Master auto-detects visible GPUs.
+      # gpus_per_exp defaults to all visible GPUs for this single experiment.
+      set_asr_world_size: true
+      split_workspace_for_exp: true
+
+llm_output:
+  show_in_console: true
+  log_to_file: true
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: null
+  console: true
