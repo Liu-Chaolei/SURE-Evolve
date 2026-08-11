@@ -24,6 +24,7 @@ sure:
   search_strategy: staged_axes
   staged_axes:
     enabled: true
+    start_phase: arch
     failure_policy: continue_on_system_failure
     final_rung_candidate_failure_fallback: previous_rung
     allow_neutral_axis_fallback: true
@@ -47,6 +48,12 @@ sure:
           execution_env:
             SURE_MAX_TRAIN_EPOCHS: '1'
             SURE_STAGED_TARGET_EPOCH: '1'
+            SURE_MAX_DURATION: 'auto'
+            SURE_DURATION_AUTOTUNE: '1'
+            SURE_DURATION_AUTOTUNE_MIN: '200'
+            SURE_DURATION_AUTOTUNE_MAX: '300'
+            SURE_DURATION_AUTOTUNE_STEP: '100'
+            SURE_DURATION_PROBE_SUCCESS_BATCHES: '1'
             SURE_RUN_TIMEOUT: '43200'
       train:
         rungs:
@@ -64,8 +71,15 @@ sure:
     max_inference_per_round: 1
     max_fine_tune_per_round: 1
     max_arch_per_round: 1
+  coordinator:
+    local_gpu_policy: disabled
   remote_training:
     enabled: true
+    draft_enabled: false
+    candidate_types:
+      - inference
+      - fine_tune
+      - arch
     image: docker.v2.aispeech.com/sjtu/sjtu_yukai-chaolei-suremaster_icefall:v1.0
     partition: pdgpu-a10
     partitions: pdgpu-a10
@@ -73,13 +87,20 @@ sure:
     partition_fallback: queue_first
     qos: ''
     nopassenv: true
-    num_task: 1
-    gpu_per_task: 8
-    cpu_per_task: 64
-    mem_per_task: 256G
+    resource_profiles:
+      inference:
+        num_task: 1
+        gpu_per_task: 1
+        cpu_per_task: 8
+        mem_per_task: 32G
+      training:
+        num_task: 1
+        gpu_per_task: 8
+        cpu_per_task: 64
+        mem_per_task: 256G
     volumes:
     - /hpc_stor03/sjtu_home/chaolei.liu:/hpc_stor03/sjtu_home/chaolei.liu
-    workdir: /hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster
+    workdir: /hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve
     python: /opt/conda/envs/evomaster/bin/python
     runner: playground/sure_master/tools/run_vc_sure_candidate.py
     job_prefix: sure-asr-train
@@ -94,7 +115,7 @@ sure:
       recover_missing_result: true
   initial_solution_path: playground/sure_master/baselines/zipformer_large_cr_ctc_rnnt_baseline.py
   inputs:
-    ref: /hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/asr_tedlium3_regular_ref.txt
+    ref: /hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/data/asr_tedlium3_regular_ref.txt
   execution_env:
     SURE_ASR_DATASET: tedlium3
     SURE_ASR_RECIPE_PROFILE: tedlium3_zipformer
@@ -110,7 +131,6 @@ sure:
     SURE_DURATION_PROBE_SUCCESS_BATCHES: '3'
     SURE_DURATION_PROBE_LOG_INTERVAL: '1'
     SURE_DURATION_HEADROOM_MB: '1000'
-    SURE_DURATION_PROBE_FULL_LIBRI: '0'
     SURE_DURATION_PRINT_DIAGNOSTICS: '0'
     SURE_DURATION_TRAIN_ARGS: --num-encoder-layers 2,2,4,5,4,2 --feedforward-dim 512,768,1536,2048,1536,768 --encoder-dim 192,256,512,768,512,256 --encoder-unmasked-dim 192,192,256,320,256,192 --enable-spec-aug 0
     SURE_TRAIN_DURATION_RETRY: '1'
@@ -127,8 +147,8 @@ sure:
     SURE_ENABLE_MUSAN: '0'
     ASR_WORLD_SIZE: '8'
     SURE_BASELINE_WORLD_SIZE: '8'
-    SURE_ICEFALL_PYTHON: /hpc_stor03/sjtu_home/chaolei.liu/anaconda3/envs/icefall/bin/python
-    SURE_ASR_ZIPFORMER_WRAPPER: /hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_icefall_zipformer_candidate.py
+    SURE_ICEFALL_PYTHON: /opt/conda/envs/icefall/bin/python
+    SURE_ASR_ZIPFORMER_WRAPPER: /hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/tools/run_icefall_zipformer_candidate.py
     SURE_ASR_REQUIRE_ZIPFORMER_WRAPPER: '1'
     SURE_BASELINE_EPOCH: '50'
     SURE_BASELINE_AVG: '26'
@@ -256,7 +276,7 @@ session:
   local:
     working_dir: ./playground/sure_master/workspace_icefall_tedlium3_smoke
     timeout: 86400
-    gpu_devices: idle
+    gpu_devices: null
     idle_gpu_min_free_mib: 10000
     idle_gpu_max_utilization: 20
     idle_gpu_min_count: 1

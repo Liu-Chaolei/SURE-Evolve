@@ -1,17 +1,15 @@
 #!/bin/bash
 set -eo pipefail
 
-REPO_DIR="${SURE_MASTER_REPO_DIR:-/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster}"
+REPO_DIR="${SURE_MASTER_REPO_DIR:-/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve}"
 LOCAL_ENV_PYTHON="${SURE_LOCAL_PYTHON:-/hpc_stor03/sjtu_home/chaolei.liu/anaconda3/envs/suremaster-f5tts-local/bin/python}"
-LOCAL_ICEFALL_PYTHON="${SURE_LOCAL_ICEFALL_PYTHON:-/hpc_stor03/sjtu_home/chaolei.liu/anaconda3/envs/icefall/bin/python}"
-CONFIG_PATH="${SURE_MASTER_CONFIG:-configs/sure_master/gpt-5-icefall-regular-search-mixed.yaml}"
+CONFIG_PATH="${SURE_MASTER_CONFIG:-configs/sure_master/gpt-5-icefall-staged-axes-mixed.yaml}"
 TASK_PATH="${SURE_MASTER_TASK:-playground/sure_master/data/asr_en_wer_zipformer_description.md}"
 RUN_DIR="${SURE_MASTER_RUN_DIR:-}"
 RUN_NAME="${SURE_MASTER_RUN_NAME:-}"
 LOG_DIR="${SURE_MASTER_LOG_DIR:-/hpc_stor03/sjtu_home/chaolei.liu/log}"
 
 PRESET_MASTER_PYTHON="${SURE_MASTER_PYTHON:-}"
-PRESET_ICEFALL_PYTHON="${SURE_LOCAL_ICEFALL_PYTHON:-}"
 
 cd "${REPO_DIR}"
 mkdir -p "${LOG_DIR}"
@@ -52,7 +50,6 @@ source .env
 set +a
 
 PYTHON_BIN="${PRESET_MASTER_PYTHON:-${SURE_LOCAL_PYTHON:-${LOCAL_ENV_PYTHON}}}"
-ICEFALL_PYTHON="${PRESET_ICEFALL_PYTHON:-${SURE_LOCAL_ICEFALL_PYTHON:-${LOCAL_ICEFALL_PYTHON}}}"
 SURE_ROOT="${SURE_ROOT:-/hpc_stor03/sjtu_home/chaolei.liu/sure}"
 SURE_PYTHONPATH="${SURE_PYTHONPATH:-${SURE_ROOT}/src}"
 
@@ -60,15 +57,7 @@ export PYTHONPATH="${SURE_PYTHONPATH}${PYTHONPATH:+:${PYTHONPATH}}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 
-if [[ -x "${ICEFALL_PYTHON}" ]]; then
-  export SURE_LOCAL_ICEFALL_PYTHON="${ICEFALL_PYTHON}"
-else
-  echo "Warning: local icefall Python is not executable: ${ICEFALL_PYTHON}"
-  echo "Local ASR inference candidates may fail; remote training children still use the Docker config path."
-fi
-
 echo "python=${PYTHON_BIN}"
-echo "local_icefall_python=${SURE_LOCAL_ICEFALL_PYTHON:-[not set]}"
 echo "pythonpath=${PYTHONPATH}"
 
 if [[ ! -x "${PYTHON_BIN}" ]]; then

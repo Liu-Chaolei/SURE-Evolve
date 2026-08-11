@@ -148,6 +148,10 @@ EvoMaster/
 
 完整文档目录请参阅 [docs/README_zh.md](./docs/README_zh.md)。
 
+SURE Master 工作流请参阅[使用手册](./playground/sure_master/USAGE.md)和[技术手册](./playground/sure_master/TECHNICAL_MANUAL.md)。
+
+仓库还提供可追溯的 ASR/TTS 论文资料库构建器，使用方法见[构建器说明](./docs/zh/paper_library_builder.md)，概念与后续自进化接入边界见[资料库设计讨论](./docs/zh/asr_tts_research_library_design.md)。
+
 
 ## <a id="quick-start"></a>🚀 快速开始
 

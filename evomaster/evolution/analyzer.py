@@ -13,6 +13,7 @@ from evomaster.config import ConfigManager
 from evomaster.utils import Dialog, LLMConfig, SystemMessage, UserMessage, create_llm
 
 from .models import (
+    AnalyzerAdvisoryContext,
     EvolutionCandidates,
     PromptPatchCandidate,
     SkillCandidate,
@@ -68,6 +69,10 @@ Return JSON only with this schema:
 }
 
 Use only agent_names from known_agents. If unsure and there is a single known agent, use that agent.
+
+Auxiliary advisory evidence is weak and non-authoritative. The current trace is the primary evidence.
+Ignore advisory items that conflict with or are irrelevant to the current trace. Do not copy an
+advisory item into a candidate unless the current trace independently supports that candidate.
 """
 
 
@@ -114,7 +119,11 @@ class EvolutionAnalyzer:
         self.config_path = Path(config_path)
         self.use_llm = use_llm
 
-    def analyze(self, digest: TraceDigest) -> EvolutionCandidates:
+    def analyze(
+        self,
+        digest: TraceDigest,
+        advisory_context: AnalyzerAdvisoryContext | None = None,
+    ) -> EvolutionCandidates:
         """Return LLM-generated candidates, falling back to heuristic ones."""
 
         logger.info(
@@ -126,8 +135,22 @@ class EvolutionAnalyzer:
             self.use_llm,
         )
         candidates: EvolutionCandidates | None = None
+        if advisory_context and advisory_context.items:
+            logger.info(
+                "Analyzer advisory items (%d): %s",
+                len(advisory_context.items),
+                [
+                    {
+                        "id": item.evidence_id,
+                        "source": item.source,
+                        "direction": item.direction,
+                        "state": item.metadata.get("state"),
+                    }
+                    for item in advisory_context.items
+                ],
+            )
         if self.use_llm:
-            candidates = self._analyze_with_llm(digest)
+            candidates = self._analyze_with_llm(digest, advisory_context)
 
         heuristic = self._heuristic_candidates(digest)
         if candidates is None:
@@ -148,7 +171,11 @@ class EvolutionAnalyzer:
         self._log_candidate_summary(candidates)
         return candidates
 
-    def _analyze_with_llm(self, digest: TraceDigest) -> EvolutionCandidates | None:
+    def _analyze_with_llm(
+        self,
+        digest: TraceDigest,
+        advisory_context: AnalyzerAdvisoryContext | None = None,
+    ) -> EvolutionCandidates | None:
         try:
             manager = ConfigManager(
                 config_dir=self.config_path.parent,
@@ -163,20 +190,25 @@ class EvolutionAnalyzer:
             )
             llm = create_llm(
                 LLMConfig(**llm_config),
-                output_config={"show_in_console": False, "log_to_file": True},
+                output_config={"show_in_console": False, "log_to_file": False},
             )
-            user_prompt = (
+            trace_prompt = (
                 "Known configured agents: "
                 f"{digest.known_agents}\n\n"
                 "Trace digest:\n"
                 f"{_model_dump_json(digest)}"
             )
+            user_prompt = trace_prompt
+            advisory_text = self._serialize_advisory_context(advisory_context)
+            if advisory_text:
+                user_prompt += "\n\nAuxiliary advisory evidence (weak; use only when trace-supported):\n"
+                user_prompt += advisory_text
             logger.info("=" * 80)
             logger.info("Evolution Analyzer LLM System Prompt:")
             logger.info(_SYSTEM_PROMPT)
             logger.info("=" * 80)
-            logger.info("Evolution Analyzer LLM User Prompt:")
-            logger.info(user_prompt)
+            logger.info("Evolution Analyzer LLM User Prompt (advisory content omitted from logs):")
+            logger.info(trace_prompt)
             logger.info("=" * 80)
             response = llm.query(
                 Dialog(
@@ -207,6 +239,37 @@ class EvolutionAnalyzer:
         except Exception as exc:
             logger.warning("LLM evolution analysis failed, using heuristic fallback: %s", exc)
             return None
+
+    @staticmethod
+    def _serialize_advisory_context(
+        advisory_context: AnalyzerAdvisoryContext | None,
+    ) -> str:
+        if advisory_context is None or not advisory_context.items or advisory_context.max_chars <= 0:
+            return ""
+        serialized: list[str] = []
+        used = 0
+        for item in advisory_context.items:
+            block = json.dumps(
+                {
+                    "source": item.source,
+                    "evidence_id": item.evidence_id,
+                    "title": item.title,
+                    "summary": item.summary,
+                    "direction": item.direction,
+                    "confidence": item.confidence,
+                    "metadata": item.metadata,
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+            remaining = advisory_context.max_chars - used
+            if remaining <= 0:
+                break
+            if len(block) > remaining:
+                block = block[:remaining]
+            serialized.append(block)
+            used += len(block)
+        return "\n".join(serialized)
 
     @staticmethod
     def _log_candidate_summary(candidates: EvolutionCandidates) -> None:

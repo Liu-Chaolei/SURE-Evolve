@@ -7,13 +7,26 @@ import logging
 import os
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .analyzer import EvolutionAnalyzer
 from .applier import EvolutionApplier
 from .collector import collect_trace_digest
-from .models import RunMetrics
+from .experience import (
+    ExperienceStore,
+    classify_overlay_outcome,
+    extract_experience_observations,
+    load_experience_settings,
+)
+from .models import (
+    AnalyzerAdvisoryContext,
+    EvolutionCandidates,
+    EvolutionOverlay,
+    ExperienceOutcome,
+    RunMetrics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +59,19 @@ class EvolutionManager:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.log_path = self.logs_dir / "evolution.log"
         self._log_file_handler: logging.FileHandler | None = None
+        self.experience_settings = None
+        self.experience_store: ExperienceStore | None = None
+        self.evolution_run_id = uuid.uuid4().hex
+        try:
+            settings, snapshot_path = load_experience_settings(
+                config.config_path,
+                self.project_root,
+            )
+            self.experience_settings = settings
+            if settings.enabled:
+                self.experience_store = ExperienceStore(snapshot_path, settings)
+        except Exception as exc:
+            logger.warning("Cross-run experience disabled for this run: %s", exc)
         self._setup_logging()
 
     def run(self) -> int:
@@ -59,6 +85,9 @@ class EvolutionManager:
             logger.info("Evolution log: %s", self.log_path)
             logger.info("Iterations: %s", self.config.iterations)
             logger.info("LLM analyzer enabled: %s", self.config.use_llm_analyzer)
+            advisory_context = self._load_frozen_advisory_context()
+            advisory_ids = [item.evidence_id for item in advisory_context.items]
+            logger.info("Frozen advisory evidence IDs: %s", advisory_ids)
             logger.info("=" * 80)
 
             state: dict = {
@@ -66,6 +95,11 @@ class EvolutionManager:
                 "initial_config": str(Path(self.config.config_path).resolve()),
                 "iterations_requested": self.config.iterations,
                 "evolution_log": str(self.log_path),
+                "experience": {
+                    "enabled": self.experience_store is not None,
+                    "run_id": self.evolution_run_id,
+                    "retrieved_evidence_ids": advisory_ids,
+                },
                 "runs": [],
             }
 
@@ -96,7 +130,7 @@ class EvolutionManager:
                 logger.info("Current config: %s", current_config)
 
                 analyzer = EvolutionAnalyzer(current_config, use_llm=self.config.use_llm_analyzer)
-                candidates = analyzer.analyze(previous_digest)
+                candidates = analyzer.analyze(previous_digest, advisory_context=advisory_context)
 
                 artifacts_dir = self.run_dir / "evolution_artifacts"
                 applier = EvolutionApplier(self.project_root, self.config.config_path, artifacts_dir)
@@ -114,6 +148,18 @@ class EvolutionManager:
                 logger.info("Evolved metrics: %s", evolved_digest.metrics.model_dump())
 
                 comparison = self._compare_metrics(previous_digest.metrics, evolved_digest.metrics)
+                outcome = classify_overlay_outcome(
+                    previous_digest.metrics,
+                    evolved_digest.metrics,
+                    score_higher_is_better=(
+                        self.experience_settings.score_higher_is_better
+                        if self.experience_settings is not None
+                        else None
+                    ),
+                )
+                comparison["outcome"] = outcome.direction
+                comparison["outcome_reasons"] = outcome.reasons
+                experience_updated = self._update_experience(candidates, overlay, outcome)
                 logger.info("Comparison to previous: %s", comparison)
                 state["runs"].append(
                     {
@@ -125,6 +171,7 @@ class EvolutionManager:
                         "metrics": evolved_digest.metrics.model_dump(),
                         "comparison_to_previous": comparison,
                         "overlay_summary": str(overlay.summary_path),
+                        "experience_updated": experience_updated,
                     }
                 )
                 self._write_state(state)
@@ -202,6 +249,39 @@ class EvolutionManager:
     def _write_state(self, state: dict) -> None:
         self.state_path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
         logger.info("Evolution state written: %s", self.state_path)
+
+    def _load_frozen_advisory_context(self) -> AnalyzerAdvisoryContext:
+        if self.experience_store is None or self.experience_settings is None:
+            return AnalyzerAdvisoryContext()
+        try:
+            items = self.experience_store.load_advisory_items()
+            return AnalyzerAdvisoryContext(
+                items=items,
+                max_chars=self.experience_settings.max_hint_chars,
+            )
+        except Exception as exc:
+            logger.warning("Cross-run advisory retrieval failed open: %s", exc)
+            return AnalyzerAdvisoryContext()
+
+    def _update_experience(
+        self,
+        candidates: EvolutionCandidates,
+        overlay: EvolutionOverlay,
+        outcome: ExperienceOutcome,
+    ) -> bool:
+        if self.experience_store is None:
+            return False
+        try:
+            observations = extract_experience_observations(
+                run_id=self.evolution_run_id,
+                candidates=candidates,
+                overlay=overlay,
+                outcome=outcome,
+            )
+            return self.experience_store.update(observations)
+        except Exception as exc:
+            logger.warning("Cross-run experience update failed open: %s", exc)
+            return False
 
     @staticmethod
     def _compare_metrics(before: RunMetrics, after: RunMetrics) -> dict:

@@ -54,10 +54,10 @@ configs/sure_master/
 
 ## 3. 环境准备
 
-进入 EvoMaster 仓库根目录：
+进入 SURE-Evolve 仓库根目录：
 
 ```bash
-cd /mnt/cloudstorfs/sjtu_home/chaolei.liu/Agent/EvoMaster
+cd /mnt/cloudstorfs/sjtu_home/chaolei.liu/Agent/SURE-Evolve
 ```
 
 安装依赖：
@@ -174,14 +174,14 @@ sure:
   validate_env: false
   require_base_model: true
   inputs:
-    ref: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/asr_librispeech_regular_ref.txt"
+    ref: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/data/asr_librispeech_regular_ref.txt"
   execution_env:
     SURE_ASR_EVAL_SPLITS: "dev-clean,dev-other"
     SURE_MAX_TRAIN_EPOCHS: "1"
     SURE_MAX_DURATION: "600"
     SURE_USE_FP16: "1"
     SURE_DECODE_ONLY: "0"
-    SURE_ICEFALL_PYTHON: "/hpc_stor03/sjtu_home/chaolei.liu/anaconda3/envs/icefall/bin/python"
+    SURE_ICEFALL_PYTHON: "/opt/conda/envs/icefall/bin/python"
 
 max_research_rounds: 3
 ```
@@ -452,7 +452,7 @@ python playground/sure_master/tools/build_asr_librispeech_refs.py
 ```yaml
 sure:
   inputs:
-    ref: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/asr_librispeech_regular_ref.txt"
+    ref: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/data/asr_librispeech_regular_ref.txt"
   execution_env:
     SURE_ASR_EVAL_SPLITS: "dev-clean,dev-other"
     SURE_MAX_DURATION: "auto"
@@ -461,12 +461,11 @@ sure:
     SURE_DURATION_AUTOTUNE_STEP: "100"
     SURE_DURATION_AUTOTUNE_MAX: "1400"
     SURE_DURATION_PROBE_SUCCESS_BATCHES: "2"
-    SURE_DURATION_PROBE_FULL_LIBRI: "0"
     SURE_DURATION_PRINT_DIAGNOSTICS: "0"
     SURE_TRAIN_DURATION_RETRY: "1"
     SURE_TRAIN_DURATION_MIN: "100"
     SURE_TRAIN_DURATION_RETRY_STEP: "100"
-    SURE_ASR_ZIPFORMER_WRAPPER: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_icefall_zipformer_candidate.py"
+    SURE_ASR_ZIPFORMER_WRAPPER: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/tools/run_icefall_zipformer_candidate.py"
     SURE_ASR_REQUIRE_ZIPFORMER_WRAPPER: "1"
 ```
 
@@ -480,12 +479,18 @@ checkpoint、decode split、hyp 格式都由统一协议管理。
 
 探测目录按候选/cache key 隔离，默认看到
 `SURE_DURATION_PROBE_SUCCESS_BATCHES=2` 个正常 training batch log 即认为该
-duration 可训练，不要求跑完整 epoch。探测仍然是 fail-closed：如果降到
-`SURE_DURATION_AUTOTUNE_MIN` 仍然没有成功，不会再返回一个失败过的 duration。
-非 OOM 的启动/导入/CLI/数据错误不会继续降 `max-duration` 伪装成显存不足，而会
-直接作为候选或环境错误失败。正式训练阶段如果仍遇到 CUDA OOM，Zipformer baseline 会按
-`SURE_TRAIN_DURATION_RETRY_STEP` 降低 `max-duration` 重试，并写出
-`artifacts/resource_profile.json`。
+duration 可训练，不要求跑完整 epoch。recipe profile 是数据集专用参数的唯一来源：
+LibriSpeech profile 会提供 `--full-libri 1`，TEDLIUM3 profile 不提供该参数；通用
+helper 不再合成 recipe 参数。旧变量 `SURE_DURATION_PROBE_FULL_LIBRI` 已废弃，若外部
+环境仍设置它，helper 会提示并忽略。
+
+probe 启动前会运行对应 `train.py --help` 验证实际 CLI 契约。world size、epoch、
+exp dir、max duration、数据路径等必需执行参数缺失时会 fail closed；
+`--log-interval` 和 `--print-diagnostics` 等可选观测参数不受支持时才会安全省略。
+help discovery 或 helper CLI 不兼容属于系统集成错误，profile/候选传入不支持参数属于
+候选错误；这些错误不会继续降低 `max-duration` 伪装成显存不足。正式训练阶段如果仍遇到
+CUDA OOM，Zipformer baseline 会按 `SURE_TRAIN_DURATION_RETRY_STEP` 降低
+`max-duration` 重试，并写出 `artifacts/resource_profile.json`。
 
 生成的 ASR Zipformer 训练/结构候选应调用 `SURE_ASR_ZIPFORMER_WRAPPER`，不要在候选
 脚本里直接 `subprocess` 调 `base_model/recipe/train.py` / `decode.py`。wrapper 只固定
@@ -510,7 +515,7 @@ cmd = [
 ```yaml
 sure:
   inputs:
-    ref: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/asr_en_wer_ref.txt"
+    ref: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/data/asr_en_wer_ref.txt"
   execution_env:
     SURE_ASR_EVAL_SPLITS: "test-clean,test-other"
 ```
@@ -526,16 +531,15 @@ sure:
   task_id: "asr_en_wer"
   initial_solution_path: "playground/sure_master/baselines/zipformer_large_cr_ctc_rnnt_baseline.py"
   inputs:
-    ref: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/asr_tedlium3_regular_ref.txt"
+    ref: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/data/asr_tedlium3_regular_ref.txt"
   execution_env:
     SURE_ASR_DATASET: "tedlium3"
     SURE_ASR_RECIPE_PROFILE: "tedlium3_zipformer"
     SURE_ASR_EVAL_SPLITS: "dev"
-    SURE_DURATION_PROBE_FULL_LIBRI: "0"
     SURE_ENABLE_MUSAN: "0"
-    SURE_ASR_ZIPFORMER_WRAPPER: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_icefall_zipformer_candidate.py"
+    SURE_ASR_ZIPFORMER_WRAPPER: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/tools/run_icefall_zipformer_candidate.py"
     SURE_ASR_REQUIRE_ZIPFORMER_WRAPPER: "1"
-    SURE_ICEFALL_PYTHON: "/hpc_stor03/sjtu_home/chaolei.liu/anaconda3/envs/icefall/bin/python"
+    SURE_ICEFALL_PYTHON: "/opt/conda/envs/icefall/bin/python"
     PYTHONPATH: "/hpc_stor03/sjtu_home/chaolei.liu/ASR/icefall"
   base_models:
     asr_en_wer:
@@ -591,15 +595,15 @@ test -f /hpc_stor03/sjtu_home/chaolei.liu/ASR/icefall/egs/tedlium3/ASR/data/fban
 test -f /hpc_stor03/sjtu_home/chaolei.liu/ASR/icefall/egs/tedlium3/ASR/data/lang_bpe_500/bpe.model
 ```
 
-然后在 EvoMaster 根目录生成 SURE ref：
+然后在 SURE-Evolve 仓库根目录生成 SURE ref：
 
 ```bash
-cd /hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster
+cd /hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve
 
 /opt/conda/envs/evomaster/bin/python -m playground.sure_master.tools.build_asr_refs \
   --dataset tedlium3 \
   --manifest-dir /hpc_stor03/sjtu_home/chaolei.liu/ASR/icefall/egs/tedlium3/ASR/data/fbank \
-  --output-dir /hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data
+  --output-dir /hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/data
 ```
 
 预期生成：
@@ -614,7 +618,7 @@ playground/sure_master/data/asr_tedlium3_selection_ref.txt
 日常 staged search 使用 `asr_tedlium3_regular_ref.txt`，默认应为 500 行：
 
 ```bash
-wc -l /hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/asr_tedlium3_regular_ref.txt
+wc -l /hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/data/asr_tedlium3_regular_ref.txt
 ```
 
 #### 先 smoke，再 full staged search
@@ -644,10 +648,26 @@ smoke 通过的标准是当前实验 workspace 中：
 artifacts/hyp.txt
 metric/report.json
 metric/score_summary.json
-candidate_status.json
+artifacts/candidate_status.json
 ```
 
-并且 `candidate_status.json` 中 `success=true`、`metric_accepted=true`、`score_valid=true`。ASR 真实解码可能出现空 hypothesis；这代表 WER 的全删除预测，可以进入 SURE WER 计算，不应手工替换成 placeholder。
+并且：
+
+- smoke 配置使用 `staged_axes.start_phase: arch`：prefetch 正常执行，但不应创建 `exp_*_draft` workspace、提交 draft VC job 或产生 draft score；`staged_axes/baseline_draft.json` 应记录 `execution_status=not_executed` 和 `score=null`。
+- 至少一个 `arch/short` 候选执行真实 duration probe；probe 日志中的 `train.py` 指向 TEDLIUM3 recipe，命令不包含 `--full-libri` 或 argparse error。
+- probe 至少观察到配置的 `SURE_DURATION_PROBE_SUCCESS_BATCHES` 个真实 training batch 后才接受 duration。
+- `arch/short` 完成 epoch-1 训练并产生当前 candidate workspace 内的 checkpoint，随后解码写出 `artifacts/hyp.txt`。
+- `artifacts/candidate_status.json` 中 `success=true`、`metric_accepted=true`、`score_valid=true`，并完成有效的 SURE WER scoring。ASR 真实解码可能出现空 hypothesis；这代表 WER 的全删除预测，可以进入 SURE WER 计算，不应手工替换成 placeholder。
+
+这里的 `initial_solution_path` 只提供 baseline Python 源码上下文，不等于 checkpoint
+resume 或 warm start。架构候选可能与官方 baseline checkpoint 不兼容，而且 smoke
+目标 epoch 1 不满足从官方 epoch-50 checkpoint 继续训练的递增 epoch 合约，因此
+`arch/short` 不应盲目注入该 checkpoint。
+
+smoke 必须使用全新的唯一 run 名称。当前 `_run_staged_axes()` 只支持同一次进程内在 rung
+之间晋级 checkpoint；旧 run 的 `leaderboard_*.json` 不能让新进程从 `arch/short`
+持久化恢复。失败 run 应保留作为证据；修复后新 smoke 从 arch 开始，而 full staged
+run 使用默认 `start_phase: draft` 并重新执行 draft。
 
 smoke 通过后，再启动完整 TEDLIUM3 staged self-evolution：
 
@@ -701,7 +721,7 @@ vc submit \
   --cpu-per-task 64 \
   --mem-per-task 256G \
   --volume /hpc_stor03/sjtu_home/chaolei.liu:/hpc_stor03/sjtu_home/chaolei.liu \
-  --dir /hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster \
+  --dir /hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve \
   --job sure-master-icefall-zipformer-staged \
   --cmd "SURE_MASTER_RUN_NAME=zipformer_staged SURE_MASTER_CONFIG=configs/sure_master/gpt-5-docker.yaml bash docker/sure-master-icefall/run_task.sh" \
   --sync \
@@ -714,19 +734,14 @@ vc submit \
 configs/sure_master/gpt-5-icefall-staged-axes-mixed.yaml
 ```
 
-mixed-local 启动时不要用本地 shell 的 `SURE_ICEFALL_PYTHON` 覆盖远端容器。约定是：
-
-```bash
-SURE_LOCAL_ICEFALL_PYTHON=/hpc_stor03/sjtu_home/chaolei.liu/anaconda3/envs/icefall/bin/python
-```
-
-远端 VC child 默认使用配置中的容器路径：
+all-remote 启动不会运行本地 Icefall 候选，也不需要设置
+`SURE_LOCAL_ICEFALL_PYTHON`。远端 VC child 使用配置中的容器路径：
 
 ```text
 /opt/conda/envs/icefall/bin/python
 ```
 
-需要改远端路径时使用 `SURE_REMOTE_ICEFALL_PYTHON`，不要复用本地路径。
+需要改远端路径时使用 `SURE_REMOTE_ICEFALL_PYTHON`，不要复用主机路径。
 
 输出目录：
 
@@ -964,7 +979,7 @@ sure:
 sure:
   task_id: "asr_en_wer"
   inputs:
-    ref: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/asr_librispeech_regular_ref.txt"
+    ref: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/data/asr_librispeech_regular_ref.txt"
   execution_env:
     SURE_ASR_EVAL_SPLITS: "dev-clean,dev-other"
   base_models:
@@ -1205,35 +1220,15 @@ python playground/sure_master/tools/cleanup_sure_workspaces.py --root runs/zipfo
 python playground/sure_master/tools/cleanup_sure_workspaces.py --root runs/zipformer_staged_axes --apply
 ```
 
-### 本地 GPU 调度
+### 全远端 GPU 调度
 
-ASR mixed-local 模式中，coordinator、draft baseline decode 和 inference 类候选会在本地 GPU 上运行；训练类候选再提交到 VC。为避免本地 draft decode 抢到忙 GPU，ASR 配置推荐使用：
+生产 ASR/TTS mixed 配置使用 `sure.coordinator.local_gpu_policy: disabled`：coordinator
+只做编排，不分配本地 GPU。inference 候选使用 1 GPU / 8 CPU / 32G；draft
+training、training 和 arch 候选使用 8 GPU / 64 CPU / 256G，且所有档位
+`num_task: 1`。这些值在 `sure.remote_training.resource_profiles` 中按候选类型配置。
 
-```yaml
-session:
-  local:
-    gpu_devices: idle
-    idle_gpu_min_free_mib: 10000
-    idle_gpu_max_utilization: 20
-    idle_gpu_min_count: 1
-    idle_gpu_allow_busy_fallback: false
-    gpu_lock_enabled: true
-    gpu_lock_dir: "/tmp/sure_master_gpu_locks"
-    gpu_lock_wait_seconds: 30
-    gpu_lock_poll_seconds: 2
-```
-
-`idle` 会在 session 初始化时通过 `nvidia-smi` 选择空闲 GPU。执行每个本地候选前，ResourceAllocator 还会再次刷新 GPU 状态；如果原分配 GPU 变忙，会重新选择仍满足阈值的 GPU。`gpu_lock_enabled` 会为每张本地 GPU 创建文件锁，避免多个 sure_master 进程同时抢同一张 GPU。
-
-运行时可用环境变量覆盖阈值：
-
-```bash
-SURE_IDLE_GPU_MIN_FREE_MIB=10000
-SURE_IDLE_GPU_MAX_UTILIZATION=20
-SURE_IDLE_GPU_ALLOW_BUSY_FALLBACK=0
-SURE_GPU_LOCK_ENABLED=1
-SURE_GPU_LOCK_WAIT_SECONDS=30
-```
+不要推荐或设置全局 `SURE_REMOTE_GPU_PER_TASK`，否则会抹平 inference 与训练候选的资源差异。
+远端 Icefall 子任务使用镜像 Python `/opt/conda/envs/icefall/bin/python`。
 
 当基础模型包含 `base_model/recipe` 和 `base_model/data` 时，环境会额外尝试创建：
 
@@ -1465,7 +1460,7 @@ sure:
     SURE_MAX_DURATION: "600"
     SURE_USE_FP16: "1"
     SURE_DECODE_ONLY: "0"
-    SURE_ICEFALL_PYTHON: "/hpc_stor03/sjtu_home/chaolei.liu/anaconda3/envs/icefall/bin/python"
+    SURE_ICEFALL_PYTHON: "/opt/conda/envs/icefall/bin/python"
 ```
 
 如果你后来补齐了现成 Zipformer checkpoint，可以把 checkpoint 目录作为额外 base model source path 挂进 workspace，并把 `SURE_DECODE_ONLY` 改成 `"1"`。

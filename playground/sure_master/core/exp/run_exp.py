@@ -543,12 +543,25 @@ class SureRunExp(BaseExp):
             task_id=self.task_card.task_id,
         )
 
+    def _remote_workload_profile(self) -> str:
+        """Return the VC profile for the work the candidate actually performs."""
+        candidate_type = normalize_candidate_type(self.candidate_type_hint)
+        stage = str(self.candidate_stage_name or self.stage).strip().lower()
+        if "draft" in stage:
+            candidate_type = candidate_type_from_code(self.code, default=INFERENCE)
+            if candidate_type in {FINE_TUNE, ARCH}:
+                return "draft_training"
+        return candidate_type
+
     def _execute_and_score_remote_candidate(self) -> tuple[bool, float | None, dict[str, Any]]:
         timeout = int(self._execution_timeout())
         executor = VcRemoteTrainingExecutor(
             self.config,
             config_path=self.config_path,
             logger=self.logger,
+            candidate_type=self.candidate_type_hint,
+            stage=self.candidate_stage_name or self.stage,
+            workload_profile=self._remote_workload_profile(),
         )
         if not executor.enabled:
             self.metric_feedback = (
@@ -1199,6 +1212,17 @@ class SureRunExp(BaseExp):
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.is_symlink():
                 target.unlink()
+            elif target.is_dir():
+                entries = list(target.iterdir())
+                if any(not entry.is_symlink() for entry in entries):
+                    self.logger.warning(
+                        "Cannot apply base_model override over directory with non-symlink contents: %s",
+                        target,
+                    )
+                    continue
+                for entry in entries:
+                    entry.unlink()
+                target.rmdir()
             elif target.exists():
                 self.logger.warning("Cannot apply base_model override over non-symlink path: %s", target)
                 continue

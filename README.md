@@ -149,6 +149,10 @@ EvoMaster/
 
 For the full documentation, please refer to [docs/README.md](./docs/README.md).
 
+For SURE Master workflows, see the [usage guide](./playground/sure_master/USAGE.md) and [technical manual](./playground/sure_master/TECHNICAL_MANUAL.md).
+
+The repository also includes a provenance-preserving ASR/TTS paper-library builder. See the [builder guide](./docs/zh/paper_library_builder.md) and [research-library design discussion](./docs/zh/asr_tts_research_library_design.md).
+
 
 
 ## <a id="quick-start"></a>🚀 Quick Start

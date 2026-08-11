@@ -69,6 +69,66 @@ def remote_training_config_from(config: Any) -> dict[str, Any]:
     return resolved
 
 
+def remote_resource_config_from(
+    config: Any,
+    *,
+    candidate_type: str | None = None,
+    stage: str | None = None,
+    workload_profile: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Resolve workload resources using legacy, default, and specific layers.
+
+    ``workload_profile`` is an explicit dispatch decision. This avoids treating
+    every draft as train-from-scratch: draft inference remains ``inference``,
+    while a training draft can select ``draft_training``. Environment resource
+    overrides remain authoritative for backward compatibility.
+    """
+    remote = sure_config_from(config).get("remote_training") or {}
+    if not isinstance(remote, dict):
+        remote = {}
+    resolved = dict(remote)
+    profiles = remote.get("resource_profiles") or {}
+    if not isinstance(profiles, dict):
+        profiles = {}
+
+    normalized = normalize_candidate_type(candidate_type or TRAINING)
+    selected_profile = str(workload_profile or normalized).strip().lower().replace("-", "_")
+    applied_profiles: list[str] = []
+
+    def apply_profile(name: str) -> None:
+        value = profiles.get(name)
+        if isinstance(value, dict):
+            resolved.update(value)
+            applied_profiles.append(name)
+
+    # Documented precedence: legacy flat fields < default < training inheritance
+    # < the explicitly selected workload profile < environment overrides.
+    apply_profile("default")
+    if selected_profile in {TRAINING, FINE_TUNE, ARCH, "draft_training"}:
+        apply_profile(TRAINING)
+    if selected_profile != TRAINING:
+        apply_profile(selected_profile)
+
+    profile_name = applied_profiles[-1] if applied_profiles else "legacy"
+    for env_name, config_key in REMOTE_ENV_OVERRIDES.items():
+        value = os.environ.get(env_name)
+        if value is not None and value.strip():
+            resolved[config_key] = value.strip()
+
+    diagnostics = {
+        "candidate_type": normalized,
+        "stage": str(stage or ""),
+        "workload_profile": selected_profile,
+        "profile_name": profile_name,
+        "profile_configured": profile_name != "legacy",
+        "requested_resources": {
+            key: resolved.get(key)
+            for key in ("num_task", "gpu_per_task", "cpu_per_task", "mem_per_task")
+        },
+    }
+    return resolved, diagnostics
+
+
 def mixed_execution_enabled(config: Any, task_id: str | None = None) -> bool:
     sure_config = sure_config_from(config)
     if str(sure_config.get("execution_mode", "")).strip().lower() == "mixed_local_vc":
@@ -145,6 +205,30 @@ def draft_runs_remotely(config: Any) -> bool:
     if not bool(remote.get("enabled", False)):
         return False
     return _truthy(remote.get("draft_enabled")) or _truthy(remote.get("draft_training_enabled"))
+
+
+def complete_remote_coverage_from(config: Any) -> tuple[bool, dict[str, Any]]:
+    """Prove that coordinator execution cannot require a local GPU."""
+    sure_config = sure_config_from(config)
+    remote = remote_training_config_from(config)
+    configured = remote_candidate_types_from(config)
+    required = {INFERENCE, FINE_TUNE, ARCH}
+    enabled = bool(remote.get("enabled", False))
+    draft_enabled = draft_runs_remotely(config)
+    staged_axes = sure_config.get("staged_axes") or {}
+    if not isinstance(staged_axes, dict):
+        staged_axes = {}
+    start_phase = str(staged_axes.get("start_phase", "draft")).strip().lower()
+    draft_required = start_phase != "arch"
+    missing = sorted(required - configured)
+    complete = enabled and (draft_enabled or not draft_required) and not missing
+    return complete, {
+        "remote_enabled": enabled,
+        "draft_enabled": draft_enabled,
+        "draft_required": draft_required,
+        "remote_candidate_types": sorted(configured),
+        "missing_candidate_types": missing,
+    }
 
 
 def candidate_limits_from(config: Any) -> dict[str, int]:
@@ -241,10 +325,18 @@ class VcRemoteTrainingExecutor:
         *,
         config_path: str | Path | None,
         logger: logging.Logger | None = None,
+        candidate_type: str | None = None,
+        stage: str | None = None,
+        workload_profile: str | None = None,
     ) -> None:
         self.config = config
         self.config_path = _resolve_config_path(config_path)
-        self.remote_config = remote_training_config_from(config)
+        self.remote_config, self.resource_profile = remote_resource_config_from(
+            config,
+            candidate_type=candidate_type,
+            stage=stage,
+            workload_profile=workload_profile,
+        )
         self.logger = logger or logging.getLogger(self.__class__.__name__)
         self.last_partition_selection: dict[str, Any] = {}
         self.last_job_name = ""
@@ -291,6 +383,7 @@ class VcRemoteTrainingExecutor:
                     {
                         "command": None,
                         "partition_selection": self.last_partition_selection,
+                        "resource_profile": self.resource_profile,
                         "error": str(exc),
                     },
                     ensure_ascii=False,
@@ -312,6 +405,7 @@ class VcRemoteTrainingExecutor:
                 {
                     "command": command,
                     "partition_selection": self.last_partition_selection,
+                    "resource_profile": self.resource_profile,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -538,18 +632,24 @@ class VcRemoteTrainingExecutor:
             or "playground/sure_master/tools/run_vc_sure_candidate.py"
         )
         job_prefix = str(self.remote_config.get("job_prefix") or "sure-f5tts-train")
-        job_name = _safe_job_name(f"{job_prefix}-{exp_name}-{int(time.time())}")
+        workload = str(self.resource_profile.get("candidate_type") or "training").replace("_", "-")
+        job_name = _safe_job_name(f"{job_prefix}-{workload}-{exp_name}-{int(time.time())}")
         self.last_job_name = job_name
-        gpu_per_task = _positive_int(self.remote_config.get("gpu_per_task"), default=1)
         env_file = Path(str(self.remote_config.get("env_file") or PROJECT_ROOT / ".env"))
+        profile_name = str(self.resource_profile.get("profile_name") or "legacy")
+        requested_resources = json.dumps(
+            self.resource_profile.get("requested_resources") or {},
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
         child_script = "\n".join(
             [
                 "set -eo pipefail",
                 f"cd {shlex.quote(workdir)}",
                 f"if [ -f {shlex.quote(str(env_file))} ]; then set -a; source {shlex.quote(str(env_file))}; set +a; "
                 "elif [ -f .env ]; then set -a; source .env; set +a; fi",
-                f'export ASR_WORLD_SIZE="${{ASR_WORLD_SIZE:-{gpu_per_task}}}"',
-                'export SURE_BASELINE_WORLD_SIZE="${SURE_BASELINE_WORLD_SIZE:-${ASR_WORLD_SIZE}}"',
+                f"export SURE_VC_RESOURCE_PROFILE={shlex.quote(profile_name)}",
+                f"export SURE_VC_REQUESTED_RESOURCES={shlex.quote(requested_resources)}",
                 (
                     f"{shlex.quote(python_bin)} -u {shlex.quote(runner)} "
                     f"--config {shlex.quote(str(remote_config_path))} "
@@ -751,6 +851,8 @@ class VcRemoteTrainingExecutor:
                 "job_name": self.last_job_name,
                 "selected_partition": self.last_partition_selection.get("selected_partition"),
                 "partition_selection": self.last_partition_selection,
+                "resource_profile": self.resource_profile,
+                "requested_resources": self.resource_profile.get("requested_resources", {}),
                 "remote_result": str(result_path),
                 "elapsed_seconds": round(elapsed_seconds, 3),
             }

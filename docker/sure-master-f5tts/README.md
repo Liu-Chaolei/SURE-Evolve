@@ -1,8 +1,9 @@
 # SURE Master F5-TTS 启动手册
 
 这份手册只保留当前 F5-TTS 自进化会用到的内容：
-官方 F5-TTS v1 Base draft、`staged_axes` 三轴自进化、mixed-local
-coordinator、远端 VC 候选执行、日志和结果路径。
+官方 F5-TTS v1 Base draft、`staged_axes` 三轴自进化、CPU-only coordinator、
+全远端 VC 候选执行、日志和结果路径。脚本名沿用 `run_mixed_local.sh`，但当前
+production 配置默认不是 mixed-local GPU 执行。
 
 ## 当前入口
 
@@ -27,24 +28,51 @@ docker/sure-master-f5tts/run_mixed_local.sh
 运行方式：
 
 ```text
-本地 coordinator：负责 SURE Master / LLM 编排和提交 VC 子任务
-本地 inference 候选：使用 coordinator 可见 GPU 执行 batch inference
-远端 VC 子任务：负责 fine-tune、arch 训练型候选，每个候选 8 GPU
+本地 coordinator：CPU-only，负责 SURE Master / LLM 编排和提交 VC 子任务
+远端 inference：每个 VC child job 使用 1 GPU / 8 CPU / 32G
+远端 fine_tune、arch 及 train-from-scratch draft：每个 VC child job 使用 8 GPU / 64 CPU / 256G
+SURE metric：在对应 VC child job 内运行
 ```
+
+staged 和 regular-search production YAML 均设置
+`coordinator.local_gpu_policy: disabled`、`remote_training.draft_enabled: true`，并完整
+覆盖 `inference`、`fine_tune`、`arch`。`remote_training.max_parallel` 表示并行 VC
+job 数，不是 GPU 数。
 
 ## 前置条件
 
-确认这些路径存在：
+确认 coordinator 所需路径存在：
 
 ```bash
-test -f /hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/.env
-test -d /hpc_stor03/sjtu_home/chaolei.liu/TTS/F5-TTS
+REPO_DIR=/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve
+
+test -f "${REPO_DIR}/.env"
 test -d /hpc_stor03/sjtu_home/chaolei.liu/sure
+test -x /hpc_stor03/sjtu_home/chaolei.liu/anaconda3/envs/suremaster-f5tts-local/bin/python
+command -v vc
+```
+
+全远端模式下 coordinator 不要求本地 GPU、`nvidia-smi`、F5-TTS source/runtime、
+F5-TTS Python 或本地 Vocos cache。F5-TTS、CUDA、数据和以下 checkpoint 必须在 VC
+child image 或挂载路径内可读：
+
+```bash
 test -d /hpc_stor03/public/shared/data
 test -f /hpc_stor03/sjtu_home/chaolei.liu/models/official_drafts/SWivid-F5-TTS/F5TTS_v1_Base/model_1250000.safetensors
 test -f /hpc_stor03/sjtu_home/chaolei.liu/models/official_drafts/SWivid-F5-TTS/F5TTS_v1_Base/vocab.txt
-command -v vc
 ```
+
+当前仓库和 launcher/config 默认路径均为 `SURE-Evolve`；通常无需覆盖
+`SURE_MASTER_REPO_DIR`。迁移仓库时，YAML 中的数据、wrapper、VC workdir 和 `.env`
+路径必须同步调整。启动前可扫描：
+
+```bash
+rg -n '/Agent/(EvoMaster|SURE-Evolve-old)' \
+  configs/sure_master/gpt-5-f5tts-staged-axes-mixed.yaml \
+  configs/sure_master/gpt-5-f5tts-regular-search-mixed.yaml
+```
+
+所选 launcher/YAML 不应包含旧仓库路径。
 
 `.env` 至少需要：
 
@@ -54,7 +82,7 @@ GPT_BASE_URL=...
 GPT_CHAT_MODEL=...
 ```
 
-F5-TTS runtime 默认离线使用 Hugging Face cache：
+F5-TTS child runtime 默认离线使用 Hugging Face cache：
 
 ```bash
 HF_HUB_OFFLINE=1
@@ -131,44 +159,47 @@ arch 初筛阶段会设置 `SURE_TTS_ARCH_INIT_MODE=scratch`，目的是让不�
 配置还会同步设置 `SURE_TTS_ARCH_FORCE_INIT_MODE`，防止候选脚本用 CLI 参数覆盖
 当前阶段的初始化策略。
 
-远端调度只覆盖训练型候选：
+远端调度覆盖所有候选类型：
 
 ```yaml
+coordinator:
+  local_gpu_policy: disabled
 remote_training:
+  draft_enabled: true
   candidate_types:
-    - "training"
+    - inference
+    - fine_tune
+    - arch
 ```
 
-因此 `fine_tune` 和 `arch` 会提交 VC 子任务，`inference` 留在本地 coordinator
-的 `CUDA_VISIBLE_DEVICES` 上执行。
+因此 draft、`inference`、`fine_tune` 和 `arch` 均提交 VC child；profile 按类型提供
+1-GPU inference 或 8-GPU training 资源。
 
 ## 启动
 
 后台启动当前 F5-TTS staged 搜索：
 
 ```bash
-cd /hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster
+cd /hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve
 
+REPO_DIR=/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve
 CONFIG=configs/sure_master/gpt-5-f5tts-staged-axes-mixed.yaml
 RUN_NAME=f5tts_staged
 RUN_DIR="runs/${RUN_NAME}"
-RUN_ID="${RUN_NAME}"
 LOG_DIR=/hpc_stor03/sjtu_home/chaolei.liu/log
-MASTER_LOG="${LOG_DIR}/sure_master_${RUN_ID}.log"
-NOHUP_LOG="${LOG_DIR}/sure_master_${RUN_ID}.nohup.log"
+MASTER_LOG="${LOG_DIR}/sure_master_${RUN_NAME}.log"
+NOHUP_LOG="${LOG_DIR}/sure_master_${RUN_NAME}.nohup.log"
 
 REMOTE_PARTITION=""
 REMOTE_PARTITIONS=pdgpu-3090,pdgpu-4090,pdgpu-a10
 REMOTE_PARTITION_POLICY=most_free_gpu
 REMOTE_PARTITION_FALLBACK=queue_first
-REMOTE_GPU_PER_TASK=8
-REMOTE_CPU_PER_TASK=64
-REMOTE_MEM_PER_TASK=256G
 REMOTE_MAX_PARALLEL=4
 
 mkdir -p "${LOG_DIR}"
 
 nohup env \
+  SURE_MASTER_REPO_DIR="${REPO_DIR}" \
   SURE_MASTER_CONFIG="${CONFIG}" \
   SURE_MASTER_RUN_DIR="${RUN_DIR}" \
   SURE_MASTER_LOG_FILE="${MASTER_LOG}" \
@@ -176,59 +207,45 @@ nohup env \
   SURE_REMOTE_PARTITIONS="${REMOTE_PARTITIONS}" \
   SURE_REMOTE_PARTITION_POLICY="${REMOTE_PARTITION_POLICY}" \
   SURE_REMOTE_PARTITION_FALLBACK="${REMOTE_PARTITION_FALLBACK}" \
-  SURE_REMOTE_GPU_PER_TASK="${REMOTE_GPU_PER_TASK}" \
-  SURE_REMOTE_CPU_PER_TASK="${REMOTE_CPU_PER_TASK}" \
-  SURE_REMOTE_MEM_PER_TASK="${REMOTE_MEM_PER_TASK}" \
   SURE_REMOTE_MAX_PARALLEL="${REMOTE_MAX_PARALLEL}" \
   bash docker/sure-master-f5tts/run_mixed_local.sh \
   > "${NOHUP_LOG}" 2>&1 &
 
-echo "pid=$!"
+PID=$!
+echo "pid=${PID}"
+echo "run_dir=${RUN_DIR}"
 echo "master_log=${MASTER_LOG}"
 echo "nohup_log=${NOHUP_LOG}"
 ```
 
-本地 inference 现在默认由配置自动选择空闲卡：
+这里使用 `SURE_MASTER_RUN_DIR=runs/f5tts_staged`，所以它作为显式 path-like 值
+按 launcher/CLI 语义直接使用，不追加时间戳（从仓库根目录启动时即
+`<REPO_DIR>/runs/f5tts_staged`）。若改用 `SURE_MASTER_RUN_NAME=f5tts_staged`，launcher
+会把裸名称传给 `--run-dir`，由 CLI 解析到默认 run root 并追加时间戳。两者不能同时
+设置；若都不设置，则使用 CLI 自动生成的默认目录。
 
-```yaml
-gpu_devices: idle
-idle_gpu_min_free_mib: 9000
-idle_gpu_max_utilization: 20
-```
+`SURE_MASTER_CONFIG` 可省略，因为 launcher 当前默认即为
+`gpt-5-f5tts-staged-axes-mixed.yaml`；切换 regular search 时再显式覆盖。
 
-含义是通过 `nvidia-smi` 只选择空闲显存不少于 9GB 且 GPU 利用率不高于 20% 的
-卡。本地并发数会按实际筛出的卡数自动收缩，避免把 F5-TTS 推理派到已被其他
-进程占满的 GPU 上。若想限制候选卡范围，启动前设置：
+不要在推荐启动命令中设置 `SURE_REMOTE_GPU_PER_TASK`、
+`SURE_REMOTE_CPU_PER_TASK` 或 `SURE_REMOTE_MEM_PER_TASK`：全局覆盖会压过 YAML 的
+inference/training profiles。`SURE_REMOTE_MAX_PARALLEL=4` 表示最多并行 4 个 VC
+child job。
+
+如果 coordinator Python 不在默认环境中，可在 `nohup env` 后增加：
 
 ```bash
-SURE_LOCAL_CUDA_VISIBLE_DEVICES=1,2,3
+SURE_MASTER_PYTHON=/path/to/coordinator/python \
 ```
 
-若没有满足阈值的本地卡，任务会在 setup 阶段直接报错，而不是退回忙卡继续
-OOM。阈值可通过 `SURE_IDLE_GPU_MIN_FREE_MIB` 和
-`SURE_IDLE_GPU_MAX_UTILIZATION` 覆盖。
+coordinator Python 只需承载编排依赖；全远端模式不使用本地 F5-TTS Python。VC
+scheduler 注入的 `CUDA_VISIBLE_DEVICES` 是 child 内 GPU 可见性的权威来源，不要从
+coordinator 传入或在 wrapper 中覆盖。
 
-SURE metric 评分也有独立 GPU 调度，不复用候选生成时的卡选择：
-
-```yaml
-sure:
-  metric_gpu:
-    enabled: true
-    devices: "idle"
-    gpus_per_metric: 1
-    min_free_mib: 9500
-    max_utilization: 20
-    wait_timeout_sec: 900
-    poll_interval_sec: 10
-    oom_retry: true
-    max_retries: 4
-    cleanup_before_score: true
-```
-
-含义是每次调用 SURE/Whisper 评分前重新用 `nvidia-smi` 找空闲卡，并通过
-`/tmp/sure_master_metric_gpu_locks` 做文件锁，避免多个评分任务同时抢同一张卡。
-如果评分阶段遇到 CUDA OOM，会释放当前卡、换下一张可用卡重试。每次尝试会写到
-`metric/metric_gpu_attempts.json`；失败详情在 `metric/metric_error.json`。
+如确需 mixed-local，这是显式 opt-in：修改 `coordinator.local_gpu_policy`，并从
+`remote_training.candidate_types`（以及按需的 draft routing）移除要留在本地的类型，
+再配置本地 runtime、session 和 GPU 选择。仅设置 `SURE_LOCAL_CUDA_VISIBLE_DEVICES`
+不会改变当前全远端路由。
 
 这里故意设置：
 
@@ -241,22 +258,24 @@ REMOTE_PARTITION=
 
 ## 查看状态
 
+以上面的 `RUN_NAME=f5tts_staged` 为例。
+
 主日志：
 
 ```bash
-tail -f /hpc_stor03/sjtu_home/chaolei.liu/log/sure_master_f5tts_staged_axes_mixed.log
+tail -f /hpc_stor03/sjtu_home/chaolei.liu/log/sure_master_f5tts_staged.log
 ```
 
 后台包装日志：
 
 ```bash
-tail -f /hpc_stor03/sjtu_home/chaolei.liu/log/sure_master_f5tts_staged_axes_mixed.nohup.log
+tail -f /hpc_stor03/sjtu_home/chaolei.liu/log/sure_master_f5tts_staged.nohup.log
 ```
 
 查 coordinator 进程：
 
 ```bash
-ps -ef | rg 'sure_master|run_mixed_local|f5tts_staged_axes_mixed'
+ps -ef | rg 'sure_master|run_mixed_local|f5tts_staged'
 ```
 
 查 VC 子任务：
@@ -267,22 +286,22 @@ vc info
 
 ## 结果位置
 
-主输出目录：
+主输出目录（相对于仓库根目录）：
 
 ```text
-runs/f5tts_staged_axes_mixed/
+runs/f5tts_staged/
 ```
 
 staged 汇总：
 
 ```text
-runs/f5tts_staged_axes_mixed/staged_axes/baseline_draft.json
-runs/f5tts_staged_axes_mixed/staged_axes/ideas_<axis>.json
-runs/f5tts_staged_axes_mixed/staged_axes/leaderboard_<axis>_<rung>.json
-runs/f5tts_staged_axes_mixed/staged_axes/top_<axis>.json
-runs/f5tts_staged_axes_mixed/staged_axes/leaderboard_combination_search.json
-runs/f5tts_staged_axes_mixed/staged_axes/leaderboard_selection.json
-runs/f5tts_staged_axes_mixed/staged_axes/summary.json
+runs/f5tts_staged/staged_axes/baseline_draft.json
+runs/f5tts_staged/staged_axes/ideas_<axis>.json
+runs/f5tts_staged/staged_axes/leaderboard_<axis>_<rung>.json
+runs/f5tts_staged/staged_axes/top_<axis>.json
+runs/f5tts_staged/staged_axes/leaderboard_combination_search.json
+runs/f5tts_staged/staged_axes/leaderboard_selection.json
+runs/f5tts_staged/staged_axes/summary.json
 ```
 
 每个候选 workspace 内常用文件：
@@ -292,16 +311,24 @@ run_sure.py
 artifacts/samples.jsonl
 artifacts/wavs/*.wav
 artifacts/candidate_changes.json
+working/batch_infer/diagnostics.json
 metric/score_summary.json
 metric/remote_training_result.json
+metric/metric_gpu_attempts.json
+metric/metric_error.json
 ```
+
+`artifacts/candidate_changes.json` 记录 F5 adaptation 的实际结构、训练或 inference
+改动；`working/batch_infer/diagnostics.json` 记录 shard/worker 推理诊断。metric 尝试和
+错误文件由 child 内评分生成；启用 workspace cleanup 时，`working/` 等大产物可能在
+候选结束后被清理，应结合保留的 metric/remote result 与日志尾部排查。
 
 ## 常用覆盖
 
 换输出目录：
 
 ```bash
-SURE_MASTER_RUN_DIR=runs/f5tts_staged_axes_mixed_v2
+SURE_MASTER_RUN_DIR=runs/f5tts_staged_v2
 ```
 
 换成普通 mixed search：
@@ -331,20 +358,34 @@ HF_HUB_OFFLINE=0
 
 ## 快速排错
 
-`Missing .env`：确认仓库根目录存在 `.env`。
+`Missing .env`：确认 `SURE_MASTER_REPO_DIR` 指向当前仓库根目录，且该目录中
+存在 `.env`。
+
+若 launcher 无法进入仓库：确认 `SURE_MASTER_REPO_DIR` 指向：
+
+```bash
+SURE_MASTER_REPO_DIR=/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve
+```
+
+VC 子任务找不到数据、wrapper、workdir 或 `.env`：检查所选 YAML 中是否仍有旧路径：
+
+```bash
+rg -n '/Agent/(EvoMaster|SURE-Evolve-old)' "${CONFIG}"
+```
 
 `Missing OPENAI_API_KEY/GPT_BASE_URL/GPT_CHAT_MODEL`：检查 `.env` 变量名。
 
+`Python is not executable` 或运行时依赖导入失败：使用
+`SURE_MASTER_PYTHON` 指定 coordinator Python。
+
+child 内 CUDA 卡号异常：不要从 coordinator 传入或在候选中重写
+`CUDA_VISIBLE_DEVICES`；以 VC scheduler 注入的值为准。
+
 `vc command is required`：需要在能调用 `vc submit` 的机器上启动 coordinator。
 
-`Missing F5-TTS source directory`：检查：
-
-```text
-/hpc_stor03/sjtu_home/chaolei.liu/TTS/F5-TTS
-```
-
-`Missing cached Vocos model while HF_HUB_OFFLINE=1`：先缓存
-`charactr/vocos-mel-24khz`，或在启动命令里加 `HF_HUB_OFFLINE=0`。
+远端 child 报 F5-TTS source/runtime 或 Vocos cache 缺失：检查 production image、
+挂载路径和 child 的 `HF_HUB_OFFLINE` 设置；全远端模式不要求 coordinator 本地安装
+F5-TTS。
 
 `model_1250000.safetensors` 不存在：检查官方 draft checkpoint 路径，或重新下载
 `SWivid/F5-TTS` 的 `F5TTS_v1_Base` 文件。

@@ -50,9 +50,11 @@ from .utils.task_cards import (
 from .utils.vc_remote import (
     candidate_limits_from,
     draft_runs_remotely,
+    complete_remote_coverage_from,
     mixed_execution_enabled,
     remote_candidate_types_from,
     remote_training_max_parallel,
+    sure_config_from,
 )
 from .utils.watch_dog import (
     GlobalTimeoutInterrupt,
@@ -276,6 +278,58 @@ def _non_negative_int(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(0, parsed)
+
+
+def _coordinator_local_gpu_required(config: Any) -> tuple[bool, str]:
+    """Resolve the shared coordinator GPU policy before session discovery."""
+    sure_config = sure_config_from(config)
+    coordinator = sure_config.get("coordinator") or {}
+    if not isinstance(coordinator, dict):
+        coordinator = {}
+    policy = str(coordinator.get("local_gpu_policy") or "auto").strip().lower()
+    if policy in {"disabled", "none", "off"}:
+        complete, diagnostics = complete_remote_coverage_from(config)
+        if not complete:
+            raise ValueError(
+                "sure.coordinator.local_gpu_policy=disabled requires complete remote "
+                f"coverage; diagnostics={diagnostics}"
+            )
+        return False, "disabled"
+    if policy in {"required", "local", "on"}:
+        return True, "required"
+    if policy != "auto":
+        raise ValueError(
+            "sure.coordinator.local_gpu_policy must be auto, required, or disabled"
+        )
+    complete, _diagnostics = complete_remote_coverage_from(config)
+    return not complete, "auto"
+
+
+def _apply_coordinator_gpu_policy(
+    config: Any,
+    local_config: dict[str, Any],
+    logger: logging.Logger,
+) -> dict[str, Any]:
+    required, policy = _coordinator_local_gpu_required(config)
+    if required:
+        return _apply_auto_gpu_config(local_config, logger)
+    local_config["gpu_devices"] = None
+    disabled_top_level = {
+        "refresh_idle_gpu_before_exec": False,
+        "gpu_lock_enabled": False,
+        "set_asr_world_size": False,
+        "gpus_per_exp": 1,
+        "serial_gpus_per_exp": None,
+    }
+    local_config.update(disabled_top_level)
+    parallel = local_config.get("parallel")
+    if isinstance(parallel, dict):
+        parallel.update(disabled_top_level)
+    logger.info(
+        "SURE coordinator-only mode (local_gpu_policy=%s): skipping local GPU discovery",
+        policy,
+    )
+    return local_config
 
 
 def _apply_auto_gpu_config(
@@ -508,7 +562,11 @@ class SureMasterPlayground(BasePlayground):
             if session_type == "docker":
                 raise ValueError("Docker session is not supported for SURE Master v1")
             session_config_dict = self.config.session.get("local", {}).copy()
-            session_config_dict = _apply_auto_gpu_config(session_config_dict, self.logger)
+            session_config_dict = _apply_coordinator_gpu_policy(
+                self.config,
+                session_config_dict,
+                self.logger,
+            )
             self._inject_base_model_symlinks(session_config_dict)
             if "working_dir" in session_config_dict and "workspace_path" not in session_config_dict:
                 session_config_dict["workspace_path"] = session_config_dict["working_dir"]
@@ -881,6 +939,47 @@ class SureMasterPlayground(BasePlayground):
             "axis_staged",
             "three_axis",
         }
+
+    def _staged_start_phase(self) -> str:
+        start_phase = str(
+            self._staged_axes_config().get("start_phase", "draft")
+        ).strip().lower()
+        if start_phase not in {"draft", "arch"}:
+            raise ValueError(
+                "sure.staged_axes.start_phase must be 'draft' or 'arch', "
+                f"got {start_phase!r}"
+            )
+        return start_phase
+
+    def _staged_initial_source(self) -> tuple[str, str, Path]:
+        raw_path = self.sure_config.get("initial_solution_path")
+        if not raw_path or not str(raw_path).strip():
+            raise ValueError(
+                "sure.initial_solution_path is required when "
+                "sure.staged_axes.start_phase is 'arch'"
+            )
+        configured_path = str(raw_path).strip()
+        source_path = Path(configured_path).expanduser()
+        if not source_path.is_absolute():
+            source_path = project_root / source_path
+        if not source_path.is_file():
+            raise FileNotFoundError(
+                "Configured initial solution for staged arch entry is not a "
+                f"readable file: {source_path}"
+            )
+        try:
+            source = source_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise OSError(
+                "Cannot read configured initial solution for staged arch entry: "
+                f"{source_path}"
+            ) from exc
+        if not source:
+            raise ValueError(
+                "Configured initial solution for staged arch entry is empty: "
+                f"{source_path}"
+            )
+        return configured_path, source, source_path.resolve()
 
     @staticmethod
     def _staged_int(value: Any, default: int, minimum: int = 0) -> int:
@@ -1441,6 +1540,8 @@ class SureMasterPlayground(BasePlayground):
             "remote_setup_failed",
             "remote_candidate_failed",
             "candidate_execution_timeout",
+            "duration_probe_help_discovery_failed",
+            "duration_probe_helper_cli_incompatible",
         }
         return "system_failure" if str(reason_code) in system_reasons else "candidate_failure"
 
@@ -2108,6 +2209,7 @@ class SureMasterPlayground(BasePlayground):
         role_paths: dict[str, str | None],
     ) -> dict[str, Any]:
         self.logger.info("Running SURE staged_axes search strategy")
+        start_phase = self._staged_start_phase()
         data_knowledge = ""
         model_knowledge = ""
         prefetch_exp = PrefetchExp(
@@ -2128,61 +2230,88 @@ class SureMasterPlayground(BasePlayground):
         else:
             data_knowledge, model_knowledge, self.prefetch_descriptor = prefetch_result
 
-        draft_exp = self._create_run_exp("draft", self.exp_index)
-        draft_candidate_type = self._draft_candidate_type_hint()
-        draft_exp.execution_env = self._staged_draft_execution_env()
-        draft_exp.candidate_stage_name = "stage0_draft"
-        draft_exp.candidate_phase = "draft"
-        draft_exp.candidate_rung_name = "draft"
-        draft_exp.candidate_idea_id = "baseline_draft"
-        draft_exp.execution_env.update(
-            {
-                "SURE_STAGE_NAME": "stage0_draft",
-                "SURE_PHASE_NAME": "draft",
-                "SURE_RUNG_NAME": "draft",
-                "SURE_IDEA_ID": "baseline_draft",
-                "SURE_CANDIDATE_TYPE_HINT": draft_candidate_type,
+        baseline_executed = start_phase == "draft"
+        if baseline_executed:
+            draft_exp = self._create_run_exp("draft", self.exp_index)
+            draft_candidate_type = self._draft_candidate_type_hint()
+            draft_exp.execution_env = self._staged_draft_execution_env()
+            draft_exp.candidate_stage_name = "stage0_draft"
+            draft_exp.candidate_phase = "draft"
+            draft_exp.candidate_rung_name = "draft"
+            draft_exp.candidate_idea_id = "baseline_draft"
+            draft_exp.execution_env.update(
+                {
+                    "SURE_STAGE_NAME": "stage0_draft",
+                    "SURE_PHASE_NAME": "draft",
+                    "SURE_RUNG_NAME": "draft",
+                    "SURE_IDEA_ID": "baseline_draft",
+                    "SURE_CANDIDATE_TYPE_HINT": draft_candidate_type,
+                }
+            )
+            self.exp_index += 1
+            draft_result = self.execute_parallel_tasks(
+                [
+                    partial(
+                        draft_exp.run,
+                        task_description=task_description,
+                        data_preview=data_preview,
+                        data_knowledge=data_knowledge,
+                        model_knowledge=model_knowledge,
+                        role_paths=self._staged_role_paths("draft"),
+                        candidate_type_hint=draft_candidate_type,
+                        base_model_source_overrides=self._staged_base_model_overrides("draft"),
+                    )
+                ],
+                max_workers=1,
+                workspace_names=[draft_exp.exp_name],
+            )[0]
+            if isinstance(draft_result, Exception):
+                raise draft_result
+            is_success, baseline_score, _uid, baseline_code, baseline_details = draft_result
+            self.initial_code = baseline_code
+            self.best_solution = baseline_code
+            self.best_score = baseline_score
+            self.real_time_best_solution = baseline_code
+            if not is_success:
+                return {
+                    "status": "failed",
+                    "steps": 0,
+                    "search_strategy": "staged_axes",
+                    "start_phase": start_phase,
+                    "best_score": None,
+                    "metric": self.task_card.primary_metric,
+                    "error": "Draft phase failed to produce a SURE-scored solution",
+                }
+            baseline_payload = {
+                "start_phase": start_phase,
+                "execution_status": "executed",
+                "score": baseline_score,
+                "code": baseline_code,
+                "details": baseline_details,
+                "workspace": draft_exp.workspace_path,
             }
-        )
-        self.exp_index += 1
-        draft_result = self.execute_parallel_tasks(
-            [
-                partial(
-                    draft_exp.run,
-                    task_description=task_description,
-                    data_preview=data_preview,
-                    data_knowledge=data_knowledge,
-                    model_knowledge=model_knowledge,
-                    role_paths=self._staged_role_paths("draft"),
-                    candidate_type_hint=draft_candidate_type,
-                    base_model_source_overrides=self._staged_base_model_overrides("draft"),
-                )
-            ],
-            max_workers=1,
-            workspace_names=[draft_exp.exp_name],
-        )[0]
-        if isinstance(draft_result, Exception):
-            raise draft_result
-        is_success, baseline_score, _uid, baseline_code, baseline_details = draft_result
-        self.initial_code = baseline_code
-        self.best_solution = baseline_code
-        self.best_score = baseline_score
-        self.real_time_best_solution = baseline_code
-        if not is_success:
-            return {
-                "status": "failed",
-                "steps": 0,
-                "search_strategy": "staged_axes",
-                "best_score": None,
-                "metric": self.task_card.primary_metric,
-                "error": "Draft phase failed to produce a SURE-scored solution",
+        else:
+            configured_path, baseline_code, source_path = self._staged_initial_source()
+            baseline_score = None
+            self.initial_code = baseline_code
+            self.best_solution = baseline_code
+            self.best_score = None
+            self.real_time_best_solution = baseline_code
+            baseline_payload = {
+                "start_phase": start_phase,
+                "execution_status": "not_executed",
+                "configured_source_path": configured_path,
+                "resolved_source_path": str(source_path),
+                "score": None,
+                "code": baseline_code,
+                "details": None,
+                "workspace": None,
             }
-        baseline_payload = {
-            "score": baseline_score,
-            "code": baseline_code,
-            "details": baseline_details,
-            "workspace": draft_exp.workspace_path,
-        }
+            self.logger.info(
+                "Starting staged search at arch with unexecuted initial source: %s",
+                source_path,
+            )
+
         self._write_staged_json("baseline_draft.json", baseline_payload)
         save_code_to_file(
             os.path.join(self.session.config.workspace_path, "best_solution"),
@@ -2230,7 +2359,8 @@ class SureMasterPlayground(BasePlayground):
 
         selection_count = min(1 + self._staged_runner_up_count(), len(search_ranked))
         selection_inputs = [dict(record) for record in search_ranked[:selection_count]]
-        selection_inputs.append(self._baseline_record(baseline_code))
+        if baseline_executed:
+            selection_inputs.append(self._baseline_record(baseline_code))
         selection_ranked = self._run_staged_rerank(
             phase="selection",
             records=selection_inputs,
@@ -2250,9 +2380,12 @@ class SureMasterPlayground(BasePlayground):
 
         holdout_ranked: list[dict[str, Any]] = []
         if self._holdout_enabled():
+            holdout_inputs = [final_record]
+            if baseline_executed:
+                holdout_inputs.append(self._baseline_record(baseline_code))
             holdout_ranked = self._run_staged_rerank(
                 phase="holdout",
-                records=[final_record, self._baseline_record(baseline_code)],
+                records=holdout_inputs,
                 task_description=task_description,
                 data_preview=data_preview,
                 baseline_code=baseline_code,
@@ -2262,6 +2395,7 @@ class SureMasterPlayground(BasePlayground):
             "status": "completed",
             "steps": 0,
             "search_strategy": "staged_axes",
+            "start_phase": start_phase,
             "task_id": self.task_card.task_id,
             "metric": self.task_card.primary_metric,
             "is_lower_better": self.task_card.is_lower_better,

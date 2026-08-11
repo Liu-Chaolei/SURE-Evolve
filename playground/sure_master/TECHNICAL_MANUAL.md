@@ -196,9 +196,9 @@ block 中。解析成功后返回的 `research_plan` 会交回
 普通任务中，idea 都按本地候选执行。mixed local/VC 模式下，research idea
 会被拆成三个明确类别：
 
-- `[inference]`：只改推理参数、文本处理、采样、后处理，使用本地 GPU。
-- `[fine_tune]`：训练或微调权重，但不改变模型结构，提交到 VC 子任务。
-- `[arch]`：训练结构变体，必须改变模型结构或参数量，提交到 VC 子任务。
+- `[inference]`：只改推理参数、文本处理、采样、后处理；生产配置提交到 VC，使用 1 GPU / 8 CPU / 32G。
+- `[fine_tune]`：训练或微调权重，但不改变模型结构，提交到 VC 子任务，使用 8 GPU / 64 CPU / 256G。
+- `[arch]`：训练结构变体，必须改变模型结构或参数量，提交到 VC 子任务，使用 8 GPU / 64 CPU / 256G。
 
 当前 regular mixed 配置要求每轮 research 输出 4 个 `[inference]`、2 个
 `[fine_tune]` 和 2 个 `[arch]` idea。旧标签 `[training]` 仍可兼容解析，
@@ -214,7 +214,10 @@ artifact guard 和 SURE metric 流程，并把结果 JSON 写回共享 workspace
 
 当配置 `sure.search_strategy: staged_axes` 或 `sure.staged_axes.enabled: true`
 时，`SureMasterPlayground` 不走默认 mixed research/improve loop，而是执行
-固定的三轴协议：
+固定的三轴协议。`sure.staged_axes.start_phase` 默认是 `draft`，因此正式完整
+staged search 仍从 Stage0 开始；设置为 `arch` 时，prefetch 仍会运行，但系统
+只把 `sure.initial_solution_path` 读作候选生成上下文，不创建、执行或评分 draft
+workspace，也不会把这份未测量 baseline 加入 selection/holdout 重排。
 
 ```text
 Stage0 draft/baseline
@@ -237,6 +240,12 @@ source symlink。远端 VC 子任务通过 experiment workspace 下的
 `metric/remote_candidate_context.json` 读取这些覆盖，保证 local/remote 运行
 使用同一套 staged context。所有阶段排行榜和 summary 写入
 `<workspace>/staged_axes/`。
+
+当前 staged checkpoint 晋级只在同一次 `_run_staged_axes()` 调用内有效。排行榜
+`leaderboard_*.json` 是审计和结果产物，不是跨进程恢复状态；用旧 run 目录启动新进程
+不会从 `arch/short` 或其它中间 rung 持久化续跑。失败 run 应原样保留，修复集成问题后
+使用新的唯一 run 名先完成 smoke，再启动新的 full staged run。跨 run stage resume 是
+独立功能，不属于 duration probe 的恢复语义。
 
 ## 4. 启动后的完整流程
 
@@ -351,9 +360,18 @@ Prefetch 失败不会使整个 run 失败；系统会记录 warning 并继续 dr
 
 ### 4.6 Draft 阶段
 
-系统创建一个 `SureRunExp(stage="draft")`。如果配置中有
-`sure.initial_solution_path`，draft 直接读取该文件作为初始候选。例如
-`gpt-5-docker.yaml` 可使用 Zipformer baseline 作为初稿。
+默认 `sure.staged_axes.start_phase: draft` 时，系统创建一个
+`SureRunExp(stage="draft")`。如果配置中有 `sure.initial_solution_path`，draft
+直接读取该文件作为初始候选。例如 `gpt-5-docker.yaml` 可使用 Zipformer
+baseline 作为初稿。
+
+当 `start_phase: arch` 时，系统要求 `initial_solution_path` 指向可读且非空的
+Python 文件，只加载并保存源码，不执行训练、解码或 SURE metric。兼容性产物
+`staged_axes/baseline_draft.json` 会记录 `execution_status: not_executed`、
+`score: null` 和源文件 provenance；未评分 baseline 不参与 selection 或 holdout。
+源码初始化与 checkpoint resume/warm start 是两个独立概念。架构变更候选可能与
+官方 baseline checkpoint 不兼容，不能仅因使用了 baseline 源码就盲目恢复该
+checkpoint；checkpoint 晋级仅用于满足 epoch 和结构兼容约束的同候选后续 rung。
 
 ASR/F5-TTS 的正式实验应把 draft 固定为官方强 baseline：
 
@@ -893,11 +911,20 @@ python -m py_compile \
   `SURE_ASR_ZIPFORMER_WRAPPER`/baseline 在构造最终 `train.py` 结构/loss 参数后
   通过 `SURE_RUNTIME_ENV_HELPER resolve-max-duration` 解析。生成候选不要直接调用
   helper；候选只把最终 train/decode extra args 传给 wrapper，由 wrapper 设置
-  `SURE_DURATION_TRAIN_ARGS_JSON`。duration autotune 是 fail-closed：所有 probe
-  失败时不会返回未验证的最小值；非 OOM 的启动/导入/CLI/数据错误不会继续降
-  `max-duration` 伪装成显存不足。probe 目录按候选/cache key 隔离，并且默认看到
-  少量正常 training batch log 即可成功，不要求跑完整 epoch。ASR Zipformer
-  baseline 在正式训练阶段负责 OOM 降档重试，并输出
+  `SURE_DURATION_TRAIN_ARGS_JSON`。recipe profile 是 recipe 专用 train/decode 参数的
+  唯一来源：例如 LibriSpeech profile 提供 `--full-libri 1`，TEDLIUM3 profile 完全
+  不提供该参数。`SURE_DURATION_PROBE_FULL_LIBRI` 已废弃，若仍设置会被提示并忽略。
+- duration helper 在训练前通过实际 `train.py --help` 验证 CLI 契约。必需 helper
+  参数不受支持或 help 无法可靠发现时 fail closed，分别产生
+  `duration_probe_helper_cli_incompatible` 或 `duration_probe_help_discovery_failed`；
+  候选/profile extra args 不受支持时产生
+  `duration_probe_candidate_cli_incompatible`。前两者归为 `system_failure`，后者归为
+  `candidate_failure`。只有 `--log-interval`、`--print-diagnostics` 等可选观测参数
+  可以因 recipe 不支持而省略。
+- duration autotune 的 probe 目录按候选/cache key 隔离，默认看到少量正常 training
+  batch log 即可成功，不要求跑完整 epoch。所有 probe 失败时不会返回未验证的最小值；
+  CLI、导入、数据等非 OOM 错误不会继续降低 `max-duration`。ASR Zipformer baseline
+  仅在正式训练确实发生 OOM 时负责降档重试，并输出
   `artifacts/resource_profile.json`。
 
 ## 10. 扩展 Checklist

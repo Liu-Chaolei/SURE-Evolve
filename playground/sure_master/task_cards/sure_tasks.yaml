@@ -35,7 +35,7 @@ tasks:
       entrypoints:
         train: base_model/recipe/train.py
         infer: base_model/recipe/decode.py
-      python: /hpc_stor03/sjtu_home/chaolei.liu/anaconda3/envs/icefall/bin/python
+      python: /opt/conda/envs/icefall/bin/python
       usage_policy: required
       prompt_guidance: Use the configured icefall Zipformer ASR recipe, dataset profile, and recipe profile as the starting point. Optimize by changing workspace-local wrapper code, model overrides, training or decoding settings, checkpoints, and post-processing; do not switch to another ASR model family.
     prompt_guidance: Generate English ASR hypotheses as key-tab-text lines matching the reference keys.

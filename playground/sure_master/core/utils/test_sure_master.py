@@ -26,9 +26,14 @@ from playground.sure_master.baselines import (
     zipformer_large_cr_ctc_rnnt_baseline as zipformer_baseline,
 )
 from playground.sure_master.baselines.asr_profiles import (
+    RECIPE_PROFILES,
     get_asr_dataset_profile,
     normalize_asr_cut_id,
     parse_eval_splits_for_profile,
+    recipe_arch_args,
+    recipe_decode_data_args,
+    recipe_train_data_args,
+    recipe_train_only_args,
 )
 from playground.sure_master.baselines.zipformer_large_cr_ctc_rnnt_baseline import (
     bounded_train_max_duration,
@@ -56,7 +61,7 @@ from .candidate_type import (
     candidate_type_from_idea,
 )
 from .candidate_changes import validate_arch_candidate_changes, validate_candidate_changes
-from .metric import SureMetricRunner
+from .metric import MetricGpuAllocator, MetricGpuSnapshot, SureMetricRunner
 from playground.sure_master.tools import (
     run_f5tts_arch_finetune,
     run_f5tts_batch_infer,
@@ -81,6 +86,7 @@ from .vc_remote import (
     mixed_execution_enabled,
     parse_vc_info_partitions,
     remote_candidate_types_from,
+    remote_resource_config_from,
     remote_training_max_parallel,
 )
 from .workspace_cleanup import (
@@ -181,6 +187,39 @@ class SureTaskCardsTest(unittest.TestCase):
             self.assertIn("--full-libri", zipformer_baseline.large_cr_ctc_rnnt_train_args())
             self.assertIn("--full-libri", zipformer_baseline.large_cr_ctc_rnnt_decode_args())
 
+    def test_asr_profiles_directly_own_recipe_data_args_and_composition(self):
+        librispeech = RECIPE_PROFILES["librispeech_zipformer_large_cr_ctc_rnnt"]
+        tedlium3 = RECIPE_PROFILES["tedlium3_zipformer"]
+
+        self.assertEqual(librispeech.train_data_args, ("--full-libri", "1"))
+        self.assertEqual(librispeech.decode_data_args, ("--full-libri", "1"))
+        self.assertEqual(tedlium3.train_data_args, ())
+        self.assertEqual(tedlium3.decode_data_args, ())
+        self.assertNotIn("--full-libri", runtime_env._PROBE_CONTROLLED_OPTIONS)
+        self.assertNotIn("--full-libri", runtime_env._PROBE_REQUIRED_OPTIONS)
+
+        for profile in (librispeech, tedlium3):
+            with self.subTest(profile=profile.name):
+                expected_train = (
+                    recipe_arch_args(profile)
+                    + recipe_train_only_args(profile)
+                    + recipe_train_data_args(profile)
+                )
+                expected_decode = recipe_arch_args(profile) + recipe_decode_data_args(profile)
+                env = {
+                    "SURE_ASR_DATASET": profile.dataset,
+                    "SURE_ASR_RECIPE_PROFILE": profile.name,
+                }
+                with patch.dict(os.environ, env, clear=True):
+                    self.assertEqual(
+                        zipformer_baseline.large_cr_ctc_rnnt_train_args(),
+                        expected_train,
+                    )
+                    self.assertEqual(
+                        zipformer_baseline.large_cr_ctc_rnnt_decode_args(),
+                        expected_decode,
+                    )
+
     def test_asr_profiles_tedlium3_uses_dataset_splits_and_supported_recipe_args(self):
         env = {
             "SURE_ASR_DATASET": "tedlium3",
@@ -268,6 +307,106 @@ class SureTaskCardsTest(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             paths = zipformer_baseline.required_decode_checkpoints(50)
         self.assertEqual([path.name for path in paths], ["epoch-24.pt", "epoch-50.pt"])
+
+    def test_decode_duration_selector_caches_only_demonstrated_safe_with_safety_step(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[int] = []
+
+            def probe(duration: int, _path: Path) -> zipformer_baseline.DecodeDurationEvidence | None:
+                calls.append(duration)
+                if duration > 200:
+                    return None
+                return zipformer_baseline.DecodeDurationEvidence(duration, 700, 1000)
+
+            env = {
+                "SURE_DECODE_DURATION_CACHE_DIR": tmp,
+                "SURE_DECODE_DURATION_MIN": "100",
+                "SURE_DECODE_DURATION_MAX": "300",
+                "SURE_DECODE_DURATION_STEP": "100",
+                "SURE_DECODE_DURATION_SAFETY_STEPS": "1",
+                "SURE_DECODE_DURATION_RESERVE_MB": "100",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                selected = zipformer_baseline.select_decode_max_duration(
+                    signature="workload", signature_payload={"x": 1}, default=200, probe=probe
+                )
+                cached = zipformer_baseline.select_decode_max_duration(
+                    signature="workload", signature_payload={"x": 1}, default=200,
+                    probe=lambda *_: self.fail("safe cache should avoid probing"),
+                )
+        self.assertEqual(selected, 100)
+        self.assertEqual(cached, 100)
+        self.assertEqual(calls, [100, 200, 300])
+
+    def test_decode_duration_headroom_requires_memory_evidence(self):
+        evidence = zipformer_baseline.DecodeDurationEvidence(100, None, 1000)
+        self.assertFalse(evidence.has_headroom(100))
+        self.assertTrue(evidence.has_headroom(0))
+        self.assertFalse(zipformer_baseline.DecodeDurationEvidence(100, 950, 1000).has_headroom(100))
+
+    def test_decode_duration_reversed_bounds_are_normalized(self):
+        env = {
+            "SURE_DECODE_DURATION_MIN": "300",
+            "SURE_DECODE_DURATION_MAX": "100",
+            "SURE_DECODE_DURATION_STEP": "0",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(zipformer_baseline._decode_duration_bounds(200)[:3], (100, 300, 1))
+
+    def test_candidate_cannot_override_controlled_decode_duration(self):
+        with self.assertRaisesRegex(ValueError, "selector owns"):
+            run_icefall_zipformer_candidate.validate_candidate_args(
+                candidate_type=INFERENCE,
+                action="decode_only",
+                train_extra_args=[],
+                decode_extra_args=["--max-duration=999"],
+            )
+
+    def test_decode_cleanup_is_scoped_and_stale_outputs_are_invalidated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exp = root / "exp"
+            artifacts = root / "artifacts"
+            exp.mkdir()
+            artifacts.mkdir()
+            stale = exp / "recogs-old.txt"
+            unrelated = exp / "epoch-1.pt"
+            candidate = artifacts / "candidate_changes.json"
+            hyp = artifacts / "hyp.txt"
+            for path in (stale, unrelated, candidate, hyp):
+                path.write_text("old", encoding="utf-8")
+            with patch.object(zipformer_baseline, "ARTIFACTS_DIR", artifacts):
+                zipformer_baseline.invalidate_decode_artifacts(exp, include_candidate_record=True)
+                before = set(zipformer_baseline._decode_artifact_paths(exp))
+                current = exp / "recogs-current.txt"
+                current.write_text("new", encoding="utf-8")
+                zipformer_baseline.cleanup_decode_attempt(exp, before)
+            self.assertTrue(unrelated.exists())
+            self.assertFalse(stale.exists())
+            self.assertFalse(current.exists())
+            self.assertFalse(candidate.exists())
+            self.assertFalse(hyp.exists())
+
+    def test_decode_signature_changes_for_checkpoint_bpe_and_decode_args(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = root / "models"
+            model.mkdir()
+            checkpoint = model / "epoch-1.pt"
+            checkpoint.write_bytes(b"checkpoint-a")
+            bpe = root / "bpe.model"
+            bpe.write_bytes(b"bpe-a")
+            env = {"SURE_BASELINE_USE_PRETRAINED": "1", "SURE_ASR_EVAL_SPLITS": "test-clean"}
+            with patch.dict(os.environ, env, clear=True), patch.object(
+                zipformer_baseline, "MODELS_DIR", model
+            ), patch.object(zipformer_baseline, "_gpu_signature", return_value={"gpus": ["GPU, 1000"]}):
+                kwargs = dict(epoch=1, decode_method="greedy_search", decode_args=["--beam-size", "4"], bpe_model=bpe, exp_dir=model, avg=1, use_averaged_model="0")
+                first, _ = zipformer_baseline.decode_workload_signature(**kwargs)
+                bpe.write_bytes(b"bpe-b")
+                second, _ = zipformer_baseline.decode_workload_signature(**kwargs)
+                kwargs["decode_args"] = ["--beam-size", "8"]
+                third, _ = zipformer_baseline.decode_workload_signature(**kwargs)
+            self.assertEqual(len({first, second, third}), 3)
 
     def test_asr_baseline_reports_missing_averaged_start_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -828,6 +967,104 @@ class SureTaskCardsTest(unittest.TestCase):
         self.assertIn("Zipformer", guidance)
         self.assertIn("VC child jobs", guidance)
 
+    def test_remote_resource_profiles_resolve_with_documented_precedence(self):
+        config = {
+            "sure": {
+                "remote_training": {
+                    "gpu_per_task": 8,
+                    "cpu_per_task": 64,
+                    "mem_per_task": "256G",
+                    "resource_profiles": {
+                        "default": {"num_task": 2, "cpu_per_task": 16},
+                        "training": {"cpu_per_task": 48},
+                        "fine_tune": {"gpu_per_task": 4},
+                        "draft_training": {"mem_per_task": "192G"},
+                    },
+                }
+            }
+        }
+        resolved, diagnostics = remote_resource_config_from(
+            config,
+            candidate_type=FINE_TUNE,
+            stage="draft",
+            workload_profile="draft_training",
+        )
+        self.assertEqual(resolved["num_task"], 2)
+        self.assertEqual(resolved["gpu_per_task"], 8)
+        self.assertEqual(resolved["cpu_per_task"], 48)
+        self.assertEqual(resolved["mem_per_task"], "192G")
+        self.assertEqual(diagnostics["profile_name"], "draft_training")
+
+        with patch.dict(os.environ, {"SURE_REMOTE_GPU_PER_TASK": "2"}, clear=False):
+            overridden, _ = remote_resource_config_from(
+                config,
+                candidate_type=FINE_TUNE,
+                stage="draft",
+            )
+        self.assertEqual(overridden["gpu_per_task"], "2")
+
+    def test_draft_profile_uses_explicit_workload_not_stage_name(self):
+        config = {
+            "sure": {"remote_training": {"resource_profiles": {
+                "inference": {"gpu_per_task": 1},
+                "training": {"gpu_per_task": 8},
+                "draft_training": {"mem_per_task": "192G"},
+            }}}
+        }
+        inference, inference_diag = remote_resource_config_from(
+            config, candidate_type=INFERENCE, stage="draft", workload_profile="inference"
+        )
+        training, training_diag = remote_resource_config_from(
+            config, candidate_type=ARCH, stage="draft", workload_profile="draft_training"
+        )
+        self.assertEqual(inference["gpu_per_task"], 1)
+        self.assertEqual(inference_diag["profile_name"], "inference")
+        self.assertEqual(training["gpu_per_task"], 8)
+        self.assertEqual(training["mem_per_task"], "192G")
+        self.assertEqual(training_diag["profile_name"], "draft_training")
+
+    def test_remote_inference_profile_drives_command_and_partition_requirement(self):
+        config = {
+            "sure": {
+                "remote_training": {
+                    "enabled": True,
+                    "image": "image:test",
+                    "partitions": ["small", "large"],
+                    "resource_profiles": {
+                        "inference": {
+                            "gpu_per_task": 1,
+                            "cpu_per_task": 8,
+                            "mem_per_task": "32G",
+                        }
+                    },
+                }
+            }
+        }
+        executor = VcRemoteTrainingExecutor(
+            config,
+            config_path=Path(__file__),
+            candidate_type=INFERENCE,
+            stage="improve",
+        )
+        with patch.object(
+            executor,
+            "_probe_partition_snapshot",
+            return_value=({"small": {"free_gpu": 1}, "large": {"free_gpu": 0}}, None),
+        ):
+            command = executor._build_vc_command(
+                workspace=Path.cwd(),
+                result_path=Path.cwd() / "result.json",
+                exp_name="candidate",
+                execution_timeout=10,
+            )
+        text = " ".join(command)
+        self.assertIn("--gpu-per-task 1", text)
+        self.assertIn("--cpu-per-task 8", text)
+        self.assertIn("--mem-per-task 32G", text)
+        self.assertEqual(executor.last_partition_selection["required_gpu_per_task"], 1)
+        self.assertNotIn("ASR_WORLD_SIZE", text)
+        self.assertNotIn("SURE_BASELINE_WORLD_SIZE", text)
+
     def test_mixed_remote_training_vc_command_uses_a10_template(self):
         config = {
             "sure": {
@@ -861,8 +1098,8 @@ class SureTaskCardsTest(unittest.TestCase):
         self.assertIn("--gpu-per-task 8", command_text)
         self.assertIn("--cpu-per-task 64", command_text)
         self.assertIn("--mem-per-task 256G", command_text)
-        self.assertIn("ASR_WORLD_SIZE", command_text)
-        self.assertIn("SURE_BASELINE_WORLD_SIZE", command_text)
+        self.assertNotIn("ASR_WORLD_SIZE", command_text)
+        self.assertNotIn("SURE_BASELINE_WORLD_SIZE", command_text)
         self.assertIn("run_vc_sure_candidate.py", command_text)
 
     def test_remote_training_zero_submit_timeout_means_unlimited(self):
@@ -1101,6 +1338,134 @@ class SureTaskCardsTest(unittest.TestCase):
             playground._staged_base_model_overrides("selection"),
             {"eval_data": "/selection/prompts"},
         )
+
+    def test_staged_start_phase_defaults_to_draft_and_validates_values(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        playground.sure_config = {"staged_axes": {}}
+        self.assertEqual(playground._staged_start_phase(), "draft")
+
+        playground.sure_config["staged_axes"]["start_phase"] = " ARCH "
+        self.assertEqual(playground._staged_start_phase(), "arch")
+
+        playground.sure_config["staged_axes"]["start_phase"] = "selection"
+        with self.assertRaisesRegex(ValueError, "start_phase.*draft.*arch"):
+            playground._staged_start_phase()
+
+    def test_staged_arch_initial_source_requires_readable_nonempty_file(self):
+        playground = SureMasterPlayground.__new__(SureMasterPlayground)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "baseline.py"
+            source.write_text("print('baseline')\n", encoding="utf-8")
+            playground.sure_config = {"initial_solution_path": str(source)}
+            configured, code, resolved = playground._staged_initial_source()
+            self.assertEqual(configured, str(source))
+            self.assertEqual(code, "print('baseline')")
+            self.assertEqual(resolved, source.resolve())
+
+            source.write_text(" \n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "empty"):
+                playground._staged_initial_source()
+
+            playground.sure_config["initial_solution_path"] = str(root)
+            with self.assertRaisesRegex(FileNotFoundError, "readable file"):
+                playground._staged_initial_source()
+
+            playground.sure_config = {}
+            with self.assertRaisesRegex(ValueError, "initial_solution_path is required"):
+                playground._staged_initial_source()
+
+    def test_staged_arch_entry_skips_draft_and_excludes_unscored_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "baseline.py"
+            source.write_text("# candidate_type: arch\nprint('baseline')\n", encoding="utf-8")
+            playground = SureMasterPlayground.__new__(SureMasterPlayground)
+            playground.sure_config = {
+                "initial_solution_path": str(source),
+                "staged_axes": {"start_phase": "arch", "runner_up_count": 0},
+            }
+            playground.config = {"sure": playground.sure_config}
+            playground.session = SimpleNamespace(
+                config=SimpleNamespace(workspace_path=str(root / "workspace"))
+            )
+            playground.task_card = SureTaskCard(
+                task_id="asr_en_wer",
+                canonical_task="asr",
+                task_alias="asr",
+                primary_metric="WER",
+                metric_direction="lower",
+            )
+            playground.base_model_profile = None
+            playground.agents = SimpleNamespace(prefetch_agent=Mock())
+            playground.exp_index = 1
+            playground.prefetch_descriptor = None
+            playground.logger = Mock()
+            playground._create_run_exp = Mock(side_effect=AssertionError("draft created"))
+            playground.execute_parallel_tasks = Mock(
+                return_value=[("data knowledge", "model knowledge", {"prefetched": True})]
+            )
+            candidate = {"idea_id": "candidate", "code": "print('candidate')", "score": 0.2}
+            playground._run_axis_screening = Mock(return_value=[candidate])
+            playground._run_staged_combinations = Mock(return_value=[candidate])
+            rerank_inputs = []
+
+            def rerank(**kwargs):
+                rerank_inputs.append(kwargs["records"])
+                return kwargs["records"]
+
+            playground._run_staged_rerank = Mock(side_effect=rerank)
+            playground._holdout_enabled = Mock(return_value=True)
+
+            with patch.object(
+                sure_playground_module,
+                "PrefetchExp",
+                return_value=SimpleNamespace(exp_name="exp_1_prefetch", run=Mock()),
+            ):
+                summary = playground._run_staged_axes(
+                    task_description="task",
+                    data_preview="preview",
+                    role_paths={},
+                )
+
+            playground._create_run_exp.assert_not_called()
+            self.assertEqual(playground.execute_parallel_tasks.call_count, 1)
+            self.assertEqual(playground.prefetch_descriptor, {"prefetched": True})
+            self.assertEqual(playground.initial_code, source.read_text(encoding="utf-8").strip())
+            self.assertIsNone(summary["baseline_score"])
+            self.assertEqual(summary["start_phase"], "arch")
+            self.assertEqual([[item["idea_id"] for item in records] for records in rerank_inputs], [["candidate"], ["candidate"]])
+            provenance = json.loads(
+                (root / "workspace" / "staged_axes" / "baseline_draft.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(provenance["execution_status"], "not_executed")
+            self.assertIsNone(provenance["score"])
+            self.assertIsNone(provenance["workspace"])
+
+    def test_tedlium3_smoke_starts_at_real_arch_training_probe(self):
+        config_path = (
+            Path(__file__).resolve().parents[4]
+            / "configs"
+            / "sure_master"
+            / "gpt-5-icefall-tedlium3-smoke-staged-axes-mixed.yaml"
+        )
+        sure_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))["sure"]
+        self.assertEqual(sure_config["staged_axes"]["start_phase"], "arch")
+        self.assertFalse(sure_config["remote_training"]["draft_enabled"])
+        arch_env = sure_config["staged_axes"]["axes"]["arch"]["rungs"][0][
+            "execution_env"
+        ]
+        self.assertEqual(arch_env["SURE_STAGED_TARGET_EPOCH"], "1")
+        self.assertEqual(arch_env["SURE_MAX_DURATION"], "auto")
+        self.assertEqual(arch_env["SURE_DURATION_AUTOTUNE"], "1")
+        self.assertEqual(arch_env["SURE_DURATION_PROBE_SUCCESS_BATCHES"], "1")
+        self.assertFalse(
+            any(key.startswith("SURE_STAGED_RESUME_") for key in arch_env)
+        )
+        self.assertEqual(sure_config["execution_env"]["SURE_BASELINE_CHECKPOINT_DIR"], "")
+        self.assertEqual(sure_config["execution_env"]["SURE_BASELINE_USE_PRETRAINED"], "0")
 
     def test_staged_pretrained_draft_disables_duration_autotune(self):
         playground = SureMasterPlayground.__new__(SureMasterPlayground)
@@ -1847,6 +2212,117 @@ pdgpu-a10          | 184/184              | 1152/1748            | 3648Gi/11385.
         self.assertEqual(payload["execution_info"]["vc_exit_code"], 0)
         self.assertIn("job done", payload["execution_info"]["vc_submit_log_tail"])
 
+    def test_scheduler_allocation_overrides_stale_world_sizes(self):
+        execution_env = {"ASR_WORLD_SIZE": "8", "SURE_BASELINE_WORLD_SIZE": "8"}
+        env = {
+            "CUDA_VISIBLE_DEVICES": "GPU-a,GPU-b",
+            "SURE_VC_RESOURCE_PROFILE": "inference",
+            "SURE_VC_REQUESTED_RESOURCES": '{"gpu_per_task":4}',
+        }
+        with patch.dict(os.environ, env, clear=True):
+            allocation = run_vc_sure_candidate.apply_scheduler_allocation(
+                execution_env, asr_workload=True
+            )
+        self.assertEqual(execution_env["ASR_WORLD_SIZE"], "2")
+        self.assertEqual(execution_env["SURE_BASELINE_WORLD_SIZE"], "2")
+        self.assertEqual(allocation["gpu_count"], 2)
+        self.assertEqual(allocation["requested_resources"]["gpu_per_task"], 4)
+
+    def test_scheduler_allocation_does_not_inject_asr_world_size_for_f5(self):
+        execution_env = {"ASR_WORLD_SIZE": "8", "SURE_BASELINE_WORLD_SIZE": "8"}
+        env = {"CUDA_VISIBLE_DEVICES": "0,1"}
+        allocation = run_vc_sure_candidate.apply_scheduler_allocation(
+            execution_env, asr_workload=False, env=env
+        )
+        self.assertEqual(allocation["gpu_count"], 2)
+        self.assertNotIn("ASR_WORLD_SIZE", execution_env)
+        self.assertNotIn("SURE_BASELINE_WORLD_SIZE", execution_env)
+
+    def test_scheduler_allocation_removes_stale_world_sizes_without_gpu(self):
+        execution_env = {"ASR_WORLD_SIZE": "8", "SURE_BASELINE_WORLD_SIZE": "8"}
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "-1"}, clear=True):
+            allocation = run_vc_sure_candidate.apply_scheduler_allocation(execution_env)
+        self.assertEqual(allocation["gpu_count"], 0)
+        self.assertNotIn("ASR_WORLD_SIZE", execution_env)
+        self.assertNotIn("SURE_BASELINE_WORLD_SIZE", execution_env)
+
+    def test_scheduler_allocation_uses_exact_nvidia_visibility(self):
+        execution_env = {"ASR_WORLD_SIZE": "8"}
+        allocation = run_vc_sure_candidate.apply_scheduler_allocation(
+            execution_env,
+            env={
+                "CUDA_VISIBLE_DEVICES": "",
+                "NVIDIA_VISIBLE_DEVICES": "GPU-one,MIG-GPU-two/1/0",
+            },
+        )
+        self.assertEqual(allocation["allocation_source"], "NVIDIA_VISIBLE_DEVICES")
+        self.assertEqual(allocation["visibility_kind"], "exact")
+        self.assertEqual(allocation["gpu_count"], 2)
+        self.assertEqual(execution_env["CUDA_VISIBLE_DEVICES"], "GPU-one,MIG-GPU-two/1/0")
+        self.assertEqual(execution_env["ASR_WORLD_SIZE"], "2")
+
+    def test_scheduler_allocation_uses_gpu_per_task_after_empty_visibility(self):
+        execution_env: dict[str, str] = {}
+        allocation = run_vc_sure_candidate.apply_scheduler_allocation(
+            execution_env,
+            env={
+                "CUDA_VISIBLE_DEVICES": "",
+                "NVIDIA_VISIBLE_DEVICES": "all",
+                "GPU_PER_TASK": "2",
+                "GPU_NUM": "8",
+            },
+        )
+        self.assertEqual(allocation["allocation_source"], "GPU_PER_TASK")
+        self.assertEqual(allocation["visibility_kind"], "task_count")
+        self.assertEqual(allocation["gpu_count"], 2)
+        self.assertEqual(allocation["gpu_devices"], [])
+        self.assertEqual(allocation["effective_visible_devices"], "")
+        self.assertNotIn("CUDA_VISIBLE_DEVICES", execution_env)
+        self.assertEqual(execution_env["SURE_BASELINE_WORLD_SIZE"], "2")
+        normalized = run_vc_sure_candidate.normalize_process_gpu_environment(
+            allocation,
+            {"CUDA_VISIBLE_DEVICES": "", "GPU_PER_TASK": "2"},
+        )
+        self.assertNotIn("CUDA_VISIBLE_DEVICES", normalized)
+
+    def test_scheduler_allocation_uses_gpu_num_when_task_count_is_invalid(self):
+        execution_env: dict[str, str] = {}
+        allocation = run_vc_sure_candidate.apply_scheduler_allocation(
+            execution_env,
+            asr_workload=False,
+            env={"CUDA_VISIBLE_DEVICES": "", "GPU_PER_TASK": "bad", "GPU_NUM": "1"},
+        )
+        self.assertEqual(allocation["allocation_source"], "GPU_NUM")
+        self.assertEqual(allocation["gpu_count"], 1)
+        self.assertNotIn("CUDA_VISIBLE_DEVICES", execution_env)
+        self.assertNotIn("ASR_WORLD_SIZE", execution_env)
+
+    def test_scheduler_count_allocation_sets_world_size_without_fabricated_mask(self):
+        execution_env = {"ASR_WORLD_SIZE": "8", "SURE_BASELINE_WORLD_SIZE": "8"}
+        allocation = run_vc_sure_candidate.apply_scheduler_allocation(
+            execution_env,
+            env={"CUDA_VISIBLE_DEVICES": "", "GPU_PER_TASK": "2"},
+        )
+        self.assertEqual(allocation["gpu_count"], 2)
+        self.assertNotIn("CUDA_VISIBLE_DEVICES", execution_env)
+        self.assertEqual(execution_env["ASR_WORLD_SIZE"], "2")
+        self.assertEqual(execution_env["SURE_BASELINE_WORLD_SIZE"], "2")
+
+    def test_scheduler_count_allocation_invalid_values_leave_no_gpu(self):
+        for value in ("0", "-1", "bad", ""):
+            execution_env = {"ASR_WORLD_SIZE": "8", "SURE_BASELINE_WORLD_SIZE": "8"}
+            allocation = run_vc_sure_candidate.apply_scheduler_allocation(
+                execution_env,
+                env={
+                    "CUDA_VISIBLE_DEVICES": "",
+                    "GPU_PER_TASK": value,
+                    "GPU_NUM": value,
+                },
+            )
+            self.assertEqual(allocation["gpu_count"], 0)
+            self.assertNotIn("ASR_WORLD_SIZE", execution_env)
+            self.assertNotIn("SURE_BASELINE_WORLD_SIZE", execution_env)
+
     def test_remote_candidate_context_filters_local_icefall_python(self):
         sanitized = run_vc_sure_candidate.sanitize_remote_execution_env(
             {
@@ -1881,6 +2357,52 @@ pdgpu-a10          | 184/184              | 1152/1748            | 3648Gi/11385.
         )
         details = run_vc_sure_candidate.execution_failure_details({"exit_code": 1}, output)
         self.assertEqual(details["fatal_error"], "duration_probe_startup_failed")
+
+    def test_remote_candidate_duration_contract_markers_preserve_details_and_category(self):
+        cases = (
+            (
+                "duration_probe_help_discovery_failed",
+                {"error": "timeout", "timeout_seconds": 30, "train_py": "/recipe/train.py"},
+                "system_failure",
+            ),
+            (
+                "duration_probe_helper_cli_incompatible",
+                {"unsupported_options": ["--max-duration"], "train_py": "/recipe/train.py"},
+                "system_failure",
+            ),
+            (
+                "duration_probe_candidate_cli_incompatible",
+                {"unsupported_options": ["--encoder-dim"], "train_py": "/recipe/train.py"},
+                "candidate_failure",
+            ),
+        )
+        for marker, payload, category in cases:
+            with self.subTest(marker=marker):
+                output = f"[sure_runtime] {marker}: {json.dumps(payload, sort_keys=True)}"
+                self.assertEqual(
+                    run_vc_sure_candidate.execution_failure_reason_code(output),
+                    marker,
+                )
+                details = run_vc_sure_candidate.execution_failure_details(
+                    {"exit_code": 1},
+                    output,
+                )
+                self.assertEqual(details["fatal_error"], marker)
+                for key, value in payload.items():
+                    self.assertEqual(details[key], value)
+                self.assertEqual(
+                    SureMasterPlayground._failure_category_from_reason(marker),
+                    category,
+                )
+
+    def test_remote_candidate_duration_contract_marker_cannot_override_fatal_error(self):
+        marker = "duration_probe_helper_cli_incompatible"
+        output = f'{marker}: {{"fatal_error": "spoofed", "train_py": "/recipe/train.py"}}'
+        details = run_vc_sure_candidate.execution_failure_details(
+            {"exit_code": 1},
+            output,
+        )
+        self.assertEqual(details["fatal_error"], marker)
 
     def test_remote_candidate_timeout_takes_precedence_over_duration_log_text(self):
         output = "export SURE_DURATION_CACHE_DIR=/tmp/duration_autotune"
@@ -1918,28 +2440,91 @@ pdgpu-a10          | 184/184              | 1152/1748            | 3648Gi/11385.
         details = run_vc_sure_candidate.execution_failure_details({"exit_code": 1}, output)
         self.assertEqual(details["fatal_error"], "candidate_bpe_validation_failed")
 
-    def test_remote_child_zero_timeout_waits_without_deadline(self):
+    def test_remote_child_count_only_allocation_removes_blank_cuda_mask(self):
+        execution_env: dict[str, str] = {}
+        inherited_env = {"CUDA_VISIBLE_DEVICES": "", "GPU_PER_TASK": "2"}
+        allocation = run_vc_sure_candidate.apply_scheduler_allocation(
+            execution_env,
+            env=inherited_env,
+        )
+        child_env = run_vc_sure_candidate.normalize_process_gpu_environment(
+            allocation,
+            inherited_env,
+        )
         proc = Mock()
         proc.wait.return_value = 0
         with tempfile.TemporaryDirectory() as tmp, patch.object(
             run_vc_sure_candidate.subprocess,
             "Popen",
             return_value=proc,
-        ):
+        ) as popen_mock:
+            run_vc_sure_candidate.run_logged(
+                "python run_sure.py",
+                cwd=Path(tmp),
+                timeout=0,
+                log_path=Path(tmp) / "run.log",
+                env=child_env,
+            )
+
+        self.assertNotIn("CUDA_VISIBLE_DEVICES", child_env)
+        self.assertEqual(child_env["GPU_PER_TASK"], "2")
+        self.assertNotIn("CUDA_VISIBLE_DEVICES", popen_mock.call_args.kwargs["env"])
+
+    def test_count_only_allocation_drives_icefall_world_size(self):
+        execution_env: dict[str, str] = {}
+        inherited_env = {"CUDA_VISIBLE_DEVICES": "", "GPU_PER_TASK": "2"}
+        allocation = run_vc_sure_candidate.apply_scheduler_allocation(
+            execution_env,
+            env=inherited_env,
+        )
+        process_env = run_vc_sure_candidate.normalize_process_gpu_environment(
+            allocation,
+            inherited_env,
+        )
+        process_env.update(execution_env)
+        with patch.dict(os.environ, process_env, clear=True):
+            self.assertEqual(run_icefall_zipformer_candidate.current_world_size(), 2)
+
+    def test_count_only_f5_inference_defaults_to_one_worker(self):
+        allocation = run_vc_sure_candidate.scheduler_gpu_allocation(
+            {"CUDA_VISIBLE_DEVICES": "", "GPU_PER_TASK": "1"}
+        )
+        process_env = run_vc_sure_candidate.normalize_process_gpu_environment(
+            allocation,
+            {"CUDA_VISIBLE_DEVICES": "", "GPU_PER_TASK": "1"},
+        )
+        with patch.dict(os.environ, process_env, clear=True):
+            self.assertEqual(
+                run_f5tts_batch_infer.choose_worker_count("auto", 4, "cuda"),
+                1,
+            )
+
+    def test_remote_child_zero_timeout_waits_without_deadline(self):
+        proc = Mock()
+        proc.wait.return_value = 0
+        child_env = {"GPU_PER_TASK": "2"}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            run_vc_sure_candidate.subprocess,
+            "Popen",
+            return_value=proc,
+        ) as popen_mock:
             result = run_vc_sure_candidate.run_logged(
                 "python run_sure.py",
                 cwd=Path(tmp),
                 timeout=0,
                 log_path=Path(tmp) / "run.log",
+                env=child_env,
             )
 
         proc.wait.assert_called_once_with(timeout=None)
+        self.assertEqual(popen_mock.call_args.kwargs["env"], child_env)
         self.assertEqual(result["exit_code"], 0)
         self.assertFalse(result["timed_out"])
 
     def test_remote_training_source_snapshot_uses_snapshot_for_runner_not_workspace(self):
-        snapshot = Path("/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/runs/demo/source_snapshot")
-        workdir = Path("/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster")
+        project_root = Path(__file__).resolve().parents[4]
+        workdir = Path("/hpc_stor03") / project_root.relative_to("/mnt/cloudstorfs")
+        snapshot = workdir / "runs/demo/source_snapshot"
         config = {
             "sure": {
                 "source_snapshot": {"enabled": True, "path": str(snapshot)},
@@ -1953,9 +2538,7 @@ pdgpu-a10          | 184/184              | 1152/1748            | 3648Gi/11385.
             }
         }
         executor = VcRemoteTrainingExecutor(config, config_path=Path(__file__))
-        workspace = Path(
-            "/mnt/cloudstorfs/sjtu_home/chaolei.liu/Agent/EvoMaster/runs/demo/workspaces/task_0/exp_1"
-        )
+        workspace = project_root / "runs/demo/workspaces/task_0/exp_1"
         command = executor._build_vc_command(
             workspace=workspace,
             result_path=workspace / "metric" / "remote_training_result.json",
@@ -2599,7 +3182,10 @@ pdgpu-a10          | 184/184              | 1152/1748            | 3648Gi/11385.
             (recipe_dir / "train.py").write_text(
                 "import sys\n"
                 "if '--help' in sys.argv:\n"
-                "    print('--log-interval')\n",
+                "    print('--world-size --master-port --num-epochs --start-epoch "
+                "--tensorboard --use-fp16 --exp-dir --max-duration --enable-musan "
+                "--manifest-dir --bpe-model --print-diagnostics --log-interval "
+                "--use-cr-ctc --encoder-dim --full-libri')\n",
                 encoding="utf-8",
             )
             env = {
@@ -2630,7 +3216,8 @@ pdgpu-a10          | 184/184              | 1152/1748            | 3648Gi/11385.
             self.assertIn("--use-cr-ctc", command)
             self.assertIn("--encoder-dim", command)
             full_libri_index = command.index("--full-libri")
-            self.assertEqual(command[full_libri_index + 1], "0")
+            self.assertEqual(command[full_libri_index + 1], "1")
+            self.assertEqual(command.count("--full-libri"), 1)
             max_duration_index = command.index("--max-duration")
             self.assertEqual(command[max_duration_index + 1], "300")
             self.assertEqual(command.count("--max-duration"), 1)
@@ -2645,7 +3232,9 @@ pdgpu-a10          | 184/184              | 1152/1748            | 3648Gi/11385.
             (recipe_dir / "train.py").write_text(
                 "import sys\n"
                 "if '--help' in sys.argv:\n"
-                "    print('--world-size')\n",
+                "    print('--world-size --master-port --num-epochs --start-epoch "
+                "--tensorboard --use-fp16 --exp-dir --max-duration --enable-musan "
+                "--manifest-dir --bpe-model --encoder-dim')\n",
                 encoding="utf-8",
             )
             env = {
@@ -2669,7 +3258,262 @@ pdgpu-a10          | 184/184              | 1152/1748            | 3648Gi/11385.
                     )
             command = run.call_args.args[0]
             self.assertNotIn("--log-interval", command)
+            self.assertNotIn("--print-diagnostics", command)
             self.assertIn("--encoder-dim", command)
+
+    def test_runtime_duration_probe_tedlium_ignores_legacy_full_libri(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recipe_dir = Path(tmp) / "recipe"
+            recipe_dir.mkdir()
+            train_py = recipe_dir / "train.py"
+            train_py.write_text("# fake\n", encoding="utf-8")
+            supported = runtime_env._PROBE_REQUIRED_OPTIONS | {"--encoder-dim"}
+            env = {
+                "SURE_DURATION_RECIPE_DIR": str(recipe_dir),
+                "SURE_DURATION_PROBE_FULL_LIBRI": "1",
+            }
+            runtime_env._DEPRECATED_FULL_LIBRI_WARNED = False
+            with patch.dict(runtime_env.os.environ, env, clear=False), patch.object(
+                runtime_env, "_train_supported_options", return_value=supported
+            ), patch.object(runtime_env, "_run_logged_command", return_value=True) as run, patch.object(
+                runtime_env, "_log"
+            ) as log:
+                self.assertTrue(
+                    runtime_env._probe_duration(
+                        300,
+                        2,
+                        True,
+                        30,
+                        Path(tmp) / "probes",
+                        ["--encoder-dim", "192"],
+                    )
+                )
+                runtime_env._warn_deprecated_full_libri()
+
+            self.assertNotIn("--full-libri", run.call_args.args[0])
+            warnings = [
+                call for call in log.call_args_list if "deprecated and ignored" in str(call)
+            ]
+            self.assertEqual(len(warnings), 1)
+
+    def test_runtime_duration_probe_rejects_missing_helper_option_before_training(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recipe_dir = Path(tmp) / "recipe"
+            recipe_dir.mkdir()
+            (recipe_dir / "train.py").write_text("# fake\n", encoding="utf-8")
+            supported = runtime_env._PROBE_REQUIRED_OPTIONS - {"--max-duration"}
+            with patch.dict(
+                runtime_env.os.environ,
+                {"SURE_DURATION_RECIPE_DIR": str(recipe_dir)},
+                clear=False,
+            ), patch.object(
+                runtime_env, "_train_supported_options", return_value=supported
+            ), patch.object(runtime_env, "_run_logged_command") as run:
+                with self.assertRaisesRegex(
+                    RuntimeError, "duration_probe_helper_cli_incompatible"
+                ):
+                    runtime_env._probe_duration(
+                        300, 1, True, 30, Path(tmp) / "probes", []
+                    )
+            run.assert_not_called()
+
+    def test_runtime_duration_probe_rejects_unsupported_candidate_option(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recipe_dir = Path(tmp) / "recipe"
+            recipe_dir.mkdir()
+            (recipe_dir / "train.py").write_text("# fake\n", encoding="utf-8")
+            with patch.dict(
+                runtime_env.os.environ,
+                {"SURE_DURATION_RECIPE_DIR": str(recipe_dir)},
+                clear=False,
+            ), patch.object(
+                runtime_env,
+                "_train_supported_options",
+                return_value=runtime_env._PROBE_REQUIRED_OPTIONS,
+            ), patch.object(runtime_env, "_run_logged_command") as run:
+                with self.assertRaisesRegex(
+                    RuntimeError, "duration_probe_candidate_cli_incompatible"
+                ):
+                    runtime_env._probe_duration(
+                        300,
+                        1,
+                        True,
+                        30,
+                        Path(tmp) / "probes",
+                        ["--encoder-dim=192"],
+                    )
+            run.assert_not_called()
+
+    def test_runtime_duration_help_discovery_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recipe_dir = Path(tmp)
+            train_py = recipe_dir / "train.py"
+            train_py.write_text("# fake\n", encoding="utf-8")
+            runtime_env._TRAIN_HELP_OPTION_CACHE.clear()
+            result = subprocess.CompletedProcess([], 1, stdout="bad help")
+            with patch.object(runtime_env.subprocess, "run", return_value=result):
+                with self.assertRaisesRegex(
+                    RuntimeError, "duration_probe_help_discovery_failed"
+                ):
+                    runtime_env._train_supported_options(
+                        sys.executable, train_py, recipe_dir
+                    )
+
+    def test_runtime_duration_help_discovery_timeout_has_stable_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recipe_dir = Path(tmp)
+            train_py = recipe_dir / "train.py"
+            train_py.write_text("# fake\n", encoding="utf-8")
+            runtime_env._TRAIN_HELP_OPTION_CACHE.clear()
+            timeout = subprocess.TimeoutExpired(
+                [sys.executable, str(train_py), "--help"],
+                30,
+            )
+            with patch.object(runtime_env.subprocess, "run", side_effect=timeout):
+                with self.assertRaises(RuntimeError) as raised:
+                    runtime_env._train_supported_options(
+                        sys.executable, train_py, recipe_dir
+                    )
+
+        marker, raw_payload = str(raised.exception).split(": ", 1)
+        payload = json.loads(raw_payload)
+        self.assertEqual(marker, "duration_probe_help_discovery_failed")
+        self.assertEqual(payload["error"], "timeout")
+        self.assertEqual(payload["timeout_seconds"], 30)
+        self.assertEqual(payload["train_py"], str(train_py))
+
+    def test_runtime_duration_help_discovery_oserror_has_stable_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recipe_dir = Path(tmp)
+            train_py = recipe_dir / "train.py"
+            train_py.write_text("# fake\n", encoding="utf-8")
+            runtime_env._TRAIN_HELP_OPTION_CACHE.clear()
+            with patch.object(
+                runtime_env.subprocess,
+                "run",
+                side_effect=OSError(2, "not found"),
+            ):
+                with self.assertRaises(RuntimeError) as raised:
+                    runtime_env._train_supported_options(
+                        sys.executable, train_py, recipe_dir
+                    )
+
+        marker, raw_payload = str(raised.exception).split(": ", 1)
+        payload = json.loads(raw_payload)
+        self.assertEqual(marker, "duration_probe_help_discovery_failed")
+        self.assertEqual(payload["error"], "launch_failed")
+        self.assertEqual(payload["exception_type"], "FileNotFoundError")
+        self.assertEqual(payload["errno"], 2)
+        self.assertEqual(payload["train_py"], str(train_py))
+        self.assertNotIn("detail", payload)
+
+    def test_runtime_duration_help_discovery_rejects_success_without_long_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recipe_dir = Path(tmp)
+            train_py = recipe_dir / "train.py"
+            train_py.write_text("# fake\n", encoding="utf-8")
+            runtime_env._TRAIN_HELP_OPTION_CACHE.clear()
+            result = subprocess.CompletedProcess(
+                [],
+                0,
+                stdout="usage: train.py [-h]",
+            )
+            with patch.object(runtime_env.subprocess, "run", return_value=result) as run:
+                with self.assertRaises(RuntimeError) as raised:
+                    runtime_env._train_supported_options(
+                        sys.executable, train_py, recipe_dir
+                    )
+                with self.assertRaises(RuntimeError):
+                    runtime_env._train_supported_options(
+                        sys.executable, train_py, recipe_dir
+                    )
+
+        marker, raw_payload = str(raised.exception).split(": ", 1)
+        payload = json.loads(raw_payload)
+        self.assertEqual(marker, "duration_probe_help_discovery_failed")
+        self.assertEqual(payload["error"], "no_long_options")
+        self.assertEqual(payload["train_py"], str(train_py))
+        self.assertEqual(run.call_count, 2)
+
+    def test_runtime_duration_help_cache_invalidates_when_train_script_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recipe_dir = Path(tmp)
+            train_py = recipe_dir / "train.py"
+            train_py.write_text("# version one\n", encoding="utf-8")
+            runtime_env._TRAIN_HELP_OPTION_CACHE.clear()
+            results = (
+                subprocess.CompletedProcess([], 0, stdout="--first-option"),
+                subprocess.CompletedProcess([], 0, stdout="--second-option"),
+            )
+            with patch.object(runtime_env.subprocess, "run", side_effect=results) as run:
+                first = runtime_env._train_supported_options(
+                    sys.executable, train_py, recipe_dir
+                )
+                train_py.write_text("# version two\n", encoding="utf-8")
+                second = runtime_env._train_supported_options(
+                    sys.executable, train_py, recipe_dir
+                )
+
+        self.assertEqual(first, frozenset({"--first-option"}))
+        self.assertEqual(second, frozenset({"--second-option"}))
+        self.assertEqual(run.call_count, 2)
+
+    def test_runtime_duration_cache_key_changes_with_policy_and_train_script(self):
+        def cache_key() -> str:
+            return runtime_env._duration_cache_key(
+                baseline=300,
+                memories=[24_000],
+                use_fp16=True,
+                world_size=1,
+                step=100,
+                lower_limit=100,
+                upper_limit=300,
+                probe_args=["--encoder-dim", "192"],
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            recipe_dir = Path(tmp)
+            train_py = recipe_dir / "train.py"
+            env = {"SURE_DURATION_RECIPE_DIR": str(recipe_dir)}
+            with patch.dict(runtime_env.os.environ, env, clear=True):
+                missing_script_key = cache_key()
+                train_py.write_text("# version one\n", encoding="utf-8")
+                first_script_key = cache_key()
+                train_py.write_text("# version two\n", encoding="utf-8")
+                second_script_key = cache_key()
+                with patch.object(
+                    runtime_env,
+                    "_DURATION_PROBE_POLICY_VERSION",
+                    "next-policy",
+                ):
+                    next_policy_key = cache_key()
+
+        self.assertNotEqual(missing_script_key, first_script_key)
+        self.assertNotEqual(first_script_key, second_script_key)
+        self.assertNotEqual(second_script_key, next_policy_key)
+
+    def test_runtime_duration_cache_rejects_previous_probe_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "duration.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": runtime_env._DURATION_CACHE_SCHEMA_VERSION,
+                        "probe_policy": "previous-policy",
+                        "duration": 700,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertIsNone(runtime_env._read_cached_duration(cache_path))
+
+    def test_runtime_duration_cache_requires_current_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "duration.json"
+            cache_path.write_text('{"duration": 700}\n', encoding="utf-8")
+            self.assertIsNone(runtime_env._read_cached_duration(cache_path))
+            runtime_env._write_cached_duration(cache_path, 700)
+            self.assertEqual(runtime_env._read_cached_duration(cache_path), 700)
 
     def test_runtime_duration_probe_raises_on_incompatible_cli(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3003,6 +3847,36 @@ subprocess.run(cmd)
             status = json.loads((workspace / "artifacts" / "candidate_status.json").read_text(encoding="utf-8"))
             self.assertEqual(status["reason_code"], "remote_exception")
 
+    def test_f5tts_batch_worker_count_respects_visible_gpus(self):
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "2,5"}, clear=False):
+            self.assertEqual(run_f5tts_batch_infer.choose_worker_count("8", 20, "cuda"), 2)
+            self.assertEqual(run_f5tts_batch_infer.choose_worker_count("auto", 1, "cuda:0"), 1)
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": ""}, clear=False):
+            self.assertEqual(run_f5tts_batch_infer.choose_worker_count("8", 20, "cuda"), 1)
+        self.assertEqual(run_f5tts_batch_infer.choose_worker_count("3", 20, "cpu"), 3)
+
+    def test_f5tts_batch_shards_balance_cost_deterministically(self):
+        rows = [
+            {"index": 1, "sample_id": "short", "gen_text": "x" * 10},
+            {"index": 2, "sample_id": "long", "gen_text": "x" * 100},
+            {"index": 3, "sample_id": "medium", "gen_text": "x" * 60},
+            {"index": 4, "sample_id": "small", "gen_text": "x" * 20},
+        ]
+        first = run_f5tts_batch_infer.split_shards(rows, 2)
+        second = run_f5tts_batch_infer.split_shards(rows, 2)
+        self.assertEqual(first, second)
+        self.assertEqual([[row["sample_id"] for row in shard] for shard in first], [["long"], ["short", "medium", "small"]])
+        self.assertEqual([sum(run_f5tts_batch_infer.row_cost(row) for row in shard) for shard in first], [100, 90])
+
+    def test_f5tts_batch_chunking_prefers_punctuation_and_oom_detection_is_narrow(self):
+        text = "First sentence is here. Second sentence is somewhat longer! Final words."
+        chunks = run_f5tts_batch_infer.split_text_chunks(text, max_chars=35, min_chars=10)
+        self.assertEqual(" ".join(chunks), text)
+        self.assertTrue(all(len(chunk) <= 35 for chunk in chunks))
+        self.assertTrue(chunks[0].endswith("."))
+        self.assertTrue(run_f5tts_batch_infer.is_oom_error(RuntimeError("CUDA out of memory")))
+        self.assertFalse(run_f5tts_batch_infer.is_oom_error(RuntimeError("invalid model input")))
+
     def test_f5tts_batch_infer_preserves_existing_arch_candidate_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -3136,6 +4010,48 @@ subprocess.run(cmd)
         self.assertNotIn("SURE_TTS_TRAIN_ACTION", code)
         self.assertNotIn("SURE_TTS_FINETUNE_WRAPPER", code)
 
+    def test_f5tts_official_draft_uses_inference_resource_profile(self):
+        code = Path(f5tts_official_baseline.__file__).read_text(encoding="utf-8")
+        exp = object.__new__(SureRunExp)
+        exp.candidate_type_hint = FINE_TUNE
+        exp.candidate_stage_name = "stage0_draft"
+        exp.stage = "draft"
+        exp.code = code
+
+        self.assertEqual(exp._remote_workload_profile(), INFERENCE)
+
+        config = {
+            "sure": {
+                "remote_training": {
+                    "gpu_per_task": 8,
+                    "cpu_per_task": 64,
+                    "mem_per_task": "256G",
+                    "resource_profiles": {
+                        "inference": {
+                            "gpu_per_task": 1,
+                            "cpu_per_task": 8,
+                            "mem_per_task": "32G",
+                        },
+                        "training": {
+                            "gpu_per_task": 8,
+                            "cpu_per_task": 64,
+                            "mem_per_task": "256G",
+                        },
+                    },
+                }
+            }
+        }
+        resources, diagnostics = remote_resource_config_from(
+            config,
+            candidate_type=exp.candidate_type_hint,
+            stage=exp.candidate_stage_name,
+            workload_profile=exp._remote_workload_profile(),
+        )
+        self.assertEqual(diagnostics["profile_name"], INFERENCE)
+        self.assertEqual(resources["gpu_per_task"], 1)
+        self.assertEqual(resources["cpu_per_task"], 8)
+        self.assertEqual(resources["mem_per_task"], "32G")
+
     def test_f5tts_official_baseline_builds_batch_wrapper_command(self):
         env = {
             "SURE_TTS_PYTHON": "/env/f5/bin/python",
@@ -3157,6 +4073,8 @@ subprocess.run(cmd)
         self.assertIn("--training-action", command)
         self.assertEqual(command[command.index("--training-action") + 1], "no_train")
         self.assertEqual(command[command.index("--timeout") + 1], "1234")
+        self.assertEqual(command[command.index("--max-chunk-chars") + 1], "300")
+        self.assertEqual(command[command.index("--min-chunk-chars") + 1], "40")
 
     def test_f5tts_official_baseline_writes_provenance(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3630,6 +4548,114 @@ class SureMetricRunnerTest(unittest.TestCase):
             self.assertTrue(link.is_symlink())
             self.assertEqual(link.resolve(), selection_eval.resolve())
 
+    def test_run_exp_replaces_directory_of_symlinks_for_base_model_override(self):
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+        profile = BaseModelProfile(
+            model_id="f5tts",
+            usage_policy="required",
+            required_paths={"eval_data": "base_model/eval_data"},
+            source_paths={"eval_data": "/tmp/default_eval_data"},
+        )
+        card = SureTaskCard(
+            task_id="tts_en_wer",
+            canonical_task="tts",
+            task_alias="tts",
+            primary_metric="tts_wer",
+            required_roles=["samples_jsonl"],
+            artifact_contract={"samples_jsonl": "artifacts/samples.jsonl"},
+        )
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            default_eval = Path(tmp) / "default_eval"
+            selection_eval = Path(tmp) / "selection_eval"
+            default_eval.mkdir()
+            selection_eval.mkdir()
+            (default_eval / "prompts.jsonl").write_text("default\n", encoding="utf-8")
+            (selection_eval / "prompts.jsonl").write_text("selection\n", encoding="utf-8")
+            target = workspace / "base_model" / "eval_data"
+            target.mkdir(parents=True)
+            (target / "prompts.jsonl").symlink_to(default_eval / "prompts.jsonl")
+            DummyAgent.session.config.workspace_path = str(Path(tmp))
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=profile,
+                metric_runner=runner,
+            )
+            exp.workspace_path = str(workspace)
+            exp.base_model_source_overrides = {"eval_data": str(selection_eval)}
+
+            exp._prepare_base_model_source_overrides()
+
+            self.assertTrue(target.is_symlink())
+            self.assertEqual(target.resolve(), selection_eval.resolve())
+            self.assertEqual((target / "prompts.jsonl").read_text(encoding="utf-8"), "selection\n")
+
+    def test_run_exp_preserves_real_directory_for_base_model_override(self):
+        runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
+        profile = BaseModelProfile(
+            model_id="f5tts",
+            usage_policy="required",
+            required_paths={"eval_data": "base_model/eval_data"},
+            source_paths={"eval_data": "/tmp/default_eval_data"},
+        )
+        card = SureTaskCard(
+            task_id="tts_en_wer",
+            canonical_task="tts",
+            task_alias="tts",
+            primary_metric="tts_wer",
+        )
+
+        class DummySession:
+            class Config:
+                workspace_path = ""
+
+            config = Config()
+
+        class DummyAgent:
+            session = DummySession()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "exp"
+            selection_eval = Path(tmp) / "selection_eval"
+            selection_eval.mkdir()
+            target = workspace / "base_model" / "eval_data"
+            target.mkdir(parents=True)
+            real_file = target / "local.txt"
+            real_file.write_text("keep\n", encoding="utf-8")
+            DummyAgent.session.config.workspace_path = str(Path(tmp))
+            exp = SureRunExp(
+                stage="draft",
+                main_agent=DummyAgent(),
+                debug_agent=DummyAgent(),
+                config={},
+                exp_name="exp",
+                task_card=card,
+                base_model_profile=profile,
+                metric_runner=runner,
+            )
+            exp.workspace_path = str(workspace)
+            exp.base_model_source_overrides = {"eval_data": str(selection_eval)}
+
+            exp._prepare_base_model_source_overrides()
+
+            self.assertFalse(target.is_symlink())
+            self.assertEqual(real_file.read_text(encoding="utf-8"), "keep\n")
+
     def test_run_vc_candidate_ensures_base_model_profile_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -3663,6 +4689,105 @@ class SureMetricRunnerTest(unittest.TestCase):
             self.assertEqual((workspace / "base_model" / "root").resolve(), source_root.resolve())
             self.assertTrue((workspace / "base_model" / "recipe" / "data").is_symlink())
             self.assertTrue((workspace / "data").is_symlink())
+
+    def test_coordinator_gpu_policy_skips_discovery_only_when_remote_or_disabled(self):
+        all_remote = {
+            "sure": {
+                "coordinator": {"local_gpu_policy": "disabled"},
+                "remote_training": {
+                    "enabled": True,
+                    "draft_enabled": True,
+                    "candidate_types": ["inference", "fine_tune", "arch"],
+                },
+            }
+        }
+        with patch.object(
+            sure_playground_module,
+            "_discover_gpu_devices",
+            side_effect=AssertionError("GPU discovery must be skipped"),
+        ):
+            resolved = sure_playground_module._apply_coordinator_gpu_policy(
+                all_remote,
+                {"gpu_devices": "auto", "parallel": {"gpus_per_exp": 8}},
+                Mock(),
+            )
+        self.assertIsNone(resolved["gpu_devices"])
+        for settings in (resolved, resolved["parallel"]):
+            self.assertFalse(settings["refresh_idle_gpu_before_exec"])
+            self.assertFalse(settings["gpu_lock_enabled"])
+            self.assertFalse(settings["set_asr_world_size"])
+            self.assertEqual(settings["gpus_per_exp"], 1)
+            self.assertIsNone(settings["serial_gpus_per_exp"])
+
+        auto_remote = {
+            "sure": {
+                "coordinator": {"local_gpu_policy": "auto"},
+                "remote_training": dict(all_remote["sure"]["remote_training"]),
+            }
+        }
+        with patch.object(
+            sure_playground_module,
+            "_discover_gpu_devices",
+            side_effect=AssertionError("auto must skip discovery with complete coverage"),
+        ):
+            auto_resolved = sure_playground_module._apply_coordinator_gpu_policy(
+                auto_remote, {"gpu_devices": "auto", "parallel": {}}, Mock()
+            )
+        self.assertIsNone(auto_resolved["gpu_devices"])
+
+        arch_entry_remote = {
+            "sure": {
+                "coordinator": {"local_gpu_policy": "disabled"},
+                "staged_axes": {"start_phase": "arch"},
+                "remote_training": {
+                    "enabled": True,
+                    "draft_enabled": False,
+                    "candidate_types": ["inference", "fine_tune", "arch"],
+                },
+            }
+        }
+        with patch.object(
+            sure_playground_module,
+            "_discover_gpu_devices",
+            side_effect=AssertionError("arch entry must skip local GPU discovery"),
+        ):
+            arch_entry_resolved = sure_playground_module._apply_coordinator_gpu_policy(
+                arch_entry_remote, {"gpu_devices": "auto", "parallel": {}}, Mock()
+            )
+        self.assertIsNone(arch_entry_resolved["gpu_devices"])
+
+        incomplete_disabled = {
+            "sure": {
+                "coordinator": {"local_gpu_policy": "disabled"},
+                "remote_training": {
+                    "enabled": True,
+                    "draft_enabled": True,
+                    "candidate_types": ["fine_tune", "arch"],
+                },
+            }
+        }
+        with self.assertRaisesRegex(ValueError, "complete remote coverage"):
+            sure_playground_module._apply_coordinator_gpu_policy(
+                incomplete_disabled, {"gpu_devices": "auto"}, Mock()
+            )
+
+        partial_remote = {
+            "sure": {
+                "coordinator": {"local_gpu_policy": "auto"},
+                "remote_training": {
+                    "enabled": True,
+                    "draft_enabled": True,
+                    "candidate_types": ["fine_tune", "arch"],
+                },
+            }
+        }
+        with patch.object(sure_playground_module, "_discover_gpu_devices", return_value=["0"]):
+            resolved = sure_playground_module._apply_coordinator_gpu_policy(
+                partial_remote,
+                {"gpu_devices": "auto"},
+                Mock(),
+            )
+        self.assertEqual(resolved["gpu_devices"], ["0"])
 
     def test_run_exp_writes_remote_candidate_context(self):
         runner = SureMetricRunner("/tmp/sure", pythonpath="/tmp/sure/src")
@@ -4715,6 +5840,65 @@ def run_pipeline_spec(pipeline, output_dir, **kwargs):
             self.assertTrue((workspace / "metric" / "pipeline_spec.json").exists())
             self.assertTrue((workspace / "metric" / "score_summary.json").exists())
 
+    def test_metric_gpu_same_reuses_uuid_allocation_without_polling(self):
+        allocator = MetricGpuAllocator(
+            {
+                "enabled": True,
+                "devices": "same",
+                "gpus_per_metric": 1,
+                "wait_timeout_sec": 900,
+            }
+        )
+        visible = "GPU-226dd387-6c9c-803b-7fd4-5f6e55ea0cb3"
+
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": visible}, clear=False), patch.object(
+            allocator,
+            "_query_gpu_snapshots",
+            side_effect=AssertionError("same allocation must not query nvidia-smi"),
+        ), patch("playground.sure_master.core.utils.metric.time.sleep") as sleep:
+            with allocator.allocate(attempt=1) as allocation:
+                self.assertEqual(allocation.mode, "same")
+                self.assertEqual(allocation.devices, [visible])
+                self.assertEqual(allocation.cuda_visible_devices, visible)
+                self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], visible)
+
+        sleep.assert_not_called()
+
+    def test_metric_gpu_idle_numeric_snapshots_do_not_match_uuid_visibility(self):
+        allocator = MetricGpuAllocator(
+            {
+                "enabled": True,
+                "devices": "idle",
+                "gpus_per_metric": 1,
+                "min_free_mib": 9500,
+                "max_utilization": 20,
+            }
+        )
+        snapshots = {
+            "0": MetricGpuSnapshot(
+                index="0",
+                total_mib=24576,
+                used_mib=512,
+                free_mib=24064,
+                utilization=0,
+            )
+        }
+
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "GPU-226dd387"}, clear=False):
+            self.assertEqual(allocator._candidate_groups(snapshots, set()), [])
+
+    def test_remote_f5_configs_reuse_child_metric_gpu(self):
+        root = Path(__file__).resolve().parents[4]
+        for relative_path in (
+            "configs/sure_master/gpt-5-f5tts-staged-axes-mixed.yaml",
+            "configs/sure_master/gpt-5-f5tts-smoke.yaml",
+        ):
+            config = yaml.safe_load((root / relative_path).read_text(encoding="utf-8"))
+            metric_gpu = config["sure"]["metric_gpu"]
+            self.assertTrue(metric_gpu["enabled"])
+            self.assertEqual(metric_gpu["devices"], "same")
+            self.assertFalse(metric_gpu["oom_retry"])
+
     def test_metric_gpu_sets_cuda_visible_devices_and_restores_env(self):
         with tempfile.TemporaryDirectory() as tmp:
             saved_sure_modules = {
@@ -5197,7 +6381,10 @@ external = "/tmp/icefall/zipformer"
         self.assertEqual(spec["task"], "classification")
         self.assertEqual(spec["task_alias"], "classification")
         self.assertEqual(spec["required_roles"], ["hyp", "ref"])
-        self.assertEqual(spec["pipeline_id"], "classification.accuracy.classify")
+        self.assertEqual(
+            spec["pipeline_id"],
+            "classification.any.accuracy.classify_v1",
+        )
 
     def test_all_repo_task_cards_match_sure_adapter_required_roles(self):
         sure_root = Path("/hpc_stor03/sjtu_home/chaolei.liu/sure")

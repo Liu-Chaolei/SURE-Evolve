@@ -1,0 +1,4 @@
+Build one ResearchDesignCard for one primary intervention or tested relationship using
+verified EvidenceRecords only. Do not add task recommendations. Map every factual field
+to evidence IDs; separate base method from delta, explicit controls from assumptions,
+and training objectives or reward backends from final evaluation metrics and backends.

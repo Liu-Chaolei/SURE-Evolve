@@ -93,3 +93,86 @@ class EvolutionOverlay(BaseModel):
     applied_prompt_patches: list[str] = Field(default_factory=list)
     tool_proposals: list[str] = Field(default_factory=list)
 
+
+class ExperienceSettings(BaseModel):
+    """Configuration for lightweight cross-run experience evidence."""
+
+    enabled: bool = False
+    snapshot_path: str = ".evomaster/evolution_experience.v1.json"
+    min_recurring_runs: int = Field(default=2, ge=2)
+    min_stable_runs: int = Field(default=3, ge=2)
+    min_directional_runs: int = Field(default=2, ge=1)
+    stable_ratio: float = Field(default=0.67, ge=0.5, le=1.0)
+    merge_similarity: float = Field(default=0.72, ge=0.0, le=1.0)
+    max_records: int = Field(default=200, ge=1)
+    max_events_per_record: int = Field(default=12, ge=1)
+    max_hints: int = Field(default=4, ge=0)
+    max_hint_chars: int = Field(default=4000, ge=0)
+    score_higher_is_better: bool | None = None
+
+
+class ExperienceOutcome(BaseModel):
+    """Direction assigned to one applied overlay comparison."""
+
+    direction: Literal["positive", "negative", "neutral"] = "neutral"
+    reasons: list[str] = Field(default_factory=list)
+
+
+class ExperienceObservation(BaseModel):
+    """Compact evidence about one candidate seen in a top-level run."""
+
+    run_id: str
+    candidate_kind: Literal["skill", "prompt_patch"]
+    scope: str
+    fingerprint: str
+    normalized_text: str
+    title: str
+    summary: str
+    outcome: Literal["positive", "negative", "neutral"] = "neutral"
+    outcome_reasons: list[str] = Field(default_factory=list)
+    evidence_relation: Literal["overlay_correlated"] = "overlay_correlated"
+
+
+class ExperienceRecord(BaseModel):
+    """Bounded aggregate of semantically matching observations."""
+
+    evidence_id: str
+    candidate_kind: Literal["skill", "prompt_patch"]
+    scope: str
+    fingerprint: str
+    normalized_text: str
+    title: str
+    summary: str
+    state: Literal["observed", "recurring", "stable_positive", "stable_negative"] = "observed"
+    occurrence_run_ids: list[str] = Field(default_factory=list)
+    positive_run_ids: list[str] = Field(default_factory=list)
+    negative_run_ids: list[str] = Field(default_factory=list)
+    neutral_run_ids: list[str] = Field(default_factory=list)
+    events: list[ExperienceObservation] = Field(default_factory=list)
+
+
+class ExperienceSnapshot(BaseModel):
+    """Versioned bounded cross-run experience snapshot."""
+
+    schema_version: Literal[1] = 1
+    records: list[ExperienceRecord] = Field(default_factory=list)
+
+
+class AdvisoryEvidenceItem(BaseModel):
+    """Generic bounded evidence supplied only to an analyzer."""
+
+    source: str
+    evidence_id: str
+    title: str
+    summary: str
+    direction: str
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AnalyzerAdvisoryContext(BaseModel):
+    """Shared bounded advisory channel for experience and future sources."""
+
+    items: list[AdvisoryEvidenceItem] = Field(default_factory=list)
+    max_chars: int = Field(default=4000, ge=0)
+

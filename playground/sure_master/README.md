@@ -89,3 +89,12 @@ ASR self-evolution configs should use a dev-tier reference such as
 `SURE_ASR_EVAL_SPLITS=test-clean,test-other` for final holdout benchmark runs.
 By default `sure.require_base_model` is true, so other tasks must define their
 own `sure.base_models.<task_id>` profile before they can run.
+
+## Production Remote Resources
+
+Production ASR/TTS profiles keep the coordinator GPU-free with
+`sure.coordinator.local_gpu_policy: disabled` and submit every candidate to VC.
+Inference uses 1 GPU / 8 CPU / 32G; draft training, training, and architecture
+candidates use 8 GPU / 64 CPU / 256G. Each resource profile uses `num_task: 1`.
+Do not apply a global remote GPU override, because it would replace these
+candidate-specific profiles. Remote Icefall uses `/opt/conda/envs/icefall/bin/python`.

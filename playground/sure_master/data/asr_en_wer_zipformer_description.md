@@ -126,9 +126,9 @@ SURE_MAX_DURATION=1000
 SURE_USE_FP16=1
 SURE_DECODE_ONLY=0
 SURE_ENABLE_MUSAN=0
-SURE_ICEFALL_PYTHON=/hpc_stor03/sjtu_home/chaolei.liu/anaconda3/envs/icefall/bin/python
+SURE_ICEFALL_PYTHON=/opt/conda/envs/icefall/bin/python
 SURE_ASR_EVAL_SPLITS=dev-clean,dev-other
-SURE_ASR_ZIPFORMER_WRAPPER=/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_icefall_zipformer_candidate.py
+SURE_ASR_ZIPFORMER_WRAPPER=/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/tools/run_icefall_zipformer_candidate.py
 ```
 
 Use these values to decide whether to train, how large the batches should be,

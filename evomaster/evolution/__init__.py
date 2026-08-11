@@ -7,8 +7,11 @@ import or execute it unless the user runs the evolution wrapper or passes
 
 from .manager import EvolutionManager, EvolutionRunConfig
 from .models import (
+    AdvisoryEvidenceItem,
+    AnalyzerAdvisoryContext,
     EvolutionCandidates,
     EvolutionOverlay,
+    ExperienceSettings,
     PromptPatchCandidate,
     SkillCandidate,
     ToolProposal,
@@ -24,4 +27,7 @@ __all__ = [
     "ToolProposal",
     "EvolutionCandidates",
     "EvolutionOverlay",
+    "ExperienceSettings",
+    "AdvisoryEvidenceItem",
+    "AnalyzerAdvisoryContext",
 ]

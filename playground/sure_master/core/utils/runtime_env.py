@@ -13,6 +13,11 @@ import time
 from pathlib import Path
 
 
+_DURATION_CACHE_SCHEMA_VERSION = 2
+_DURATION_PROBE_POLICY_VERSION = "recipe-cli-contract-v2"
+_DEPRECATED_FULL_LIBRI_WARNED = False
+
+
 def _truthy(value: str | None) -> bool:
     return str(value or "").strip().lower() not in {"", "0", "false", "no", "off"}
 
@@ -31,6 +36,49 @@ def _nonnegative_int_env(name: str, default: int) -> int:
     except (TypeError, ValueError):
         return max(0, default)
     return max(0, value)
+
+
+def descending_duration_values(
+    start: int,
+    *,
+    minimum: int,
+    step: int,
+    configured_values: str = "",
+) -> list[int]:
+    """Build a deterministic, descending duration fallback sequence.
+
+    This is shared by exact-workload tuners.  It deliberately contains no
+    retry policy: callers decide which failures are safe to retry.
+    """
+    minimum = max(1, int(minimum))
+    start = max(minimum, int(start))
+    step = max(1, int(step))
+    if configured_values.strip():
+        values = [start]
+        for item in configured_values.replace(",", " ").split():
+            try:
+                value = int(float(item))
+            except ValueError:
+                continue
+            if minimum <= value < start:
+                values.append(value)
+        return sorted(set(values), reverse=True)
+
+    values = list(range(start, minimum - 1, -step))
+    if values[-1] != minimum:
+        values.append(minimum)
+    return values
+
+
+def write_json_atomic(path: Path, payload: object) -> None:
+    """Atomically replace a JSON evidence/cache file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    tmp_path.replace(path)
 
 
 def _log(message: str) -> None:
@@ -233,6 +281,22 @@ def _duration_cache_dir() -> Path:
     return Path.cwd() / ".sure_runtime" / "duration_autotune"
 
 
+def _train_script_identity() -> dict[str, object]:
+    train_py = _recipe_dir().resolve() / "train.py"
+    try:
+        stat = train_py.stat()
+        digest = hashlib.sha256(train_py.read_bytes()).hexdigest()
+    except OSError:
+        return {"path": str(train_py), "exists": False}
+    return {
+        "path": str(train_py),
+        "exists": True,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "sha256": digest,
+    }
+
+
 def _duration_cache_key(
     baseline: int,
     memories: list[int],
@@ -254,7 +318,8 @@ def _duration_cache_key(
         "manifest_dir": os.environ.get("SURE_DURATION_MANIFEST_DIR", "data/fbank"),
         "bpe_model": os.environ.get("SURE_DURATION_BPE_MODEL", "data/lang_bpe_500/bpe.model"),
         "enable_musan": os.environ.get("SURE_ENABLE_MUSAN", "0"),
-        "probe_full_libri": os.environ.get("SURE_DURATION_PROBE_FULL_LIBRI", "0"),
+        "probe_policy": _DURATION_PROBE_POLICY_VERSION,
+        "train_script": _train_script_identity(),
         "probe_success_batches": os.environ.get("SURE_DURATION_PROBE_SUCCESS_BATCHES", "2"),
         "probe_log_interval": os.environ.get("SURE_DURATION_PROBE_LOG_INTERVAL", "1"),
         "probe_headroom_mb": os.environ.get("SURE_DURATION_HEADROOM_MB", "0"),
@@ -270,16 +335,25 @@ def _duration_cache_key(
 def _read_cached_duration(path: Path) -> int | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("schema_version") != _DURATION_CACHE_SCHEMA_VERSION:
+            return None
+        if payload.get("probe_policy") != _DURATION_PROBE_POLICY_VERSION:
+            return None
         duration = int(payload["duration"])
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+    except (OSError, AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
     return duration if duration > 0 else None
 
 
 def _write_cached_duration(path: Path, duration: int) -> None:
-    tmp_path = path.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps({"duration": duration}, indent=2), encoding="utf-8")
-    tmp_path.replace(path)
+    write_json_atomic(
+        path,
+        {
+            "schema_version": _DURATION_CACHE_SCHEMA_VERSION,
+            "probe_policy": _DURATION_PROBE_POLICY_VERSION,
+            "duration": duration,
+        },
+    )
 
 
 def _acquire_lock(lock_dir: Path, cache_path: Path, timeout: int) -> bool:
@@ -393,7 +467,6 @@ _PROBE_CONTROLLED_OPTIONS = {
     "--num-epochs": 1,
     "--start-epoch": 1,
     "--tensorboard": 1,
-    "--full-libri": 1,
     "--use-fp16": 1,
     "--exp-dir": 1,
     "--max-duration": 1,
@@ -403,6 +476,23 @@ _PROBE_CONTROLLED_OPTIONS = {
     "--bpe-model": 1,
     "--log-interval": 1,
 }
+
+_PROBE_REQUIRED_OPTIONS = frozenset(
+    {
+        "--world-size",
+        "--master-port",
+        "--num-epochs",
+        "--start-epoch",
+        "--tensorboard",
+        "--use-fp16",
+        "--exp-dir",
+        "--max-duration",
+        "--enable-musan",
+        "--manifest-dir",
+        "--bpe-model",
+    }
+)
+_PROBE_OPTIONAL_OPTIONS = frozenset({"--log-interval", "--print-diagnostics"})
 
 
 def _strip_probe_controlled_args(args: list[str]) -> list[str]:
@@ -427,11 +517,39 @@ def _strip_probe_controlled_args(args: list[str]) -> list[str]:
     return stripped
 
 
-_TRAIN_HELP_OPTION_CACHE: dict[tuple[str, str], frozenset[str]] = {}
+_TRAIN_HELP_OPTION_CACHE: dict[tuple[str, str, str], frozenset[str]] = {}
+
+
+def _duration_probe_contract_error(marker: str, train_py: Path, **details: object) -> RuntimeError:
+    payload = {"train_py": str(train_py), **details}
+    message = f"{marker}: {json.dumps(payload, sort_keys=True)}"
+    _log(message)
+    return RuntimeError(message)
+
+
+def _warn_deprecated_full_libri() -> None:
+    global _DEPRECATED_FULL_LIBRI_WARNED
+    if "SURE_DURATION_PROBE_FULL_LIBRI" not in os.environ or _DEPRECATED_FULL_LIBRI_WARNED:
+        return
+    _DEPRECATED_FULL_LIBRI_WARNED = True
+    _log(
+        "SURE_DURATION_PROBE_FULL_LIBRI is deprecated and ignored; "
+        "recipe profiles own recipe-specific train arguments"
+    )
 
 
 def _train_supported_options(python_bin: str, train_py: Path, recipe_dir: Path) -> frozenset[str]:
-    cache_key = (str(Path(python_bin)), str(train_py.resolve()))
+    try:
+        script_digest = hashlib.sha256(train_py.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise _duration_probe_contract_error(
+            "duration_probe_help_discovery_failed",
+            train_py,
+            error="script_read_failed",
+            exception_type=type(exc).__name__,
+            errno=exc.errno,
+        ) from exc
+    cache_key = (str(Path(python_bin)), str(train_py.resolve()), script_digest)
     cached = _TRAIN_HELP_OPTION_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -447,13 +565,67 @@ def _train_supported_options(python_bin: str, train_py: Path, recipe_dir: Path) 
             timeout=30,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        options = frozenset()
-    else:
-        options = frozenset(re.findall(r"(?<!\w)--[A-Za-z0-9][A-Za-z0-9-]*", result.stdout or ""))
+    except subprocess.TimeoutExpired as exc:
+        raise _duration_probe_contract_error(
+            "duration_probe_help_discovery_failed",
+            train_py,
+            error="timeout",
+            timeout_seconds=30,
+        ) from exc
+    except OSError as exc:
+        raise _duration_probe_contract_error(
+            "duration_probe_help_discovery_failed",
+            train_py,
+            error="launch_failed",
+            exception_type=type(exc).__name__,
+            errno=exc.errno,
+        ) from exc
+
+    if result.returncode != 0:
+        raise _duration_probe_contract_error(
+            "duration_probe_help_discovery_failed",
+            train_py,
+            error="nonzero_exit",
+            returncode=result.returncode,
+        )
+    options = frozenset(
+        re.findall(r"(?<!\w)--[A-Za-z0-9][A-Za-z0-9-]*", result.stdout or "")
+    )
+    if not options:
+        raise _duration_probe_contract_error(
+            "duration_probe_help_discovery_failed",
+            train_py,
+            error="no_long_options",
+        )
 
     _TRAIN_HELP_OPTION_CACHE[cache_key] = options
     return options
+
+
+def _argument_option_names(args: list[str]) -> frozenset[str]:
+    return frozenset(arg.split("=", 1)[0] for arg in args if arg.startswith("--") and len(arg) > 2)
+
+
+def _validate_probe_cli_contract(
+    supported_options: frozenset[str],
+    extra_args: list[str],
+    train_py: Path,
+) -> None:
+    missing_helper = sorted(_PROBE_REQUIRED_OPTIONS - supported_options)
+    if missing_helper:
+        raise _duration_probe_contract_error(
+            "duration_probe_helper_cli_incompatible",
+            train_py,
+            unsupported_options=missing_helper,
+        )
+
+    missing_candidate = sorted(_argument_option_names(extra_args) - supported_options)
+    if missing_candidate:
+        raise _duration_probe_contract_error(
+            "duration_probe_candidate_cli_incompatible",
+            train_py,
+            unsupported_options=missing_candidate,
+        )
 
 
 def _append_supported_option(
@@ -488,7 +660,6 @@ def _probe_duration(
     manifest_dir = os.environ.get("SURE_DURATION_MANIFEST_DIR", "data/fbank")
     bpe_model = os.environ.get("SURE_DURATION_BPE_MODEL", "data/lang_bpe_500/bpe.model")
     enable_musan = os.environ.get("SURE_ENABLE_MUSAN", "0")
-    full_libri = os.environ.get("SURE_DURATION_PROBE_FULL_LIBRI", "0")
     print_diagnostics = "true" if _truthy(os.environ.get("SURE_DURATION_PRINT_DIAGNOSTICS")) else "false"
     success_batch_count = _nonnegative_int_env("SURE_DURATION_PROBE_SUCCESS_BATCHES", 2)
     log_interval = _positive_int_env("SURE_DURATION_PROBE_LOG_INTERVAL", 1)
@@ -496,7 +667,9 @@ def _probe_duration(
     gpu_memory_mb = visible_gpu_memory_mb() if headroom_mb > 0 else []
     extra_args = _strip_probe_controlled_args(extra_train_args or [])
     master_port = 15000 + ((os.getpid() + duration) % 20000)
+    _warn_deprecated_full_libri()
     supported_options = _train_supported_options(python_bin, train_py, recipe_dir)
+    _validate_probe_cli_contract(supported_options, extra_args, train_py)
     command = [
         python_bin,
         str(train_py),
@@ -510,16 +683,12 @@ def _probe_duration(
         "1",
         "--tensorboard",
         "false",
-        "--full-libri",
-        str(full_libri),
         "--use-fp16",
         "1" if use_fp16 else "0",
         "--exp-dir",
         str(exp_dir),
         "--max-duration",
         str(duration),
-        "--print-diagnostics",
-        print_diagnostics,
         "--enable-musan",
         str(enable_musan),
         "--manifest-dir",
@@ -527,6 +696,12 @@ def _probe_duration(
         "--bpe-model",
         str(bpe_model),
     ]
+    _append_supported_option(
+        command,
+        supported_options,
+        "--print-diagnostics",
+        print_diagnostics,
+    )
     _append_supported_option(command, supported_options, "--log-interval", str(log_interval))
     command.extend(extra_args)
     _log(f"probing max-duration={duration}, world_size={world_size}, log={log_path}")

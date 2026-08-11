@@ -218,6 +218,39 @@ Analyzer 会比较激进地把单次运行中有效或重要的经验提炼成 a
 
 因为 overlay config 生成在 `runs/` 下，原始 config 不会被修改。
 
+## 轻量级 Cross-Run 经验
+
+Cross-run 经验是一个默认关闭、仅供 LLM analyzer 参考的微小辅助信号。它跨独立的顶层 evolution run 累积紧凑证据，只提供经过重复支持的记录；不会修改 baseline 任务、任务 agent 的 prompt、skill、工具权限或现有策略顺序。
+
+在原始 YAML config 中开启：
+
+```yaml
+evolution:
+  experience:
+    enabled: true
+    snapshot_path: ".evomaster/evolution_experience.v1.json"
+    min_recurring_runs: 2
+    min_stable_runs: 3
+    min_directional_runs: 2
+    stable_ratio: 0.67
+    merge_similarity: 0.72
+    max_records: 200
+    max_events_per_record: 12
+    max_hints: 4
+    max_hint_chars: 4000
+    score_higher_is_better: null
+```
+
+默认情况下，同一经验出现在两个独立顶层 run 后变为 recurring；至少出现于三个独立 run、具有两个方向性结果，并且某一方向的支持率达到 67% 后才稳定。一次 evolution 调用内部的多轮 iteration 只算一个 run，避免短循环自我验证。只有 `EvolutionOverlay` 确认实际应用的 skill 和 prompt patch 才能获得结果证据；tool proposal 因未执行而排除。
+
+稳定 hint 只在 evolution 启动时读取一次，并作为弱、非权威证据追加到 analyzer 原有的同一次 LLM 请求。当前 trace 始终是主要证据；启发式 fallback 不使用历史 hint；不会增加 LLM 调用或 agent 运行。当前 run 写入的经验最早在下一个独立 run 才可见。
+
+系统使用有容量上限、带版本号的 JSON snapshot，并通过 sidecar 文件锁和原子替换写入。相对 `snapshot_path` 从项目根目录解析。在没有 evolution 进程使用文件时，删除 snapshot 及其 `.lock` sidecar 即可重置。损坏或未知版本的 snapshot 会 fail-open，且不会被空数据覆盖。
+
+只有明确配置 `score_higher_is_better` 后，score 变化才参与方向判断。方向未知时保持 `null`；WER 等越低越好的指标应设置为 `false`。
+
+该功能不会发布永久 skill、启动主动验证任务、生成可执行脚本，也不集成 paper library。未来 paper evidence 可以复用同一个通用 advisory 接口及其上下文预算。
+
 ## 推荐工作流
 
 1. 如果是新 agent 或新 config，先不用 `--evolve` 跑通一次普通命令。

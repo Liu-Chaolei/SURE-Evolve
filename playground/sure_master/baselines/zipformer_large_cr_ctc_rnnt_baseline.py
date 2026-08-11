@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import fcntl
 import hashlib
 import json
 import os
@@ -10,8 +11,11 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from playground.sure_master.baselines.asr_profiles import (
     AsrDatasetProfile,
@@ -422,6 +426,174 @@ def parse_max_memory_mb(log_path: Path) -> int | None:
     if not matches:
         return None
     return int(float(matches[-1]))
+
+
+def _file_fingerprint(path: Path) -> dict[str, object]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"path": str(path.resolve()), "missing": True}
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "path": str(path.resolve()),
+        "size": stat.st_size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _gpu_signature() -> dict[str, object]:
+    try:
+        with tempfile.TemporaryFile(mode="w+") as output:
+            subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=name,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+                stdout=output,
+                stderr=output,
+                timeout=5,
+                check=False,
+            )
+            output.seek(0)
+            gpu_output = output.read()
+    except (OSError, subprocess.TimeoutExpired):
+        rows: list[str] = []
+    else:
+        rows = sorted(line.strip() for line in gpu_output.splitlines() if line.strip())
+    return {"visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""), "gpus": rows}
+
+
+def decode_workload_signature(
+    *,
+    epoch: int,
+    decode_method: str,
+    decode_args: list[str],
+    bpe_model: Path,
+    exp_dir: Path,
+    avg: int,
+    use_averaged_model: str,
+) -> tuple[str, dict[str, object]]:
+    profile = dataset_profile()
+    manifest_root = Path(os.environ.get("SURE_DECODE_MANIFEST_DIR", "data/fbank"))
+    manifests = [manifest_root / profile.manifest_patterns[split] for split in parse_eval_splits()]
+    payload: dict[str, object] = {
+        "schema": 1,
+        "dataset": profile.name,
+        "recipe_profile": recipe_profile().name,
+        "recipe": recipe_profile().recipe_family,
+        "splits": parse_eval_splits(),
+        "manifests": [_file_fingerprint(path) for path in manifests],
+        "checkpoints": [_file_fingerprint(path) for path in required_decode_checkpoints(epoch)],
+        "bpe": _file_fingerprint(bpe_model),
+        "epoch": epoch,
+        "avg": avg,
+        "use_averaged_model": use_averaged_model,
+        "decode_method": decode_method,
+        "decode_args": decode_args,
+        "structure": {
+            name: decode_args[index + 1] if index + 1 < len(decode_args) else ""
+            for index, name in enumerate(decode_args)
+            if name in {"--num-encoder-layers", "--encoder-dim", "--feedforward-dim", "--encoder-unmasked-dim"}
+        },
+        "precision": os.environ.get("SURE_DECODE_PRECISION", os.environ.get("SURE_USE_FP16", "1")),
+        "gpu": _gpu_signature(),
+        "world_size": world_size(),
+        "reserve_mb": max(0, int_env("SURE_DECODE_DURATION_RESERVE_MB", 0)),
+        "exp_dir": str(exp_dir.resolve()),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest(), payload
+
+
+@dataclass(frozen=True)
+class DecodeDurationEvidence:
+    duration: int
+    peak_memory_mb: int | None
+    gpu_memory_mb: int | None
+
+    def has_headroom(self, reserve_mb: int) -> bool:
+        if reserve_mb <= 0:
+            return True
+        return (
+            self.peak_memory_mb is not None
+            and self.gpu_memory_mb is not None
+            and self.gpu_memory_mb - self.peak_memory_mb >= reserve_mb
+        )
+
+
+def _decode_duration_bounds(default: int) -> tuple[int, int, int, int]:
+    lower = max(1, int_env("SURE_DECODE_DURATION_MIN", min(50, default)))
+    upper = max(1, int_env("SURE_DECODE_DURATION_MAX", max(default, lower)))
+    if lower > upper:
+        lower, upper = upper, lower
+    step = max(1, int_env("SURE_DECODE_DURATION_STEP", 50))
+    safety_steps = max(0, int_env("SURE_DECODE_DURATION_SAFETY_STEPS", 1))
+    return lower, upper, step, safety_steps
+
+
+def _read_safe_decode_cache(path: Path, signature: str) -> int | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        duration = int(data["duration"])
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+    if data.get("signature") != signature or not data.get("demonstrated_safe") or duration <= 0:
+        return None
+    return duration
+
+
+def select_decode_max_duration(
+    *,
+    signature: str,
+    signature_payload: dict[str, object],
+    default: int,
+    probe: Callable[[int, Path], DecodeDurationEvidence | None],
+) -> int:
+    """Select only an exact-workload duration demonstrated safe by a bounded probe."""
+    lower, upper, step, safety_steps = _decode_duration_bounds(default)
+    cache_dir = Path(os.environ.get("SURE_DECODE_DURATION_CACHE_DIR", ".sure_runtime/decode_duration"))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{signature}.json"
+    lock_path = cache_dir / f"{signature}.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        cached = _read_safe_decode_cache(cache_path, signature)
+        if cached is not None and lower <= cached <= upper:
+            return cached
+
+        values = list(range(lower, upper + 1, step))
+        if values[-1] != upper:
+            values.append(upper)
+        safe: list[DecodeDurationEvidence] = []
+        reserve_mb = max(0, int_env("SURE_DECODE_DURATION_RESERVE_MB", 0))
+        probe_root = cache_dir / "probes" / signature
+        for duration in values:
+            evidence = probe(duration, probe_root / f"duration_{duration}")
+            if evidence is None or not evidence.has_headroom(reserve_mb):
+                break
+            safe.append(evidence)
+
+        if not safe:
+            raise RuntimeError("No decode max-duration was demonstrated safe within configured bounds")
+        selected_index = max(0, len(safe) - 1 - safety_steps)
+        selected = safe[selected_index]
+        payload = {
+            "signature": signature,
+            "duration": selected.duration,
+            "demonstrated_safe": True,
+            "evidence": selected.__dict__,
+            "workload": signature_payload,
+            "timestamp": time.time(),
+        }
+        tmp = cache_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(cache_path)
+        return selected.duration
 
 
 def write_resource_profile(
@@ -987,10 +1159,161 @@ def train_if_needed() -> int:
     raise RuntimeError("No Zipformer training attempt was executed")
 
 
-def build_decode_command(epoch: int, decode_script: Path) -> list[str]:
+def _replace_cli_value(command: list[str], option: str, value: str) -> list[str]:
+    result = list(command)
+    for index, item in enumerate(result):
+        if item == option and index + 1 < len(result):
+            result[index + 1] = value
+            return result
+        if item.startswith(option + "="):
+            result[index] = f"{option}={value}"
+            return result
+    result.extend([option, value])
+    return result
+
+
+def _decode_artifact_paths(exp_dir: Path) -> list[Path]:
+    patterns = ("recogs-*.txt", "errs-*.txt", "wer-summary-*.txt", "*.log.txt")
+    paths = [path for pattern in patterns for path in exp_dir.rglob(pattern)]
+    return sorted(set(paths))
+
+
+def invalidate_decode_artifacts(exp_dir: Path, *, include_candidate_record: bool = False) -> None:
+    """Remove only decode products; checkpoints and unrelated outputs survive."""
+    for path in _decode_artifact_paths(exp_dir):
+        path.unlink(missing_ok=True)
+    (ARTIFACTS_DIR / "hyp.txt").unlink(missing_ok=True)
+    if include_candidate_record:
+        (ARTIFACTS_DIR / "candidate_changes.json").unlink(missing_ok=True)
+
+
+def cleanup_decode_attempt(exp_dir: Path, before: set[Path]) -> None:
+    """Clean artifacts created by this attempt, never pre-existing unrelated files."""
+    for path in _decode_artifact_paths(exp_dir):
+        if path not in before:
+            path.unlink(missing_ok=True)
+
+
+def _gpu_total_memory_mb() -> int | None:
+    rows = _gpu_signature()["gpus"]
+    values: list[int] = []
+    for row in rows if isinstance(rows, list) else []:
+        match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*$", str(row))
+        if match:
+            values.append(int(float(match.group(1))))
+    return min(values) if values else None
+
+
+def _probe_decode_command(command: list[str], duration: int, probe_dir: Path) -> DecodeDurationEvidence | None:
+    shutil.rmtree(probe_dir, ignore_errors=True)
+    probe_exp = probe_dir / "exp"
+    probe_exp.mkdir(parents=True)
+    source_exp = Path(command[command.index("--exp-dir") + 1])
+    for checkpoint in source_exp.glob("*.pt"):
+        target = probe_exp / checkpoint.name
+        try:
+            target.symlink_to(checkpoint.resolve())
+        except OSError:
+            shutil.copy2(checkpoint, target)
+    probe_command = _replace_cli_value(command, "--exp-dir", str(probe_exp))
+    probe_command = _replace_cli_value(probe_command, "--max-duration", str(duration))
+    log_path = probe_dir / "decode.log"
+    timeout = int_env("SURE_DECODE_DURATION_PROBE_TIMEOUT", 21600)
+    rendered = " ".join(shlex.quote(part) for part in probe_command)
+    with log_path.open("w", encoding="utf-8") as output:
+        output.write(f"$ {rendered}\n")
+        result = subprocess.run(
+            probe_command,
+            cwd=str(WORKSPACE),
+            env=command_env(),
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=False,
+        )
+    if result.returncode:
+        if is_oom_failure(log_path):
+            return None
+        raise CommandFailedError("decode_duration_probe", result.returncode, log_path)
+    return DecodeDurationEvidence(duration, parse_max_memory_mb(log_path), _gpu_total_memory_mb())
+
+
+def resolve_decode_max_duration(
+    *,
+    command: list[str],
+    epoch: int,
+    decode_method: str,
+    decode_args: list[str],
+    bpe_model: Path,
+    exp_dir: Path,
+    avg: int,
+    use_averaged_model: str,
+    default: int,
+) -> int:
+    signature, payload = decode_workload_signature(
+        epoch=epoch,
+        decode_method=decode_method,
+        decode_args=decode_args,
+        bpe_model=bpe_model,
+        exp_dir=exp_dir,
+        avg=avg,
+        use_averaged_model=use_averaged_model,
+    )
+    return select_decode_max_duration(
+        signature=signature,
+        signature_payload=payload,
+        default=default,
+        probe=lambda duration, probe_dir: _probe_decode_command(command, duration, probe_dir),
+    )
+
+
+def run_decode_with_selector(
+    *,
+    command: list[str],
+    epoch: int,
+    decode_method: str,
+    decode_args: list[str],
+    bpe_model: Path,
+    exp_dir: Path,
+    avg: int,
+    use_averaged_model: str,
+    default: int,
+    timeout: int,
+    include_candidate_record: bool = False,
+) -> int:
+    invalidate_decode_artifacts(exp_dir, include_candidate_record=include_candidate_record)
+    selected = resolve_decode_max_duration(
+        command=command,
+        epoch=epoch,
+        decode_method=decode_method,
+        decode_args=decode_args,
+        bpe_model=bpe_model,
+        exp_dir=exp_dir,
+        avg=avg,
+        use_averaged_model=use_averaged_model,
+        default=default,
+    )
+    lower, _, step, _ = _decode_duration_bounds(default)
+    durations = list(range(selected, lower - 1, -step))
+    if durations[-1] != lower:
+        durations.append(lower)
+    for index, duration in enumerate(durations, start=1):
+        attempt_command = _replace_cli_value(command, "--max-duration", str(duration))
+        before = set(_decode_artifact_paths(exp_dir))
+        try:
+            run_command(f"decode_attempt_{index}", attempt_command, timeout=timeout)
+            return duration
+        except (CommandFailedError, CommandTimedOutError) as exc:
+            cleanup_decode_attempt(exp_dir, before)
+            if not is_oom_failure(exc.log_path) or index == len(durations):
+                raise
+    raise RuntimeError("No decode attempt was executed")
+
+
+def build_decode_command(epoch: int, decode_script: Path, decode_max_duration: int | None = None) -> list[str]:
     avg = decode_avg(epoch)
     use_averaged_model = "1" if decode_uses_averaged_model(epoch) else "0"
-    decode_max_duration = int_env(
+    decode_max_duration = decode_max_duration or int_env(
         "SURE_BASELINE_DECODE_MAX_DURATION",
         BASELINE_DECODE_MAX_DURATION,
     )
@@ -1019,9 +1342,22 @@ def decode(epoch: int) -> None:
     eval_splits = parse_eval_splits()
     validate_decode_checkpoints(epoch)
     validate_decode_bpe_model()
-    command = build_decode_command(epoch, patched_decode_script())
+    decode_script = patched_decode_script()
+    default = int_env("SURE_BASELINE_DECODE_MAX_DURATION", BASELINE_DECODE_MAX_DURATION)
+    command = build_decode_command(epoch, decode_script, default)
     print(f"[baseline] decoding eval splits: {', '.join(eval_splits)}", flush=True)
-    run_command("decode", command, timeout=int_env("SURE_BASELINE_DECODE_TIMEOUT", 21600))
+    run_decode_with_selector(
+        command=command,
+        epoch=epoch,
+        decode_method="modified_beam_search",
+        decode_args=large_cr_ctc_rnnt_decode_args(),
+        bpe_model=decode_bpe_model_path(),
+        exp_dir=MODELS_DIR,
+        avg=decode_avg(epoch),
+        use_averaged_model="1" if decode_uses_averaged_model(epoch) else "0",
+        default=default,
+        timeout=int_env("SURE_BASELINE_DECODE_TIMEOUT", 21600),
+    )
 
 
 def parse_hyp_value(value: str) -> str:

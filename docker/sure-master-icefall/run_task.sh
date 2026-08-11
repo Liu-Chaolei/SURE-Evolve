@@ -1,10 +1,10 @@
 #!/bin/bash
 set -eo pipefail
 
-REPO_DIR="${SURE_MASTER_REPO_DIR:-/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster}"
+REPO_DIR="${SURE_MASTER_REPO_DIR:-/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve}"
 LOG_DIR="${SURE_MASTER_LOG_DIR:-/hpc_stor03/sjtu_home/chaolei.liu/log}"
 PYTHON_BIN="${SURE_MASTER_PYTHON:-/opt/conda/envs/evomaster/bin/python}"
-CONFIG_PATH="${SURE_MASTER_CONFIG:-configs/sure_master/gpt-5-docker.yaml}"
+CONFIG_PATH="${SURE_MASTER_CONFIG:-configs/sure_master/gpt-5-icefall-staged-axes-mixed.yaml}"
 TASK_PATH="${SURE_MASTER_TASK:-playground/sure_master/data/asr_en_wer_zipformer_description.md}"
 RUN_DIR="${SURE_MASTER_RUN_DIR:-}"
 RUN_NAME="${SURE_MASTER_RUN_NAME:-}"

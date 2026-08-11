@@ -218,6 +218,39 @@ The evolved overlay config contains:
 
 Because the overlay config is generated under `runs/`, your original config remains unchanged.
 
+## Lightweight Cross-Run Experience
+
+Cross-run experience is an optional, disabled-by-default auxiliary signal for the LLM analyzer. It accumulates compact evidence across independent top-level evolution runs and exposes only repeatedly supported records. It does not change the baseline task, task-agent prompts, skills, tool permissions, or strategy ordering.
+
+Enable it in the original YAML config:
+
+```yaml
+evolution:
+  experience:
+    enabled: true
+    snapshot_path: ".evomaster/evolution_experience.v1.json"
+    min_recurring_runs: 2
+    min_stable_runs: 3
+    min_directional_runs: 2
+    stable_ratio: 0.67
+    merge_similarity: 0.72
+    max_records: 200
+    max_events_per_record: 12
+    max_hints: 4
+    max_hint_chars: 4000
+    score_higher_is_better: null
+```
+
+A record is recurring after it appears in two distinct top-level runs. By default, it becomes stable only after three distinct runs, at least two directional outcomes, and 67% support for one direction. Iterations within one evolution invocation count as one run, preventing a short loop from validating its own output. Only skills and prompt patches confirmed in `EvolutionOverlay` receive outcome evidence; tool proposals are excluded because they are not executed.
+
+Stable hints are loaded once at evolution startup and appended as weak, non-authoritative evidence to the analyzer's existing LLM request. The current trace remains primary, heuristic fallback ignores hints, and there is no additional LLM call or agent execution. Hints written during a run are first eligible in a later independent run.
+
+The versioned JSON snapshot is bounded and written atomically under a sidecar file lock. Relative `snapshot_path` values resolve from the project root. Deleting the snapshot and its `.lock` sidecar resets experience when no evolution process is using them. Corrupt or unsupported snapshots fail open and are not overwritten.
+
+`score_higher_is_better` must be set explicitly before score changes contribute evidence. Leave it `null` when direction is unknown; for lower-is-better metrics such as WER, set it to `false`.
+
+This feature does not publish permanent skills, run active validation jobs, generate executable scripts, or integrate the paper library. The generic bounded advisory interface can later share its context budget with paper evidence.
+
 ## Practical Workflow
 
 1. Run a baseline command without `--evolve` first if the agent or config is new.

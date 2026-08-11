@@ -1,6 +1,6 @@
-# SURE Master staged-axes mixed local/VC configuration for F5-TTS.
-# Coordinator: local 4x2080 for inference-level candidates.
-# Fine-tune/arch candidates: up to four synchronous VC child jobs, 8 GPUs per candidate.
+# SURE Master staged-axes all-remote VC configuration for F5-TTS.
+# Coordinator: CPU-only; draft and all candidate classes execute in VC child jobs.
+# Inference: 1 GPU per job. Fine-tune/arch/draft-training: 8 GPUs per job.
 
 sure:
   root: "/hpc_stor03/sjtu_home/chaolei.liu/sure"
@@ -10,16 +10,11 @@ sure:
   device: "cuda"
   metric_gpu:
     enabled: true
-    devices: "idle"
+    # Metric scoring runs inside the VC child and must reuse its scheduler allocation.
+    devices: "same"
     gpus_per_metric: 1
-    min_free_mib: 9500
-    max_utilization: 20
-    wait_timeout_sec: 900
-    poll_interval_sec: 10
-    oom_retry: true
-    max_retries: 4
+    oom_retry: false
     cleanup_before_score: true
-    lock_dir: "/tmp/sure_master_metric_gpu_locks"
   cache_dir: "/hpc_stor03/sjtu_home/chaolei.liu/.cache/sure-eval/tts-metrics"
   validate_env: false
   require_base_model: true
@@ -45,17 +40,17 @@ sure:
     runner_up_count: 5
     draft:
       base_model_source_paths:
-        eval_data: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/f5tts_staged/smoke"
+        eval_data: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/data/f5tts_staged/smoke"
       execution_env:
         SURE_TTS_MAX_SAMPLES: "20"
     search:
       base_model_source_paths:
-        eval_data: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/f5tts_staged/regular_search"
+        eval_data: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/data/f5tts_staged/regular_search"
       execution_env:
         SURE_TTS_MAX_SAMPLES: "800"
     combination:
       base_model_source_paths:
-        eval_data: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/f5tts_staged/regular_search"
+        eval_data: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/data/f5tts_staged/regular_search"
       execution_env:
         SURE_TTS_MAX_SAMPLES: "800"
         SURE_TTS_ARCH_INIT_MODE: "partial_load"
@@ -63,7 +58,7 @@ sure:
         SURE_TTS_TRAIN_MAX_STEPS: "5000"
     selection:
       base_model_source_paths:
-        eval_data: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/f5tts_staged/selection"
+        eval_data: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/data/f5tts_staged/selection"
       execution_env:
         SURE_TTS_MAX_SAMPLES: "500"
         SURE_TTS_ARCH_INIT_MODE: "partial_load"
@@ -72,7 +67,7 @@ sure:
     holdout:
       enabled: true
       base_model_source_paths:
-        eval_data: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/f5tts_staged/holdout"
+        eval_data: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/data/f5tts_staged/holdout"
       execution_env:
         SURE_TTS_MAX_SAMPLES: "1000"
         SURE_TTS_ARCH_INIT_MODE: "partial_load"
@@ -109,10 +104,15 @@ sure:
     max_inference_per_round: 4
     max_fine_tune_per_round: 2
     max_arch_per_round: 2
+  coordinator:
+    local_gpu_policy: disabled
   remote_training:
     enabled: true
+    draft_enabled: true
     candidate_types:
-      - "training"
+      - inference
+      - fine_tune
+      - arch
     image: "docker.v2.aispeech.com/sjtu/sjtu_yukai-chaolei-suremaster_f5tts:v1.3"
     partition: "pdgpu-a10"
     partitions: "pdgpu-3090,pdgpu-4090,pdgpu-a10"
@@ -120,15 +120,22 @@ sure:
     partition_fallback: "queue_first"
     qos: ""
     nopassenv: true
-    num_task: 1
-    gpu_per_task: 8
-    cpu_per_task: 64
-    mem_per_task: "256G"
+    resource_profiles:
+      inference:
+        num_task: 1
+        gpu_per_task: 1
+        cpu_per_task: 8
+        mem_per_task: 32G
+      training:
+        num_task: 1
+        gpu_per_task: 8
+        cpu_per_task: 64
+        mem_per_task: 256G
     volumes:
       - "/hpc_stor03/sjtu_home/chaolei.liu:/hpc_stor03/sjtu_home/chaolei.liu"
       - "/hpc_stor03/public/shared/data:/hpc_stor03/public/shared/data"
-    workdir: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster"
-    env_file: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/.env"
+    workdir: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve"
+    env_file: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/.env"
     python: "/opt/conda/envs/evomaster/bin/python"
     runner: "playground/sure_master/tools/run_vc_sure_candidate.py"
     job_prefix: "sure-f5tts-staged"
@@ -153,9 +160,9 @@ sure:
     SURE_TTS_REMOVE_SILENCE: "0"
     SURE_TTS_INFER_WORKERS: "auto"
     SURE_TTS_ENABLE_TRAINING: "1"
-    SURE_TTS_BATCH_INFER_WRAPPER: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_f5tts_batch_infer.py"
-    SURE_TTS_FINETUNE_WRAPPER: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_f5tts_finetune.py"
-    SURE_TTS_ARCH_WRAPPER: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_f5tts_arch_finetune.py"
+    SURE_TTS_BATCH_INFER_WRAPPER: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/tools/run_f5tts_batch_infer.py"
+    SURE_TTS_FINETUNE_WRAPPER: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/tools/run_f5tts_finetune.py"
+    SURE_TTS_ARCH_WRAPPER: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/tools/run_f5tts_arch_finetune.py"
     SURE_TTS_ARCH_ENABLE: "1"
     SURE_TTS_ARCH_OUTPUT: "models/f5tts_arch"
     SURE_TTS_ARCH_WORKDIR: "working/f5tts_arch"
@@ -205,14 +212,14 @@ sure:
         train_data: "base_model/train_data"
       source_paths:
         root: "/hpc_stor03/sjtu_home/chaolei.liu/TTS/F5-TTS"
-        eval_data: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/f5tts_staged/regular_search"
-        train_data: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/data/f5tts_train_manifests"
+        eval_data: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/data/f5tts_staged/regular_search"
+        train_data: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/data/f5tts_train_manifests"
       entrypoints:
         infer: "base_model/root/src/f5_tts/infer/infer_cli.py"
-        batch_infer_wrapper: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_f5tts_batch_infer.py"
+        batch_infer_wrapper: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/tools/run_f5tts_batch_infer.py"
         train: "base_model/root/src/f5_tts/train/train.py"
-        finetune_wrapper: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_f5tts_finetune.py"
-        arch_wrapper: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/EvoMaster/playground/sure_master/tools/run_f5tts_arch_finetune.py"
+        finetune_wrapper: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/tools/run_f5tts_finetune.py"
+        arch_wrapper: "/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve/playground/sure_master/tools/run_f5tts_arch_finetune.py"
       python: "/opt/conda/envs/f5tts/bin/python"
       prompt_guidance: "Use workspace-local F5-TTS through base_model/root, fixed evaluation prompts in base_model/eval_data/prompts.jsonl, batch inference only through SURE_TTS_BATCH_INFER_WRAPPER, controlled fine-tuning only through SURE_TTS_FINETUNE_WRAPPER, and controlled architecture changes only through SURE_TTS_ARCH_WRAPPER."
 
@@ -340,7 +347,7 @@ session:
   local:
     working_dir: "./playground/sure_master/workspace_f5tts_staged_axes_mixed"
     timeout: 86400
-    gpu_devices: idle
+    gpu_devices: null
     idle_gpu_min_free_mib: 9000
     idle_gpu_max_utilization: 20
     cpu_devices: null

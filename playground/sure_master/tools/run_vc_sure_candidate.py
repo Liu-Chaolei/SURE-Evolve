@@ -162,6 +162,104 @@ def sanitize_remote_execution_env(env: dict[str, Any]) -> dict[str, str]:
     return sanitized
 
 
+def scheduler_gpu_allocation(env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Return scheduler-provided exact visibility or an isolated task GPU count."""
+    values = os.environ if env is None else env
+    disabled = {"", "-1", "none", "nodevfiles", "void"}
+    source = "CUDA_VISIBLE_DEVICES"
+    visible = str(values.get(source, "")).strip()
+    devices = (
+        []
+        if visible.lower() in disabled
+        else [item.strip() for item in visible.split(",") if item.strip()]
+    )
+    gpu_count = len(devices)
+    visibility_kind = "exact" if devices else "missing"
+
+    if not devices:
+        nvidia_visible = str(values.get("NVIDIA_VISIBLE_DEVICES", "")).strip()
+        if nvidia_visible.lower() not in disabled and nvidia_visible.lower() != "all":
+            source = "NVIDIA_VISIBLE_DEVICES"
+            visible = nvidia_visible
+            devices = [
+                item.strip() for item in visible.split(",") if item.strip()
+            ]
+            gpu_count = len(devices)
+            visibility_kind = "exact"
+
+    if not devices:
+        for count_key in ("GPU_PER_TASK", "GPU_NUM"):
+            try:
+                candidate_count = int(str(values.get(count_key, "0")).strip() or "0")
+            except ValueError:
+                candidate_count = 0
+            if candidate_count > 0:
+                source = count_key
+                visible = ""
+                gpu_count = candidate_count
+                visibility_kind = "task_count"
+                break
+
+    requested: dict[str, Any] = {}
+    try:
+        raw_requested = values.get("SURE_VC_REQUESTED_RESOURCES", "")
+        parsed = json.loads(raw_requested) if raw_requested else {}
+        if isinstance(parsed, dict):
+            requested = parsed
+    except (TypeError, json.JSONDecodeError):
+        pass
+    return {
+        "allocation_source": source,
+        "visibility_kind": visibility_kind,
+        "cuda_visible_devices": str(values.get("CUDA_VISIBLE_DEVICES", "")).strip(),
+        "nvidia_visible_devices": str(values.get("NVIDIA_VISIBLE_DEVICES", "")).strip(),
+        "effective_visible_devices": visible,
+        "gpu_devices": devices,
+        "gpu_count": gpu_count,
+        "resource_profile": str(values.get("SURE_VC_RESOURCE_PROFILE", "legacy")),
+        "requested_resources": requested,
+    }
+
+
+def apply_scheduler_allocation(
+    execution_env: dict[str, str],
+    *,
+    asr_workload: bool = True,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Apply scheduler authority and ASR-only world-size variables."""
+    allocation = scheduler_gpu_allocation(env)
+    effective = str(allocation.get("effective_visible_devices") or "")
+    if allocation.get("visibility_kind") == "task_count":
+        execution_env.pop("CUDA_VISIBLE_DEVICES", None)
+    elif effective:
+        execution_env["CUDA_VISIBLE_DEVICES"] = effective
+
+    gpu_count = int(allocation["gpu_count"])
+    if asr_workload and gpu_count > 0:
+        world_size = str(gpu_count)
+        execution_env["ASR_WORLD_SIZE"] = world_size
+        execution_env["SURE_BASELINE_WORLD_SIZE"] = world_size
+    else:
+        execution_env.pop("ASR_WORLD_SIZE", None)
+        execution_env.pop("SURE_BASELINE_WORLD_SIZE", None)
+    return allocation
+
+
+def normalize_process_gpu_environment(
+    allocation: dict[str, Any],
+    env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Preserve exact masks, or remove a stale blank mask for count-only VC jobs."""
+    normalized = dict(os.environ if env is None else env)
+    effective = str(allocation.get("effective_visible_devices") or "")
+    if allocation.get("visibility_kind") == "task_count":
+        normalized.pop("CUDA_VISIBLE_DEVICES", None)
+    elif effective:
+        normalized["CUDA_VISIBLE_DEVICES"] = effective
+    return normalized
+
+
 def make_exp(
     *,
     config,
@@ -278,6 +376,7 @@ def run_logged(
     cwd: Path,
     timeout: int | None,
     log_path: Path,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     wait_timeout = None if timeout is not None and timeout <= 0 else timeout
@@ -292,6 +391,7 @@ def run_logged(
             stderr=subprocess.STDOUT,
             text=True,
             start_new_session=True,
+            env=env,
         )
         try:
             exit_code = proc.wait(timeout=wait_timeout)
@@ -356,6 +456,27 @@ def is_bpe_validation_failure(terminal_output: str) -> bool:
     )
 
 
+def _duration_contract_marker(terminal_output: str) -> tuple[str, dict[str, Any]] | None:
+    marker_names = (
+        "duration_probe_help_discovery_failed",
+        "duration_probe_helper_cli_incompatible",
+        "duration_probe_candidate_cli_incompatible",
+    )
+    for line in reversed(str(terminal_output or "").splitlines()):
+        for marker in marker_names:
+            marker_prefix = f"{marker}:"
+            marker_index = line.find(marker_prefix)
+            if marker_index < 0:
+                continue
+            raw_details = line[marker_index + len(marker_prefix) :].strip()
+            try:
+                parsed = json.loads(raw_details)
+            except json.JSONDecodeError:
+                parsed = {}
+            return marker, parsed if isinstance(parsed, dict) else {}
+    return None
+
+
 def execution_failure_reason_code(
     terminal_output: str,
     execution_info: dict[str, Any] | None = None,
@@ -365,6 +486,9 @@ def execution_failure_reason_code(
     lowered = str(terminal_output or "").lower()
     if is_bpe_validation_failure(lowered):
         return "candidate_bpe_validation_failed"
+    contract_marker = _duration_contract_marker(terminal_output)
+    if contract_marker is not None:
+        return contract_marker[0]
     is_duration_failure = "duration_autotune" in lowered or "resolve-max-duration" in lowered
     if is_duration_failure and (
         "cuda out of memory" in lowered or "torch.cuda.outofmemoryerror" in lowered
@@ -399,6 +523,9 @@ def execution_failure_details(
         details["fatal_error"] = "candidate_execution_timeout"
     elif is_bpe_validation_failure(lowered):
         details["fatal_error"] = "candidate_bpe_validation_failed"
+    elif (contract_marker := _duration_contract_marker(terminal_output)) is not None:
+        details.update(contract_marker[1])
+        details["fatal_error"] = contract_marker[0]
     elif "duration_autotune" in lowered or "resolve-max-duration" in lowered:
         if "cuda out of memory" in lowered or "torch.cuda.outofmemoryerror" in lowered:
             details["fatal_error"] = "duration_probe_oom"
@@ -561,6 +688,21 @@ def main() -> None:
         context_env = remote_context.get("execution_env")
         if isinstance(context_env, dict):
             execution_env.update(sanitize_remote_execution_env(context_env))
+        scheduler_allocation = apply_scheduler_allocation(
+            execution_env,
+            asr_workload=str(getattr(task_card, "canonical_task", "")).lower() == "asr",
+        )
+        if scheduler_allocation["gpu_count"] <= 0:
+            write_failure_and_exit(
+                reason_code="scheduler_gpu_allocation_missing",
+                error="VC child job has no scheduler-visible GPU allocation",
+                details={"scheduler_allocation": scheduler_allocation},
+                exit_code=2,
+                candidate_type=context_value("candidate_type_hint"),
+            )
+        process_env = normalize_process_gpu_environment(scheduler_allocation)
+        os.environ.clear()
+        os.environ.update(process_env)
         context_roles = remote_context.get("role_paths")
         if isinstance(context_roles, dict):
             role_paths.update(
@@ -649,7 +791,14 @@ def main() -> None:
 
         command = exp._execution_command()
         exp._candidate_started_at = time.time()
-        execution_info = run_logged(command, cwd=workspace, timeout=args.timeout, log_path=run_log)
+        execution_info = run_logged(
+            command,
+            cwd=workspace,
+            timeout=args.timeout,
+            log_path=run_log,
+            env=process_env,
+        )
+        execution_info["scheduler_allocation"] = scheduler_allocation
         terminal_output = read_tail(run_log)
         if execution_info["exit_code"] != 0:
             reason_code = execution_failure_reason_code(

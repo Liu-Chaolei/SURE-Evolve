@@ -343,6 +343,10 @@ def validate_candidate_args(
     bad_decode = sorted(decode_names.intersection(TRAIN_ONLY_ARGS))
     if bad_decode:
         raise ValueError("decode.py must not receive training-only args: " + ", ".join(bad_decode))
+    if "--max-duration" in decode_names:
+        raise ValueError(
+            "candidate decode args cannot set --max-duration; the exact-workload selector owns it"
+        )
 
 
 def configure_baseline_paths(exp_dir: Path, working_dir: Path) -> None:
@@ -771,10 +775,18 @@ def main() -> int:
         + ", ".join(baseline.parse_eval_splits()),
         flush=True,
     )
-    baseline.run_command(
-        "decode",
-        decode_cmd,
+    baseline.run_decode_with_selector(
+        command=decode_cmd,
+        epoch=epoch,
+        decode_method=args.decode_method,
+        decode_args=final_decode_command_args,
+        bpe_model=decode_bpe_model,
+        exp_dir=exp_dir,
+        avg=avg,
+        use_averaged_model=args.use_averaged_model,
+        default=decode_max_duration,
         timeout=parse_int(args.decode_timeout, 21600),
+        include_candidate_record=True,
     )
     baseline.write_sure_hyp()
     write_candidate_record(

@@ -1,0 +1,32 @@
+paths:
+  source_root: ../../data/papers
+  build_root: ../../data/paper_library
+
+parser:
+  backend: pymupdf
+  min_text_characters: 100
+  extract_tables: true
+  extract_figures: true
+  extract_equations: true
+
+extraction:
+  provider: disabled
+  model: null
+  prompt_version: 1.0.0
+  temperature: 0
+  max_retries: 2
+
+validation:
+  minimum_grounding_completeness: 0.9
+  require_exact_grounding: true
+  publish_review_required: false
+
+indexing:
+  lexical_enabled: true
+  vector_enabled: false
+  embedding_provider: null
+  embedding_model: null
+
+runtime:
+  workers: 1
+  fail_fast: false

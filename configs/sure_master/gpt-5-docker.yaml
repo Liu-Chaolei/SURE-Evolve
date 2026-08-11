@@ -36,7 +36,6 @@ sure:
     SURE_DURATION_PROBE_SUCCESS_BATCHES: "3"
     SURE_DURATION_PROBE_LOG_INTERVAL: "1"
     SURE_DURATION_HEADROOM_MB: "1000"
-    SURE_DURATION_PROBE_FULL_LIBRI: "0"
     SURE_DURATION_PRINT_DIAGNOSTICS: "0"
     SURE_DURATION_TRAIN_ARGS: >-
       --use-cr-ctc 1 --use-ctc 1 --use-transducer 1 --use-attention-decoder 0

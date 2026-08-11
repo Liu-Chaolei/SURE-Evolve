@@ -9,6 +9,7 @@ prompt, which repeatedly reloads the same checkpoint and wastes most runtime.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -26,7 +27,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from playground.sure_master.core.utils.candidate_changes import validate_arch_candidate_changes
+from playground.sure_master.core.utils.candidate_changes import (  # noqa: E402
+    validate_arch_candidate_changes,
+)
 
 
 WORKSPACE = Path.cwd()
@@ -49,6 +52,8 @@ DEFAULTS = {
     "remove_silence": False,
     "run_timeout": 21600,
     "workers": "auto",
+    "max_chunk_chars": 300,
+    "min_chunk_chars": 40,
 }
 
 
@@ -118,12 +123,80 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+def write_jsonl(path: Path, rows: list[dict[str, Any]], *, atomic: bool = False) -> None:
     ensure_workspace_write_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    write_path = path.with_name(f".{path.name}.{os.getpid()}.tmp") if atomic else path
+    try:
+        with write_path.open("w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        if atomic:
+            os.replace(write_path, path)
+    finally:
+        if atomic:
+            write_path.unlink(missing_ok=True)
+
+
+def file_identity(value: Any) -> dict[str, Any] | str:
+    text = str(value or "").strip()
+    if not text or text.startswith("hf://"):
+        return text
+    path = Path(text).expanduser()
+    try:
+        stat = path.stat()
+    except OSError:
+        return text
+    return {
+        "path": str(path.resolve()),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def synthesis_fingerprint(row: dict[str, Any], config: dict[str, Any]) -> str:
+    reference_audio = Path(str(row.get("reference_audio") or ""))
+    identity = {
+        "gen_text": row.get("gen_text", ""),
+        "reference_audio": file_identity(reference_audio),
+        "reference_text": row.get("reference_text", ""),
+        "model": config.get("model", ""),
+        "ckpt_file": file_identity(config.get("ckpt_file", "")),
+        "vocab_file": file_identity(config.get("vocab_file", "")),
+        "model_cfg": file_identity(config.get("model_cfg", "")),
+        "vocoder_name": config.get("vocoder_name", ""),
+        "load_vocoder_from_local": config.get("load_vocoder_from_local"),
+        "target_rms": config.get("target_rms"),
+        "cross_fade_duration": config.get("cross_fade_duration"),
+        "nfe_step": config.get("nfe_step"),
+        "cfg_strength": config.get("cfg_strength"),
+        "sway_sampling_coef": config.get("sway_sampling_coef"),
+        "speed": config.get("speed"),
+        "fix_duration": config.get("fix_duration"),
+        "remove_silence": config.get("remove_silence"),
+        "max_chunk_chars": config.get("max_chunk_chars"),
+        "min_chunk_chars": config.get("min_chunk_chars"),
+    }
+    serialized = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def fingerprint_path(wav_path: Path) -> Path:
+    return wav_path.with_suffix(wav_path.suffix + ".fingerprint")
+
+
+def resume_matches(row: dict[str, Any], config: dict[str, Any]) -> bool:
+    wav_path = Path(str(row["output_wav"]))
+    valid, _reason = validate_wav(wav_path)
+    if not valid:
+        return False
+    try:
+        stored = fingerprint_path(wav_path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return stored == synthesis_fingerprint(row, config)
 
 
 def read_existing_candidate_changes() -> dict[str, Any]:
@@ -163,10 +236,16 @@ def visible_cuda_devices() -> list[str]:
 def choose_worker_count(raw: str, row_count: int, device: str) -> int:
     text = str(raw or "auto").strip().lower()
     visible = visible_cuda_devices()
+    uses_cuda = "cuda" in device.lower()
     if text == "auto":
-        count = len(visible) if "cuda" in device and visible else 1
+        count = len(visible) if uses_cuda and visible else 1
     else:
         count = parse_int(text, 1, min_value=1)
+        if uses_cuda:
+            if not visible:
+                count = 1
+            else:
+                count = min(count, len(visible))
     return max(1, min(count, max(row_count, 1)))
 
 
@@ -268,7 +347,7 @@ def load_prompts(eval_jsonl: Path, max_samples: int, language: str, text_cleanup
             sid = sanitize_sample_id(str(obj.get("sample_id", "")), index)
             wav_name = unique_wav_name(sid, used_wav_names)
             row_ref_audio = str(obj.get("reference_audio", "")).strip()
-            ref_audio = resolve_read_path(row_ref_audio, prompt_dir) if row_ref_audio else Path()
+            ref_audio = resolve_read_path(row_ref_audio, prompt_dir) if row_ref_audio else None
             rows.append(
                 {
                     "index": index,
@@ -289,11 +368,130 @@ def load_prompts(eval_jsonl: Path, max_samples: int, language: str, text_cleanup
     return rows
 
 
+def validate_prompt_references(rows: list[dict[str, Any]], eval_jsonl: Path) -> None:
+    """Validate all conditioning inputs before starting any F5 runtime."""
+    errors: list[str] = []
+    for row in rows:
+        sample_id = str(row.get("sample_id") or "<unknown>")
+        reference_audio_value = str(row.get("reference_audio") or "").strip()
+        reference_text = str(row.get("reference_text") or "").strip()
+        if not reference_audio_value:
+            errors.append(f"{sample_id}: reference_audio is empty")
+        else:
+            reference_audio = Path(reference_audio_value)
+            valid, reason = validate_wav(reference_audio)
+            if not valid:
+                errors.append(
+                    f"{sample_id}: invalid reference_audio {reference_audio} ({reason})"
+                )
+        if not reference_text:
+            errors.append(f"{sample_id}: reference_text is empty")
+
+    if errors:
+        preview_limit = 20
+        preview = errors[:preview_limit]
+        if len(errors) > preview_limit:
+            preview.append(f"... and {len(errors) - preview_limit} more error(s)")
+        raise RuntimeError(
+            f"F5-TTS prompt reference preflight failed for {eval_jsonl}: "
+            + "; ".join(preview)
+        )
+
+
+def row_cost(row: dict[str, Any]) -> int:
+    """Estimate synthesis work without relying on runtime-only tokenizers."""
+    return max(1, len(str(row.get("gen_text") or "").strip()))
+
+
 def split_shards(rows: list[dict[str, Any]], workers: int) -> list[list[dict[str, Any]]]:
-    shards = [[] for _ in range(workers)]
-    for idx, row in enumerate(rows):
-        shards[idx % workers].append(row)
+    """Deterministically apply longest-processing-time greedy balancing."""
+    worker_count = max(1, min(workers, max(len(rows), 1)))
+    shards: list[list[dict[str, Any]]] = [[] for _ in range(worker_count)]
+    costs = [0] * worker_count
+    ranked = sorted(enumerate(rows), key=lambda item: (-row_cost(item[1]), item[0]))
+    for _original_index, row in ranked:
+        shard_index = min(range(worker_count), key=lambda index: (costs[index], index))
+        shards[shard_index].append(row)
+        costs[shard_index] += row_cost(row)
+    for shard in shards:
+        shard.sort(key=lambda row: int(row.get("index", 0)))
     return [shard for shard in shards if shard]
+
+
+def split_text_chunks(text: str, max_chars: int, min_chars: int = 1) -> list[str]:
+    """Split text within a character budget, preferring sentence punctuation."""
+    text = re.sub(r"\s+", " ", str(text)).strip()
+    if not text or max_chars <= 0 or len(text) <= max_chars:
+        return [text] if text else []
+
+    chunks: list[str] = []
+    remaining = text
+    punctuation = re.compile(r"[.!?;:,](?:[\"')\]]+)?\s+")
+    while len(remaining) > max_chars:
+        window = remaining[: max_chars + 1]
+        candidates = [match.end() for match in punctuation.finditer(window) if match.end() <= max_chars]
+        cut = max((value for value in candidates if value >= min_chars), default=0)
+        if not cut:
+            spaces = [match.start() for match in re.finditer(r"\s+", window)]
+            cut = max((value for value in spaces if value >= min_chars), default=max_chars)
+        chunk = remaining[:cut].strip()
+        if not chunk:
+            cut = max_chars
+            chunk = remaining[:cut].strip()
+        chunks.append(chunk)
+        remaining = remaining[cut:].strip()
+    if remaining:
+        if chunks and len(remaining) < min_chars:
+            chunks[-1] = f"{chunks[-1]} {remaining}"
+        else:
+            chunks.append(remaining)
+    return chunks
+
+
+def normalize_audio_segment(audio: Any) -> Any:
+    """Return mono audio with time on its only axis."""
+    import numpy as np  # type: ignore
+
+    segment = np.asarray(audio)
+    if segment.ndim == 1:
+        return segment
+    if segment.ndim == 2 and 1 in segment.shape:
+        return segment.reshape(-1)
+    raise ValueError(f"Unsupported F5-TTS waveform shape: {segment.shape}; expected mono audio")
+
+
+def is_oom_error(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    markers = (
+        "out of memory",
+        "cuda error: memory allocation",
+        "cuda out of memory",
+        "cublas_status_alloc_failed",
+        "hip out of memory",
+    )
+    return any(marker in text for marker in markers)
+
+
+def atomic_write_audio(
+    path: Path,
+    audio: Any,
+    sample_rate: int,
+    postprocess: Any | None = None,
+) -> None:
+    import soundfile as sf  # type: ignore
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp.wav")
+    try:
+        sf.write(str(temporary), audio, sample_rate)
+        if postprocess is not None:
+            postprocess(str(temporary))
+        valid, reason = validate_wav(temporary)
+        if not valid:
+            raise RuntimeError(f"Invalid temporary WAV {temporary}: {reason}")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def add_f5_to_path(f5_root: Path) -> None:
@@ -406,71 +604,135 @@ def run_worker(args: argparse.Namespace) -> int:
         return 0
 
     mkdir_inside(WAV_DIR)
+    if "cuda" in str(config.get("device", "")).lower() and len(visible_cuda_devices()) == 1:
+        # CUDA_VISIBLE_DEVICES remaps the assigned physical GPU to local index zero.
+        config["device"] = "cuda"
     runtime = load_f5_runtime(config)
-    fallback_ref_audio = Path(config["f5_root"]) / "src/f5_tts/infer/examples/basic/basic_ref_en.wav"
-    fallback_ref_text = "Some call me nature, others call me mother nature."
     resume = parse_bool(config.get("resume"), True)
     remove_silence = parse_bool(config.get("remove_silence"), False)
 
     generated = 0
     reused = 0
+    total_chunks = 0
+    oom_retries = 0
+    worker_started = time.monotonic()
     for local_idx, row in enumerate(rows, 1):
+        row_started = time.monotonic()
         out_wav = Path(str(row["output_wav"]))
-        valid, reason = validate_wav(out_wav)
-        if resume and valid:
-            print(f"[worker {args.worker_index}] reuse {row['sample_id']} ({local_idx}/{len(rows)})", flush=True)
+        if resume and resume_matches(row, config):
+            print(
+                f"[worker {args.worker_index}] reuse {row['sample_id']} "
+                f"({local_idx}/{len(rows)}; cost={row_cost(row)})",
+                flush=True,
+            )
             reused += 1
             continue
         if out_wav.exists():
             out_wav.unlink()
+        fingerprint_path(out_wav).unlink(missing_ok=True)
 
-        ref_audio = Path(str(row.get("reference_audio") or ""))
-        ref_text = str(row.get("reference_text") or "").strip()
-        if not ref_audio.exists():
+        ref_audio = Path(str(row["reference_audio"]))
+        ref_text = str(row["reference_text"])
+
+        prepared_audio, prepared_text = runtime["preprocess_ref_audio_text"](str(ref_audio), ref_text)
+        budget = parse_int(config.get("max_chunk_chars"), int(DEFAULTS["max_chunk_chars"]), min_value=1)
+        minimum_budget = min(
+            budget,
+            parse_int(config.get("min_chunk_chars"), int(DEFAULTS["min_chunk_chars"]), min_value=1),
+        )
+        retries = 0
+        while True:
+            chunks = split_text_chunks(str(row["gen_text"]), budget, minimum_budget)
             print(
-                f"[worker {args.worker_index}] missing reference audio for {row['sample_id']}: {ref_audio}; using fallback",
+                f"[worker {args.worker_index}] synth {row['sample_id']} "
+                f"({local_idx}/{len(rows)}; cost={row_cost(row)}; chunks={len(chunks)}; budget={budget})",
                 flush=True,
             )
-            ref_audio = fallback_ref_audio
-            ref_text = fallback_ref_text
-        if not ref_text:
-            ref_text = fallback_ref_text
+            segments: list[Any] = []
+            sample_rate: int | None = None
+            try:
+                for chunk_index, chunk in enumerate(chunks, 1):
+                    audio_segment, chunk_sample_rate, _spectrogram = runtime["infer_process"](
+                        prepared_audio,
+                        prepared_text,
+                        chunk,
+                        runtime["model"],
+                        runtime["vocoder"],
+                        mel_spec_type=runtime["mel_spec_type"],
+                        target_rms=runtime["target_rms"],
+                        cross_fade_duration=runtime["cross_fade_duration"],
+                        nfe_step=runtime["nfe_step"],
+                        cfg_strength=runtime["cfg_strength"],
+                        sway_sampling_coef=runtime["sway_sampling_coef"],
+                        speed=runtime["speed"],
+                        fix_duration=runtime["fix_duration"],
+                        device=runtime["device"],
+                    )
+                    if audio_segment is None:
+                        raise RuntimeError(
+                            f"F5-TTS returned no audio for {row['sample_id']} chunk {chunk_index}"
+                        )
+                    if sample_rate is not None and int(chunk_sample_rate) != sample_rate:
+                        raise RuntimeError(
+                            f"F5-TTS sample rate changed for {row['sample_id']}: "
+                            f"{sample_rate} -> {chunk_sample_rate}"
+                        )
+                    sample_rate = int(chunk_sample_rate)
+                    segments.append(normalize_audio_segment(audio_segment))
+                break
+            except Exception as exc:
+                if not is_oom_error(exc) or budget <= minimum_budget:
+                    raise
+                retries += 1
+                oom_retries += 1
+                budget = max(minimum_budget, budget // 2)
+                print(
+                    f"[worker {args.worker_index}] OOM for {row['sample_id']}; "
+                    f"retry={retries} smaller_budget={budget}",
+                    flush=True,
+                )
+                segments.clear()
+                audio_segment = None
+                _spectrogram = None
+                try:
+                    import torch  # type: ignore
 
-        print(f"[worker {args.worker_index}] synth {row['sample_id']} ({local_idx}/{len(rows)})", flush=True)
-        prepared_audio, prepared_text = runtime["preprocess_ref_audio_text"](str(ref_audio), ref_text)
-        audio_segment, sample_rate, _spectrogram = runtime["infer_process"](
-            prepared_audio,
-            prepared_text,
-            str(row["gen_text"]),
-            runtime["model"],
-            runtime["vocoder"],
-            mel_spec_type=runtime["mel_spec_type"],
-            target_rms=runtime["target_rms"],
-            cross_fade_duration=runtime["cross_fade_duration"],
-            nfe_step=runtime["nfe_step"],
-            cfg_strength=runtime["cfg_strength"],
-            sway_sampling_coef=runtime["sway_sampling_coef"],
-            speed=runtime["speed"],
-            fix_duration=runtime["fix_duration"],
-            device=runtime["device"],
-        )
-        if audio_segment is None:
-            raise RuntimeError(f"F5-TTS returned no audio for {row['sample_id']}")
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except (ImportError, RuntimeError):
+                    pass
 
-        import soundfile as sf  # type: ignore
+        import numpy as np  # type: ignore
 
-        out_wav.parent.mkdir(parents=True, exist_ok=True)
-        sf.write(str(out_wav), audio_segment, int(sample_rate))
-        if remove_silence:
-            runtime["remove_silence_for_generated_wav"](str(out_wav))
+        final_audio = np.concatenate(segments) if len(segments) > 1 else segments[0]
+        postprocess = runtime["remove_silence_for_generated_wav"] if remove_silence else None
+        atomic_write_audio(out_wav, final_audio, int(sample_rate), postprocess)
+        fingerprint_path(out_wav).write_text(synthesis_fingerprint(row, config) + "\n", encoding="utf-8")
 
         valid, reason = validate_wav(out_wav)
         if not valid:
             raise RuntimeError(f"Generated invalid WAV for {row['sample_id']}: {out_wav} ({reason})")
         generated += 1
+        total_chunks += len(chunks)
+        print(
+            f"[worker {args.worker_index}] done {row['sample_id']} "
+            f"chunks={len(chunks)} retries={retries} elapsed={time.monotonic() - row_started:.2f}s",
+            flush=True,
+        )
 
     done_path = BATCH_DIR / f"worker_{args.worker_index}.done.json"
-    write_json(done_path, {"worker_index": args.worker_index, "generated": generated, "reused": reused})
+    write_json(
+        done_path,
+        {
+            "worker_index": args.worker_index,
+            "generated": generated,
+            "reused": reused,
+            "chunks": total_chunks,
+            "oom_retries": oom_retries,
+            "estimated_cost": sum(row_cost(row) for row in rows),
+            "elapsed_seconds": round(time.monotonic() - worker_started, 3),
+        },
+    )
     return 0
 
 
@@ -504,7 +766,7 @@ def launch_workers(
         log_path = LOG_DIR / f"f5tts_batch_worker_{worker_index}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
-        if "cuda" in device and visible:
+        if "cuda" in device.lower() and visible:
             env["CUDA_VISIBLE_DEVICES"] = visible[worker_index % len(visible)]
         cmd = [
             sys.executable,
@@ -567,6 +829,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--load-vocoder-from-local", default=env_str("SURE_TTS_LOAD_VOCODER_FROM_LOCAL", "0"))
     parser.add_argument("--device", default=env_str("SURE_TTS_DEVICE", "cuda"))
     parser.add_argument("--workers", default=env_str("SURE_TTS_INFER_WORKERS", str(DEFAULTS["workers"])))
+    parser.add_argument(
+        "--max-chunk-chars",
+        type=int,
+        default=parse_int(
+            env_str("SURE_TTS_MAX_CHUNK_CHARS", str(DEFAULTS["max_chunk_chars"])),
+            int(DEFAULTS["max_chunk_chars"]),
+            1,
+        ),
+    )
+    parser.add_argument(
+        "--min-chunk-chars",
+        type=int,
+        default=parse_int(
+            env_str("SURE_TTS_MIN_CHUNK_CHARS", str(DEFAULTS["min_chunk_chars"])),
+            int(DEFAULTS["min_chunk_chars"]),
+            1,
+        ),
+    )
     parser.add_argument("--nfe-step", type=int, default=parse_int(env_str("SURE_TTS_NFE_STEP", str(DEFAULTS["nfe_step"])), 32, 1))
     parser.add_argument("--cfg-strength", type=float, default=parse_float(env_str("SURE_TTS_CFG_STRENGTH", str(DEFAULTS["cfg_strength"])), 2.0))
     parser.add_argument("--sway-sampling-coef", type=float, default=parse_float(env_str("SURE_TTS_SWAY_SAMPLING_COEF", str(DEFAULTS["sway_sampling_coef"])), -1.0))
@@ -655,6 +935,16 @@ def write_candidate_changes(args: argparse.Namespace, rows: list[dict[str, Any]]
         "speed": parse_float(env_str("SURE_TTS_SPEED", str(DEFAULTS["speed"])), 1.0),
         "remove_silence": parse_bool(env_str("SURE_TTS_REMOVE_SILENCE", "0"), False),
         "text_cleanup": env_str("SURE_TTS_TEXT_CLEANUP", "none"),
+        "max_chunk_chars": parse_int(
+            env_str("SURE_TTS_MAX_CHUNK_CHARS", str(DEFAULTS["max_chunk_chars"])),
+            int(DEFAULTS["max_chunk_chars"]),
+            1,
+        ),
+        "min_chunk_chars": parse_int(
+            env_str("SURE_TTS_MIN_CHUNK_CHARS", str(DEFAULTS["min_chunk_chars"])),
+            int(DEFAULTS["min_chunk_chars"]),
+            1,
+        ),
     }
     used = {
         "nfe_step": int(args.nfe_step),
@@ -663,6 +953,8 @@ def write_candidate_changes(args: argparse.Namespace, rows: list[dict[str, Any]]
         "speed": float(args.speed),
         "remove_silence": parse_bool(args.remove_silence, False),
         "text_cleanup": args.text_cleanup,
+        "max_chunk_chars": int(getattr(args, "max_chunk_chars", DEFAULTS["max_chunk_chars"])),
+        "min_chunk_chars": int(getattr(args, "min_chunk_chars", DEFAULTS["min_chunk_chars"])),
     }
     diff = {
         key: {"default": defaults[key], "used": value}
@@ -742,12 +1034,7 @@ def run_main(args: argparse.Namespace) -> int:
     f5_root = resolve_read_path(args.f5_root)
     eval_data = resolve_read_path(args.eval_data)
     rows = load_prompts(eval_data, args.max_samples, args.language, args.text_cleanup)
-    workers = choose_worker_count(args.workers, len(rows), args.device)
-
-    if args.dry_run:
-        print(f"Would synthesize {len(rows)} prompts with {workers} worker(s)")
-        return 0
-
+    validate_prompt_references(rows, eval_data)
     config = {
         "f5_root": str(f5_root),
         "model": args.model,
@@ -763,18 +1050,61 @@ def run_main(args: argparse.Namespace) -> int:
         "speed": args.speed,
         "remove_silence": args.remove_silence,
         "resume": args.resume,
+        "max_chunk_chars": args.max_chunk_chars,
+        "min_chunk_chars": args.min_chunk_chars,
     }
+    resume = parse_bool(args.resume, True)
+    pending_rows: list[dict[str, Any]] = []
+    reused_rows = 0
+    for row in rows:
+        if resume and resume_matches(row, config):
+            reused_rows += 1
+        else:
+            pending_rows.append(row)
+    workers = choose_worker_count(args.workers, len(pending_rows), args.device)
+
+    if args.dry_run:
+        print(
+            f"Would synthesize {len(pending_rows)} of {len(rows)} prompts with {workers} worker(s); "
+            f"resume_reused={reused_rows} estimated_cost={sum(row_cost(row) for row in pending_rows)}"
+        )
+        return 0
+
     config_path = BATCH_DIR / "config.json"
     write_json(config_path, config)
 
-    shards = split_shards(rows, workers)
+    shards = split_shards(pending_rows, workers) if pending_rows else []
     shard_paths: list[Path] = []
+    shard_diagnostics: list[dict[str, Any]] = []
     for index, shard in enumerate(shards):
         shard_path = BATCH_DIR / f"shard_{index}.jsonl"
         write_jsonl(shard_path, shard)
         shard_paths.append(shard_path)
+        shard_diagnostics.append(
+            {
+                "worker_index": index,
+                "row_count": len(shard),
+                "estimated_cost": sum(row_cost(row) for row in shard),
+                "sample_ids": [row["sample_id"] for row in shard],
+            }
+        )
+    write_json(
+        BATCH_DIR / "diagnostics.json",
+        {
+            "total_rows": len(rows),
+            "pending_rows": len(pending_rows),
+            "resume_reused": reused_rows,
+            "visible_cuda_devices": visible_cuda_devices(),
+            "requested_workers": args.workers,
+            "launched_workers": len(shard_paths),
+            "max_chunk_chars": args.max_chunk_chars,
+            "min_chunk_chars": args.min_chunk_chars,
+            "shards": shard_diagnostics,
+        },
+    )
 
-    launch_workers(config_path=config_path, shard_paths=shard_paths, timeout=args.timeout, device=args.device)
+    if shard_paths:
+        launch_workers(config_path=config_path, shard_paths=shard_paths, timeout=args.timeout, device=args.device)
 
     sample_rows: list[dict[str, Any]] = []
     for row in rows:
@@ -782,18 +1112,18 @@ def run_main(args: argparse.Namespace) -> int:
         valid, reason = validate_wav(wav_path)
         if not valid:
             raise RuntimeError(f"Invalid artifact WAV {wav_path}: {reason}")
-        ref_audio = Path(str(row.get("reference_audio") or ""))
+        ref_audio = Path(str(row["reference_audio"]))
         sample_rows.append(
             {
                 "sample_id": row["sample_id"],
                 "prediction_audio": "wavs/" + row["wav_name"],
                 "reference_text": row["target_text"],
-                "reference_audio": rel_to_artifacts(ref_audio) if ref_audio else "",
+                "reference_audio": rel_to_artifacts(ref_audio),
                 "language": row["language"],
             }
         )
 
-    write_jsonl(ARTIFACTS / "samples.jsonl", sample_rows)
+    write_jsonl(ARTIFACTS / "samples.jsonl", sample_rows, atomic=True)
     write_candidate_changes(args, rows, len(shard_paths))
     print(f"Generated {len(sample_rows)} TTS samples with {len(shard_paths)} worker(s)")
     return 0
