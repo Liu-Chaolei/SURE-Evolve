@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sure.eval.main_flow_input.v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["target", "datasets"],
+  "properties": {
+    "schema": {"const": "sure.eval.main_flow_input.v2"},
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_id"],
+      "properties": {
+        "model_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?:__[A-Za-z0-9][A-Za-z0-9._-]*)*$"}
+      }
+    },
+    "datasets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "version"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+          "version": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+          "split": {"type": "string", "default": "test", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"}
+        }
+      }
+    },
+    "inference": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_id": {"enum": ["standard_system", "strict_core"], "default": "standard_system"}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"enum": ["auto", "reuse_result", "reevaluate", "retest"], "default": "auto"}
+      }
+    }
+  }
+}

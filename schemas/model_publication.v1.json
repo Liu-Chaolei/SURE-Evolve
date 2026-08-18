@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sure.eval.model_publication.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "model_id", "artifact_sha256", "artifact_manifest_path", "artifact_manifest_sha256", "verified_by", "verified_at"],
+  "properties": {
+    "schema": {"const": "sure.eval.model_publication.v1"},
+    "status": {"const": "verified"},
+    "model_id": {"type": "string", "minLength": 1},
+    "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact_manifest_path": {"const": "publication_artifacts.json"},
+    "artifact_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "verified_by": {"type": "string", "minLength": 1},
+    "verified_at": {"type": "string", "minLength": 1}
+  }
+}

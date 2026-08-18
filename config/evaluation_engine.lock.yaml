@@ -1,0 +1,16 @@
+schema: sure.eval.evaluation_engine_lock.v1
+repository: git@github.com:PigeonDan1/sure-evaluation.git
+source_checkout: /hpc_stor03/sjtu_home/jing.peng/workspace/sure-evaluation
+commit: 87b6bc44e3b557ec69ce7db785594a2a549cc1bd
+tree_sha256: 42aebdd6884a4853a566d2ac508f4ea866298c0e22a813e4d913d1130ef05150
+tree_paths:
+  - src/sure_eval/__init__.py
+  - src/sure_eval/cli.py
+  - src/sure_eval/evaluation
+  - src/sure_eval/core
+  - src/sure_eval/compat
+  - src/sure_eval/reports
+  - config/default.yaml
+  - pyproject.toml
+python_executable: /hpc_stor03/sjtu_home/jing.peng/miniconda3/bin/python3
+entrypoint: "from sure_eval.cli import app; app()"

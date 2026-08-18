@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sure.eval.publication_manifest.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "model_id", "source_model_root", "target_registry_root", "result_index", "result_delta", "publication_strategy", "base_published_index", "created_at", "automatic_publish_allowed"],
+  "properties": {
+    "schema": {"const": "sure.eval.publication_manifest.v1"},
+    "status": {"const": "pending_human_review"},
+    "model_id": {"type": "string", "minLength": 1},
+    "source_model_root": {"type": "string", "minLength": 1},
+    "target_registry_root": {"type": "string", "minLength": 1},
+    "result_index": {"type": "string", "minLength": 1},
+    "result_delta": {"type": ["string", "null"]},
+    "publication_strategy": {"enum": ["initialize_index", "merge_delta"]},
+    "base_published_index": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        }
+      ]
+    },
+    "created_at": {"type": "string", "minLength": 1},
+    "automatic_publish_allowed": {"const": false}
+  }
+}

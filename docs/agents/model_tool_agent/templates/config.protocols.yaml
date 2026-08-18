@@ -1,0 +1,26 @@
+protocols:
+  standard_system:
+    enabled: true
+    declared_modules: []
+    official_defaults:
+      repository: ""
+      commit: ""
+      weights_revision: ""
+      entrypoint: ""
+      invocation_overrides: {}
+      effective_params: {}
+  strict_core:
+    enabled: false
+    declared_modules: []
+    attestation: {}
+    param_map:
+      decode_mode: {enforcement: parameter, model_param: "", value: greedy}
+      sampling_enabled: {enforcement: parameter, model_param: "", value: false}
+      temperature: {enforcement: parameter, model_param: "", value: 0.0}
+      beam_size: {enforcement: parameter, model_param: "", value: 1}
+      num_hypotheses: {enforcement: parameter, model_param: "", value: 1}
+      max_batch_size: {enforcement: parameter, model_param: "", value: 1}
+      external_lm_enabled: {enforcement: attestation, attestation: no_external_lm}
+      hotwords_enabled: {enforcement: attestation, attestation: no_hotwords}
+      retrieval_enabled: {enforcement: attestation, attestation: no_retrieval}
+      multi_pass_enabled: {enforcement: attestation, attestation: single_pass}

@@ -1,0 +1,16 @@
+{
+  "schema": "sure.eval.execution_readiness.v2",
+  "status": "",
+  "created_at": "",
+  "request_id": "",
+  "model_id": "",
+  "protocol_id": "standard_system",
+  "model_verified": false,
+  "datasets_verified": false,
+  "protocol_resolved": false,
+  "evaluation_engine_verified": false,
+  "reuse_decision_ready": false,
+  "staging_write_policy_verified": false,
+  "execution_ready": false,
+  "blockers": []
+}

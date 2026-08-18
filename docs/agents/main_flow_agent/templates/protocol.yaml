@@ -1,0 +1,10 @@
+schema: sure.eval.inference_protocol_resolution.v2
+protocol_id: standard_system
+protocol_version: ""
+policy: official_defaults
+standard_params: {}
+model_params: {}
+enforcement: {}
+provenance: {}
+effective_params_sha256: ""
+unmapped: {}

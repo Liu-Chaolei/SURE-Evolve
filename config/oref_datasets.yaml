@@ -1,0 +1,66 @@
+# OREF Local Datasets Registry for SURE-EVAL
+# Add new OREF datasets here without modifying Python code.
+#
+# Each dataset entry maps a dataset config name to its local metadata.
+# The audio_dir and jsonl_path are relative to data.datasets root
+# (default: data/datasets/).
+#
+# Fallbacks map SURE Benchmark canonical names to their OREF equivalents.
+# When a SURE Benchmark dataset is requested but not available, the system
+# automatically uses the OREF fallback to avoid ModelScope download timeouts.
+
+datasets:
+  librispeech_test_clean:
+    source: "oref_platform"
+    config_name: "librispeech_clean"
+    platform_dataset_name: "aispeech_phy_librispeech_test-clean"
+    version_id: "v1.0.1"
+    dataset_root: "/hpc_stor08/external_ds/aispeech/g001/store002/ds_pool/aispeech_phy_librispeech_test-clean"
+    sample_jsonl: "/hpc_stor08/external_ds/aispeech/g001/store002/ds_pool/aispeech_phy_librispeech_test-clean/sample_files/v1.0.1/sample.jsonl"
+    ds_jsonl: "/hpc_stor08/external_ds/aispeech/g001/store002/ds_pool/aispeech_phy_librispeech_test-clean/sample_files/v1.0.1/ds.jsonl"
+    raw_dir: "/hpc_stor08/external_ds/aispeech/g001/store002/ds_pool/aispeech_phy_librispeech_test-clean/raws/sample"
+    task: "ASR"
+    language: "en"
+    validation:
+      require_audio_exists: true
+      check_size: true
+      check_md5: false
+
+  aispeech_phy_librispeech_test_clean:
+    source: "oref_platform"
+    config_name: "librispeech_clean"
+    platform_dataset_name: "aispeech_phy_librispeech_test-clean"
+    version_id: "v1.0.1"
+    dataset_root: "/hpc_stor08/external_ds/aispeech/g001/store002/ds_pool/aispeech_phy_librispeech_test-clean"
+    sample_jsonl: "/hpc_stor08/external_ds/aispeech/g001/store002/ds_pool/aispeech_phy_librispeech_test-clean/sample_files/v1.0.1/sample.jsonl"
+    ds_jsonl: "/hpc_stor08/external_ds/aispeech/g001/store002/ds_pool/aispeech_phy_librispeech_test-clean/sample_files/v1.0.1/ds.jsonl"
+    raw_dir: "/hpc_stor08/external_ds/aispeech/g001/store002/ds_pool/aispeech_phy_librispeech_test-clean/raws/sample"
+    task: "ASR"
+    language: "en"
+    validation:
+      require_audio_exists: true
+      check_size: true
+      check_md5: false
+
+  aishell1_test:
+    source: "oref_platform"
+    config_name: "aishell1"
+    platform_dataset_name: "aispeech_phy_aishell-1-test"
+    version_id: "v1.0.2"
+    dataset_root: "/hpc_stor08/external_ds/aispeech/g001/store002/ds_pool/aispeech_phy_aishell-1-test"
+    sample_jsonl: "/hpc_stor08/external_ds/aispeech/g001/store002/ds_pool/aispeech_phy_aishell-1-test/sample_files/v1.0.2/sample.jsonl"
+    ds_jsonl: "/hpc_stor08/external_ds/aispeech/g001/store002/ds_pool/aispeech_phy_aishell-1-test/sample_files/v1.0.2/ds.jsonl"
+    raw_dir: "/hpc_stor08/external_ds/aispeech/g001/store002/ds_pool/aispeech_phy_aishell-1-test/raws/sample"
+    task: "ASR"
+    language: "zh"
+    validation:
+      require_audio_exists: true
+      check_size: true
+      check_md5: false
+
+# SURE Benchmark -> OREF local equivalent fallback mapping.
+# Keys are SURE Benchmark canonical config names.
+# Values are OREF dataset names (must exist in datasets above).
+fallbacks:
+  aishell1: "aishell1_test"
+  librispeech_clean: "aispeech_phy_librispeech_test_clean"

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sure.eval.result_reuse_decision.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "action", "model_id", "mode", "source_index", "inference_id", "evaluation_id", "checks", "reason_codes"],
+  "properties": {
+    "schema": {"const": "sure.eval.result_reuse_decision.v1"},
+    "status": {"enum": ["ready", "blocked"]},
+    "action": {"enum": ["reuse_result", "reevaluate", "infer_and_evaluate", "blocked"]},
+    "model_id": {"type": "string", "minLength": 1},
+    "mode": {"enum": ["auto", "reuse_result", "reevaluate", "retest"]},
+    "source_index": {"type": ["string", "null"]},
+    "inference_id": {"type": ["string", "null"]},
+    "evaluation_id": {"type": ["string", "null"]},
+    "checks": {"type": "array", "items": {"type": "object"}},
+    "reason_codes": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+  }
+}

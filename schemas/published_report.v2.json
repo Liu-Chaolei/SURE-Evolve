@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sure.eval.published_report.v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "model", "dataset", "protocol", "evaluation", "metric", "lineage", "completed_at"],
+  "properties": {
+    "schema": {"const": "sure.eval.published_report.v2"},
+    "status": {"const": "success"},
+    "model": {"type": "object", "required": ["id", "artifact_sha256"]},
+    "dataset": {"type": "object", "required": ["id", "name", "version", "split", "manifest_sha256", "sample_count"]},
+    "protocol": {"type": "object", "required": ["id", "version", "effective_params_sha256"]},
+    "evaluation": {
+      "type": "object", "additionalProperties": false, "required": ["pipeline_id", "engine_commit", "engine_tree_sha256"],
+      "properties": {"pipeline_id": {"type": "string", "minLength": 1}, "engine_commit": {"type": "string", "minLength": 1}, "engine_tree_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+    },
+    "metric": {
+      "type": "object", "required": ["name", "score"],
+      "properties": {"name": {"type": "string", "minLength": 1}, "score": {"type": "number"}}
+    },
+    "lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inference_id", "inference_source", "evaluation_input_path", "evaluation_input_sha256"],
+      "properties": {
+        "inference_id": {"type": "string", "minLength": 1},
+        "inference_source": {"enum": ["published", "staged"]},
+        "evaluation_input_path": {"type": "string", "minLength": 1},
+        "evaluation_input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "completed_at": {"type": "string", "minLength": 1}
+  }
+}

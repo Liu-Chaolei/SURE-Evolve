@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sure.eval.report_row.v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "model", "evaluation", "dataset", "protocol", "pipeline", "metric", "lineage", "completed_at"],
+  "properties": {
+    "schema": {"const": "sure.eval.report_row.v2"},
+    "status": {"const": "success"},
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "artifact_sha256"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "created_at", "inference_id", "engine"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "created_at": {"type": "string", "minLength": 1},
+        "inference_id": {"type": "string", "minLength": 1},
+        "engine": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "commit", "tree_sha256"],
+          "properties": {
+            "repository": {"type": "string", "minLength": 1},
+            "commit": {"type": "string", "minLength": 1},
+            "tree_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        }
+      }
+    },
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "version", "split", "manifest_sha256", "sample_count"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "split": {"type": "string", "minLength": 1},
+        "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "sample_count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "effective_params_sha256"],
+      "properties": {
+        "id": {"enum": ["standard_system", "strict_core"]},
+        "version": {"type": "string", "minLength": 1},
+        "effective_params_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "pipeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pipeline_id", "report_path", "report_sha256", "engine_report_path", "engine_report_sha256", "pipeline_description_path", "pipeline_description_sha256"],
+      "properties": {
+        "pipeline_id": {"type": "string", "minLength": 1},
+        "report_path": {"type": "string", "minLength": 1},
+        "report_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "engine_report_path": {"type": "string", "minLength": 1},
+        "engine_report_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "pipeline_description_path": {"type": "string", "minLength": 1},
+        "pipeline_description_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "score"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "score": {"type": "number"}
+      }
+    },
+    "lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inference_id", "inference_source", "evaluation_input_path", "evaluation_input_sha256"],
+      "properties": {
+        "inference_id": {"type": "string", "minLength": 1},
+        "inference_source": {"enum": ["published", "staged"]},
+        "evaluation_input_path": {"type": "string", "minLength": 1},
+        "evaluation_input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "completed_at": {"type": "string", "minLength": 1}
+  }
+}

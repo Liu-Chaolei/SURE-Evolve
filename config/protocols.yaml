@@ -1,0 +1,105 @@
+schema: sure.eval.inference_protocol_catalog.v2
+default_protocol_id: standard_system
+
+protocols:
+  standard_system:
+    name: Standard System
+    version: "2.0"
+    policy: official_defaults
+    description: Use the pinned official repository inference entrypoint without user overrides.
+    is_default: true
+    params:
+      official_defaults:
+        description: Official repository defaults are used unchanged.
+        default: true
+        allowed_values: [true]
+        scope: inference
+      user_overrides:
+        description: User-provided decoding or preprocessing overrides are forbidden.
+        default: forbidden
+        allowed_values: [forbidden]
+        scope: inference
+    constraints:
+      - id: official_repository_pinned
+        description: Repository commit, weights revision, and inference entrypoint must be recorded.
+        category: required
+        scope: inference
+      - id: official_components_only
+        description: Only components enabled by the pinned official default flow are permitted.
+        category: required
+        scope: preprocessing
+      - id: no_user_parameter_overrides
+        description: The benchmark request may not override official inference parameters.
+        category: forbidden
+        scope: inference
+
+  strict_core:
+    name: Strict Core
+    version: "2.0"
+    policy: constrained
+    description: Deterministic single-hypothesis inference with external augmentation disabled.
+    is_default: false
+    params:
+      decode_mode:
+        description: Use deterministic greedy decoding when decoding is applicable.
+        default: greedy
+        allowed_values: [greedy]
+        scope: inference
+      sampling_enabled:
+        description: Stochastic sampling is disabled.
+        default: false
+        allowed_values: [false]
+        scope: inference
+      temperature:
+        description: Set temperature to zero when the model API accepts it with sampling disabled.
+        default: 0.0
+        allowed_values: [0.0]
+        scope: inference
+      beam_size:
+        description: Search uses a single beam.
+        default: 1
+        allowed_values: [1]
+        scope: inference
+      num_hypotheses:
+        description: Return exactly one hypothesis or generated sample.
+        default: 1
+        allowed_values: [1]
+        scope: inference
+      max_batch_size:
+        description: Process at most one benchmark sample per model call.
+        default: 1
+        allowed_values: [1]
+        scope: compute
+      external_lm_enabled:
+        description: External language-model rescoring is disabled.
+        default: false
+        allowed_values: [false]
+        scope: inference
+      hotwords_enabled:
+        description: Hotword and bias phrase injection is disabled.
+        default: false
+        allowed_values: [false]
+        scope: preprocessing
+      retrieval_enabled:
+        description: Retrieval augmentation is disabled.
+        default: false
+        allowed_values: [false]
+        scope: inference
+      multi_pass_enabled:
+        description: Multi-pass refinement and best-of selection are disabled.
+        default: false
+        allowed_values: [false]
+        scope: inference
+    constraints:
+      - id: complete_control_mapping
+        description: Every control must be enforced by a parameter, attested, or explicitly not applicable.
+        category: required
+        scope: inference
+      - id: fail_closed
+        description: Unsupported or incomplete strict control declarations stop the run.
+        category: required
+        scope: inference
+      - id: temperature_semantics
+        description: Sampling-disabled is canonical; temperature zero is used only when the model API defines it.
+        category: required
+        scope: inference

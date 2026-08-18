@@ -1,0 +1,269 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+**/.venv/
+**/venv/
+**/env/
+**/ENV/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+!src/sure_eval/models/*/artifacts/build.log
+!src/sure_eval/models/*/artifacts/validation.log
+*.out
+*.err
+*.pid
+
+# Data and models (large files)
+data/
+!data/.gitkeep
+models_cache/
+*.tar.gz
+*.zip
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.gguf
+*.tflite
+*.engine
+*.mlmodel
+*.h5
+*.npz
+*.npy
+*.parquet
+*.arrow
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+# Results and outputs
+results/*
+!results/.gitkeep
+outputs/
+tmp/
+temp/
+
+# Test files
+/test_*.py
+*_test.py
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Environment
+.env
+.env.local
+.env.*.local
+*.env
+
+# Documentation build
+docs/_build/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Ruff
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints
+
+# Model cache
+model_cache/
+.cache/
+**/.cache/
+hf_cache/
+modelscope_cache/
+huggingface/
+
+# DiariZen submodule (should be cloned separately)
+src/sure_eval/models/diarizen/diarizen_src/
+
+# Test results
+src/sure_eval/models/*/test_results/
+
+# Model-specific environment files (should be regenerated)
+src/sure_eval/models/*/uv.lock
+src/sure_eval/models/*/.venv/
+src/sure_eval/models/*/repo/
+src/sure_eval/models/*/pixi.lock
+src/sure_eval/models/*/.pixi/
+src/sure_eval/models/*/conda-meta/
+
+# fireredasr2_aed local runtime files
+src/sure_eval/models/fireredasr2_aed/pretrained_models/
+src/sure_eval/models/fireredasr2_aed/.venv/
+src/sure_eval/models/fireredasr2_aed/__pycache__/
+src/sure_eval/models/fireredasr2_aed/.runtime/
+
+# Ignore fireredasr2_aed upstream clone
+src/sure_eval/models/fireredasr2_aed/upstream/
+
+# fireredvad local runtime junk
+src/sure_eval/models/fireredvad/.venv/
+src/sure_eval/models/fireredvad/__pycache__/
+src/sure_eval/models/fireredvad/checkpoints/
+src/sure_eval/models/fireredvad/pretrained_models/
+
+src/sure_eval/models/fireredvad/artifacts/repro_output.json
+src/sure_eval/models/fireredvad/upstream/
+
+# s2tt_nllb local runtime/cache/weights
+src/sure_eval/models/s2tt_nllb/.venv/
+src/sure_eval/models/s2tt_nllb/.runtime/
+src/sure_eval/models/s2tt_nllb/__pycache__/
+src/sure_eval/models/s2tt_nllb/checkpoints/
+src/sure_eval/models/s2tt_nllb/repro_bundle/weights/
+
+# Local run outputs
+runs/
+
+# Model-local runtimes, caches, and downloaded weights
+src/sure_eval/models/*/.venv/
+src/sure_eval/models/*/.runtime/
+src/sure_eval/models/*/__pycache__/
+src/sure_eval/models/*/checkpoints/
+src/sure_eval/models/*/hf_cache/
+src/sure_eval/models/*/pretrained_models/
+src/sure_eval/models/*/repro_bundle/weights/
+src/sure_eval/models/*/modelscope_cache/
+src/sure_eval/models/*/cache/
+src/sure_eval/models/*/tmp/
+src/sure_eval/models/*/temp/
+src/sure_eval/models/*/outputs/
+src/sure_eval/models/*/generated/
+src/sure_eval/models/*/samples/
+src/sure_eval/models/*/upstream/
+
+# Model-local evaluation and Docker run outputs.
+# Already tracked historical files stay tracked; these rules prevent new run
+# artifacts from being added accidentally.
+src/sure_eval/models/*/eval_runs/
+src/sure_eval/models/*/eval_runs_*/
+src/sure_eval/models/*/eval_runs_old/
+src/sure_eval/models/*/docker_artifacts/
+src/sure_eval/models/*/artifacts/diagnostic_outputs/
+src/sure_eval/models/*/artifacts/*.tmp
+src/sure_eval/models/*/artifacts/*.pt
+src/sure_eval/models/*/artifacts/*.pth
+src/sure_eval/models/*/artifacts/*.ckpt
+src/sure_eval/models/*/artifacts/*.safetensors
+src/sure_eval/models/*/artifacts/*.onnx
+src/sure_eval/models/*/artifacts/*.bin
+
+# Metric-local environments. Keep pyproject.toml/README.md; regenerate locks
+# and virtualenvs locally unless a metric explicitly opts in later.
+src/sure_eval/evaluation/*/.venv/
+src/sure_eval/evaluation/*/uv.lock
+src/sure_eval/evaluation/*/.python-version
+src/sure_eval/evaluation/**/.venv/
+src/sure_eval/evaluation/**/uv.lock
+src/sure_eval/evaluation/**/.python-version
+src/sure_eval/evaluation/**/.cache/
+src/sure_eval/evaluation/**/checkpoints/
+src/sure_eval/evaluation/**/weights/
+
+# Local app/session artifacts
+.Rapp.history
+
+# Large runtime artifacts
+/results/
+artifacts/
+*.tar.gz
+
+# Local analysis / generated reports
+reports/xforge/
+data/.runtime/
+data/artifacts/
+data/xforge_oref_smoke/
+
+# Local code intelligence caches
+.codegraph/
+
+# Local external checkout symlinks
+XForge
+
+# -----------------------------------------------------------------------------
+# Collaboration cleanup additions
+# -----------------------------------------------------------------------------
+
+# Local virtualenv variants
+.venv.*/
+
+# Python wheel/binary dependency bundles
+*.whl
+
+# Root generated report snapshot
+report_snapshot.md
+
+# Keep checked-in user manuals. Do not ignore these generated publication
+# artifacts unless the documentation release process changes explicitly.
+!docs/SURE-EVAL_User_Manual.md
+!docs/SURE-EVAL_User_Manual.html
+!docs/SURE-EVAL_User_Manual.pdf
+
+# Model reproducibility bundles that should be rebuilt or stored externally.
+src/sure_eval/models/*/repro_bundle/bin/
+src/sure_eval/models/*/repro_bundle/wheelhouse/
+src/sure_eval/models/*/repro_bundle/venv_seed/
+src/sure_eval/models/*/repro_bundle/.venv/
+
+# Model-local copied datasets and expanded run artifacts.
+src/sure_eval/models/*/eval_runs*/
+src/sure_eval/models/*/.datasets/
+src/sure_eval/models/*/**/.datasets/
+src/sure_eval/models/*/**/datasets/sure_benchmark/
+
+# Local override config files
+*.local.json
+*.local.yaml
+*.local.yml
+
+# Local binary tool shims. Install these through system package managers,
+# uv, or collaborator-local setup scripts instead of committing binaries.
+bin/uv
+bin/uvx
+bin/kimi
+bin/kimi-cli

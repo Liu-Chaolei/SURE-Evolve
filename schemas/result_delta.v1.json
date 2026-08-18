@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sure.eval.result_delta.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "model", "base_published_index", "additions", "created_at", "automatic_publish_allowed"],
+  "properties": {
+    "schema": {"const": "sure.eval.result_delta.v1"},
+    "status": {"const": "pending_human_review"},
+    "model": {"type": "object", "required": ["id", "artifact_sha256"]},
+    "base_published_index": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "additions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inference_runs", "evaluation_runs"],
+      "properties": {
+        "inference_runs": {"type": "array"},
+        "evaluation_runs": {"type": "array"}
+      }
+    },
+    "created_at": {"type": "string", "minLength": 1},
+    "automatic_publish_allowed": {"const": false}
+  }
+}

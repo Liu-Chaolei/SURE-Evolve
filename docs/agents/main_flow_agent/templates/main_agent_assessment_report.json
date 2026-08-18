@@ -1,0 +1,14 @@
+{
+  "schema": "sure.eval.assessment_report.v2",
+  "status": "",
+  "created_at": "",
+  "request_id": "",
+  "model_id": "",
+  "protocol_id": "standard_system",
+  "reuse_action": "",
+  "identity_checks_passed": false,
+  "artifact_checks_passed": false,
+  "nfs_modified": false,
+  "reason_codes": [],
+  "blockers": []
+}

@@ -1,0 +1,21 @@
+{
+  "schema": "sure.eval.dataset_resolution.v2",
+  "status": "",
+  "created_at": "",
+  "request_id": "",
+  "datasets": [
+    {
+      "id": "",
+      "name": "",
+      "version": "",
+      "split": "",
+      "manifest_sha256": "",
+      "sample_count": 0,
+      "source_path": "",
+      "task": "",
+      "language": ""
+    }
+  ],
+  "skipped": [],
+  "blockers": []
+}

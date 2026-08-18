@@ -1,0 +1,77 @@
+{
+  "$schema": "./verdict.schema.json",
+  "instance_id": "",
+  "timestamp": "",
+  "model_id": "",
+  "status": "pending",
+  "backend": {
+    "type": "uv",
+    "choice_reason": ""
+  },
+  "build": {
+    "success": false,
+    "duration_seconds": 0,
+    "log_path": ""
+  },
+  "local_deployment": {
+    "required": false,
+    "status": "not_required",
+    "phase1_local_validation_passed": false,
+    "docker": {
+      "files_present": false,
+      "build_passed": false,
+      "validate_passed": false,
+      "image_tag": "",
+      "build_log_path": "",
+      "validate_log_path": ""
+    },
+    "registry": {
+      "push_passed": false,
+      "pull_verify_passed": false,
+      "push_log_path": "",
+      "pull_verify_log_path": ""
+    },
+    "vc": {
+      "submit_passed": false,
+      "validate_passed": false,
+      "submit_record_path": "",
+      "validate_log_path": ""
+    },
+    "completion_rule": "deployment_type == local requires docker files, docker build, docker validate, docker push, registry pull verify, and VC validation before final passed/tool_ready"
+  },
+  "validation": {
+    "import_test": {
+      "passed": false,
+      "duration_ms": 0,
+      "error": null
+    },
+    "load_test": {
+      "passed": false,
+      "duration_ms": 0,
+      "error": null
+    },
+    "infer_test": {
+      "passed": false,
+      "duration_ms": 0,
+      "error": null
+    },
+    "contract_test": {
+      "passed": false,
+      "duration_ms": 0,
+      "error": null
+    }
+  },
+  "failure": {
+    "type": null,
+    "category": null,
+    "message": null,
+    "retryable": false
+  },
+  "artifacts": {
+    "spec_path": "",
+    "wrapper_path": "",
+    "lockfile_path": null,
+    "log_path": ""
+  },
+  "notes": ""
+}

@@ -1,0 +1,24 @@
+id: scoring/vad_auc_roc
+version: v1
+stage: scoring
+language_sensitive: false
+input_schema: vad_normalized_bundle
+output_schema: vad_auc_roc_report
+implementation: sure_eval.evaluation.nodes.scoring.vad_auc_roc.node
+metrics:
+  - auc_roc
+reported_fields:
+  - num_auc_samples
+  - positive_frames
+  - negative_frames
+internal_stages:
+  - frame_center_sampling
+  - reference_label_lookup
+  - score_coverage_filter
+  - rank_auc
+notes:
+  - The selected AUC route requires frame_scores before this node runs.
+  - AUC uses only explicit frame_scores intervals.
+  - Frame centers not covered by frame_scores do not participate.
+  - AUC is undefined and reported as null when participating frames have a single label class.
+  - speech_segments are never used as hard-label score fallback for AUC.

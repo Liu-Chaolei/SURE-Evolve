@@ -1,0 +1,14 @@
+{
+  "schema": "sure.eval.main_flow_run_report.v2",
+  "status": "",
+  "created_at": "",
+  "request_id": "",
+  "model": {"id": "", "artifact_sha256": ""},
+  "datasets": [],
+  "protocol": {"id": "standard_system", "version": "", "effective_params_sha256": ""},
+  "reuse": {"action": "", "source_index": null, "inference_id": null, "evaluation_id": null},
+  "execution": {"inference_id": null, "evaluation_id": null, "result_root": null},
+  "publication": {"required": false, "manifest_path": null, "automatic_publish_allowed": false},
+  "nfs_modified": false,
+  "reason_codes": []
+}

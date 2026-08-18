@@ -1,0 +1,13 @@
+schema: sure.eval.storage.v1
+
+# Published artifacts are read-only inputs to both agents. These paths are not
+# user-configurable and are the only registry roots used at runtime.
+registry:
+  models_read_root: /hpc_stor03/project/oref/nfs/models
+  results_read_root: /hpc_stor03/project/oref/nfs/results
+
+# New artifacts remain repository-local until a human reviews and publishes
+# them to the NFS registry.
+staging:
+  models_write_root: src/sure_eval/models
+  results_write_root: results

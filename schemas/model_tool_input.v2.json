@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sure.eval.model_tool_input.v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["model_id", "task_type", "deployment_type", "repository", "weights", "environment"],
+  "properties": {
+    "schema": {"const": "sure.eval.model_tool_input.v2"},
+    "model_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(?:__[A-Za-z0-9][A-Za-z0-9._-]*)*$"},
+    "task_type": {"type": "string", "minLength": 1},
+    "deployment_type": {"enum": ["local", "api"]},
+    "repository": {"type": "object", "additionalProperties": false, "required": ["url", "commit"], "properties": {"url": {"type": "string", "minLength": 1}, "commit": {"type": "string", "minLength": 1}}},
+    "weights": {"type": "object", "additionalProperties": false, "required": ["source", "revision"], "properties": {"source": {"type": "string", "minLength": 1}, "revision": {"type": "string", "minLength": 1}}},
+    "environment": {"type": "object", "additionalProperties": false, "required": ["preferred_backend", "python_version"], "properties": {"preferred_backend": {"type": "string", "minLength": 1}, "python_version": {"type": "string", "minLength": 1}}}
+  }
+}

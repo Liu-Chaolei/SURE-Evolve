@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sure.eval.publication_manifest.v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "model_id", "source_model_root", "target_registry_root", "result_index", "result_delta", "derived_reports", "publication_strategy", "base_published_index", "created_at", "automatic_publish_allowed"],
+  "properties": {
+    "schema": {"const": "sure.eval.publication_manifest.v2"},
+    "status": {"const": "pending_human_review"},
+    "model_id": {"type": "string", "minLength": 1},
+    "source_model_root": {"type": "string", "minLength": 1},
+    "target_registry_root": {"type": "string", "minLength": 1},
+    "result_index": {"const": "result_index.json"},
+    "result_delta": {"oneOf": [{"const": "result_delta.json"}, {"type": "null"}]},
+    "derived_reports": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["report_jsonl", "report_snapshot", "view_source"],
+      "properties": {
+        "report_jsonl": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "row_count"],
+          "properties": {
+            "path": {"const": "report.jsonl"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "row_count": {"type": "integer", "minimum": 0}
+          }
+        },
+        "report_snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {"const": "report_snapshot.md"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "view_source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "staged_result_index_sha256", "result_delta_sha256", "base_published_index"],
+          "properties": {
+            "kind": {"enum": ["staged_index", "verified_index_plus_delta"]},
+            "staged_result_index_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "result_delta_sha256": {
+              "oneOf": [
+                {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                {"type": "null"}
+              ]
+            },
+            "base_published_index": {
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["path", "sha256"],
+                  "properties": {
+                    "path": {"type": "string", "minLength": 1},
+                    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "publication_strategy": {"enum": ["initialize_index", "merge_delta"]},
+    "base_published_index": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        }
+      ]
+    },
+    "created_at": {"type": "string", "minLength": 1},
+    "automatic_publish_allowed": {"const": false}
+  }
+}

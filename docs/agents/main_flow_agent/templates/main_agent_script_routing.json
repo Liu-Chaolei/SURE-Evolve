@@ -1,0 +1,16 @@
+{
+  "schema": "sure.eval.script_routing.v2",
+  "status": "planned",
+  "created_at": "",
+  "request_id": "",
+  "model_id": "",
+  "protocol_id": "standard_system",
+  "reuse_action": "",
+  "steps": [
+    {"name": "generate_predictions", "script": "scripts/generate_predictions_via_server.py", "enabled": false},
+    {"name": "finalize_inference", "script": "scripts/finalize_inference_run.py", "enabled": false},
+    {"name": "evaluate", "script": "scripts/run_evaluation_bridge.py", "enabled": false}
+  ],
+  "forbidden_scripts": ["scripts/evaluate_predictions.py"],
+  "blockers": []
+}

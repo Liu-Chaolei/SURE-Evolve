@@ -1,0 +1,12 @@
+{
+  "schema": "sure.eval.model_resolution.v2",
+  "status": "",
+  "created_at": "",
+  "request_id": "",
+  "model": {"id": "", "artifact_sha256": ""},
+  "publication": {"status": "", "artifact_manifest_sha256": ""},
+  "protocol_capabilities": [],
+  "handoff_to_model_tool_agent": false,
+  "reason_codes": [],
+  "blockers": []
+}

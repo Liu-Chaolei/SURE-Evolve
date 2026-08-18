@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sure.eval.inference_protocol_resolution.v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "protocol_id", "protocol_version", "policy", "standard_params", "model_params", "enforcement", "provenance", "effective_params_sha256", "unmapped"],
+  "properties": {
+    "schema": {"const": "sure.eval.inference_protocol_resolution.v2"},
+    "protocol_id": {"enum": ["standard_system", "strict_core"]},
+    "protocol_version": {"type": "string", "minLength": 1},
+    "policy": {"enum": ["official_defaults", "constrained"]},
+    "standard_params": {"type": "object"},
+    "model_params": {"type": "object"},
+    "enforcement": {"type": "object"},
+    "provenance": {"type": "object"},
+    "effective_params_sha256": {"$ref": "#/$defs/sha256"},
+    "unmapped": {"type": "object", "maxProperties": 0}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

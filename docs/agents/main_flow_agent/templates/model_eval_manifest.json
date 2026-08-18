@@ -1,0 +1,12 @@
+{
+  "schema": "sure.eval.model_evaluation_manifest.v2",
+  "status": "pending",
+  "created_at": "",
+  "model": {"id": "", "artifact_sha256": ""},
+  "datasets": [],
+  "protocol": {"id": "standard_system", "version": "", "effective_params_sha256": ""},
+  "reuse_decision_path": "",
+  "inference_id": null,
+  "evaluation_id": null,
+  "publication_manifest_path": null
+}

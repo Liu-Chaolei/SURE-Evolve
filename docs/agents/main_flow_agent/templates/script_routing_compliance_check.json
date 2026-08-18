@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sure.eval.script_routing_compliance.v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "protocol_policy", "storage_policy", "evaluation_policy", "compliant", "violations"],
+  "properties": {
+    "schema": {"const": "sure.eval.script_routing_compliance.v2"},
+    "status": {"enum": ["passed", "failed"]},
+    "protocol_policy": {
+      "type": "object",
+      "required": ["selected_protocol_id", "allowed_protocol_ids", "default_protocol_id"],
+      "properties": {
+        "selected_protocol_id": {"enum": ["standard_system", "strict_core"]},
+        "allowed_protocol_ids": {"const": ["standard_system", "strict_core"]},
+        "default_protocol_id": {"const": "standard_system"}
+      }
+    },
+    "storage_policy": {"type": "object"},
+    "evaluation_policy": {"type": "object"},
+    "compliant": {"type": "boolean"},
+    "violations": {"type": "array", "items": {"type": "string"}}
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "schema": "sure.eval.task_classification.v2",
+  "status": "",
+  "created_at": "",
+  "request_id": "",
+  "execution_mode": "auto",
+  "requires_inference": null,
+  "requires_evaluation": null,
+  "reason_codes": [],
+  "blockers": []
+}

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sure.eval.evaluation_input_manifest.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "task", "dataset", "selection", "roles"],
+  "properties": {
+    "schema": {"const": "sure.eval.evaluation_input_manifest.v1"},
+    "task": {"enum": ["asr", "s2tt", "kws", "vad", "classification", "ser", "gr", "slu", "sd", "sa_asr", "se", "speech_enhancement", "tts", "vc", "tse"]},
+    "language": {"type": ["string", "null"]},
+    "dataset": {"type": "object", "required": ["id", "name", "version", "split", "manifest_sha256", "sample_count"]},
+    "selection": {
+      "type": "object",
+      "properties": {
+        "metric": {"type": "string", "minLength": 1},
+        "metrics": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "pipeline_id": {"type": "string", "minLength": 1}
+      },
+      "oneOf": [
+        {"required": ["metric"]},
+        {"required": ["metrics"]},
+        {"required": ["pipeline_id"]}
+      ]
+    },
+    "roles": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "options": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "keyword": {"type": "string"},
+        "macro_recall_false_alarms": {"type": "integer", "minimum": 0},
+        "device": {"type": "string"},
+        "cache_dir": {"type": "string"}
+      }
+    }
+  }
+}

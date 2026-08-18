@@ -1,0 +1,23 @@
+{
+  "schema": "sure.eval.execution_surface.v2",
+  "status": "materialized",
+  "created_at": "",
+  "request_id": "",
+  "model_id": "",
+  "inference_id": "",
+  "evaluation_id": "",
+  "inference_source": "staged",
+  "protocol_id": "standard_system",
+  "entrypoint_path": "",
+  "commands": [],
+  "storage": {
+    "models_read_root": "/hpc_stor03/project/oref/nfs/models",
+    "results_read_root": "/hpc_stor03/project/oref/nfs/results",
+    "results_write_root": "results",
+    "nfs_write_allowed": false
+  },
+  "source_provenance": {
+    "template_file": "docs/agents/main_flow_agent/templates/run_single_model_single_dataset.sh",
+    "template_sha256": ""
+  }
+}
