@@ -1,0 +1,78 @@
+task: ASR
+language_sensitive: true
+canonical_entry: sure_eval.evaluation.tasks.asr.pipeline.evaluate_asr_files
+default_metrics:
+  zh: cer
+  en: wer
+  cs: mer
+default_pipelines:
+  zh:
+    cer:
+      default: asr.zh.cer.wetext_norm_zh_itn_v1.wenet_cer_v1
+      variants:
+        wetext_norm_zh_itn: asr.zh.cer.wetext_norm_zh_itn_v1.wenet_cer_v1
+        aispeech_norm_zh: asr.zh.cer.aispeech_norm_zh_v1.wenet_cer_v1
+        canonical_itn_zh: asr.zh.cer.canonical_itn_zh_v1.token_cer_v1
+  en:
+    wer:
+      default: asr.en.wer.whisper_norm_english_v1.wenet_wer_v1
+      variants:
+        whisper_norm_english: asr.en.wer.whisper_norm_english_v1.wenet_wer_v1
+        aispeech_norm_en: asr.en.wer.aispeech_norm_en_v1.wenet_wer_v1
+        canonical_itn_en: asr.en.wer.canonical_itn_en_v1.token_mer_v1
+  cs:
+    mer:
+      default: asr.cs.mer.aispeech_norm_cs_v1.wenet_mer_v1
+      variants:
+        aispeech_norm_cs: asr.cs.mer.aispeech_norm_cs_v1.wenet_mer_v1
+        canonical_itn_cs: asr.cs.mer.canonical_itn_cs_v1.token_mer_v1
+input_contracts:
+  scoring/wenet_cer:
+    purpose: character_error_rate
+    required_roles: [hyp, ref]
+    row_format: key_text
+    alignment_key: key
+    aggregation: corpus_edit_distance
+    main_report: true
+  scoring/wenet_wer:
+    purpose: word_error_rate
+    required_roles: [hyp, ref]
+    row_format: key_text
+    alignment_key: key
+    aggregation: corpus_edit_distance
+    main_report: true
+  scoring/wenet_mer:
+    purpose: mixed_error_rate_for_code_switch_asr
+    required_roles: [hyp, ref]
+    row_format: key_text
+    alignment_key: key
+    aggregation: corpus_edit_distance
+    main_report: true
+  scoring/token_cer:
+    purpose: canonical_written_form_character_error_rate
+    required_roles: [hyp, ref]
+    row_format: key_text
+    alignment_key: key
+    aggregation: corpus_token_edit_distance
+    main_report: true
+  scoring/token_mer:
+    purpose: canonical_mixed_token_error_rate
+    required_roles: [hyp, ref]
+    row_format: key_text
+    alignment_key: key
+    aggregation: corpus_token_edit_distance
+    main_report: true
+legacy_reference:
+  evaluator: sure_eval.evaluation.sure_evaluator.SUREEvaluator
+  methods:
+    - SUREEvaluator._eval_asr
+    - SUREEvaluator._eval_asr_codeswitch
+notes:
+  - ASR compatibility metric classes should route through the canonical task pipeline.
+  - Legacy SUREEvaluator remains the regression oracle while other tasks are migrated.
+  - English WER defaults to OpenAI Whisper English normalization; the legacy AISpeech route remains available as asr.en.wer.aispeech_norm.wenet_wer.
+  - Mandarin CER defaults to WeTextProcessing inverse text normalization (normalization/wetext_norm profile zh_itn) before WeNet CER.
+  - The legacy AISpeech Mandarin CER route remains available explicitly as asr.zh.cer.aispeech_norm.wenet_cer.
+  - NIST SCTK sclite scoring is available only through explicit scorer arguments such as scorer="sctk_sclite"; no default route uses sctk_sclite.
+  - Canonical ITN routes are selected by pipeline_id and keep the reported metric as cer, wer, or mer. They require the [canonical] extra (cn2an + rapidfuzz), and identical scores require an identical cn2an version (recorded in each run's node trace).
+  - Canonical MER/WER routes share the token_mer scorer. Text without latin letters degenerates to the zh canonical CER tokenization, and text without CJK degenerates to the en canonical WER tokenization. For en/cs the normalization stage additionally whisper-normalizes latin spans (contraction expansion, spoken numbers to digits, spoken-filler removal, British-to-American spelling) using the vendored Whisper English normalizer; spans without latin letters pass through unchanged.
