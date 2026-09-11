@@ -60,6 +60,11 @@ class FakeXlabIdeaProvider:
                 "risks": [],
                 "resource_class": "test",
             }
+            if request.execution_contract.get("allowed_change_domains") == ["arch"]:
+                candidate_type = "arch"
+                spec.update(change_domains=["arch"], requires_training=True,
+                            change_set=[{"domain": "arch", "target": f"component_{index}",
+                                         "description": "Change model structure"}])
             artifact = {"idea_id": idea_id, "spec": spec, "candidate_type": candidate_type}
             ideas.append(
                 IdeaItem(

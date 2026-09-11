@@ -41,8 +41,8 @@ sure:
     SURE_ASR_REQUIRE_ZIPFORMER_WRAPPER: '1'
     SURE_MAX_TRAIN_EPOCHS: '30'
     SURE_ASR_FIXED_SEED: '42'
-    SURE_MAX_DURATION: '30'
-    SURE_BASELINE_TRAIN_MAX_DURATION: '30'
+    SURE_MAX_DURATION: '240'
+    SURE_BASELINE_TRAIN_MAX_DURATION: '240'
     SURE_BASELINE_DECODE_MAX_DURATION: '30'
     SURE_DECODE_DURATION_MIN: '30'
     SURE_DECODE_DURATION_MAX: '30'
@@ -101,7 +101,7 @@ sure:
     - feedforward-dim
     - encoder-unmasked-dim
     training_seed: 42
-    max_duration: 30
+    max_duration: 240
     metric: WER
     metric_direction: lower
     constraints:
@@ -130,18 +130,18 @@ sure:
     max_segments: 30
 max_research_rounds: 6
 llm:
-  openai:
+  zai_flash:
     provider: openai
-    model: ${SURE_AGENT_MODEL}
-    api_key: ${OPENAI_API_KEY}
-    base_url: ${OPENAI_BASE_URL}
+    model: glm-5.3-flash
+    api_key: ${ZAI_API_KEY}
+    base_url: ${ZAI_BASE_URL}
     temperature: 1
     max_tokens: 32768
     timeout: 3600
-  default: openai
+  default: zai_flash
 agents:
   prefetch:
-    llm: openai
+    llm: zai_flash
     max_turns: 10
     tools:
       builtin: []
@@ -153,7 +153,7 @@ agents:
     system_prompt_file: /shared/chaolei.liu/SURE-Evolve/playground/sure_master/prompts/prefetch_system_prompt.txt
     user_prompt_file: /shared/chaolei.liu/SURE-Evolve/playground/sure_master/prompts/prefetch_user_prompt.txt
   draft:
-    llm: openai
+    llm: zai_flash
     max_turns: 10
     tools:
       builtin: []
@@ -165,7 +165,7 @@ agents:
     system_prompt_file: /shared/chaolei.liu/SURE-Evolve/playground/sure_master/prompts/draft_system_prompt.txt
     user_prompt_file: /shared/chaolei.liu/SURE-Evolve/playground/sure_master/prompts/draft_user_prompt.txt
   debug:
-    llm: openai
+    llm: zai_flash
     max_turns: 10
     tools:
       builtin: []
@@ -177,7 +177,7 @@ agents:
     system_prompt_file: /shared/chaolei.liu/SURE-Evolve/playground/sure_master/prompts/debug_system_prompt.txt
     user_prompt_file: /shared/chaolei.liu/SURE-Evolve/playground/sure_master/prompts/debug_user_prompt.txt
   improve:
-    llm: openai
+    llm: zai_flash
     max_turns: 10
     tools:
       builtin: []
@@ -189,7 +189,7 @@ agents:
     system_prompt_file: /shared/chaolei.liu/SURE-Evolve/playground/sure_master/prompts/improve_system_prompt.txt
     user_prompt_file: /shared/chaolei.liu/SURE-Evolve/playground/sure_master/prompts/improve_user_prompt.txt
   reseach:
-    llm: openai
+    llm: zai_flash
     max_turns: 10
     tools:
       builtin: []
@@ -201,7 +201,7 @@ agents:
     system_prompt_file: /shared/chaolei.liu/SURE-Evolve/playground/sure_master/prompts/reseach_system_prompt.txt
     user_prompt_file: /shared/chaolei.liu/SURE-Evolve/playground/sure_master/prompts/reseach_user_prompt.txt
   knowledge_promotion:
-    llm: openai
+    llm: zai_flash
     max_turns: 10
     tools:
       builtin: []
@@ -213,7 +213,7 @@ agents:
     system_prompt_file: /shared/chaolei.liu/SURE-Evolve/playground/sure_master/prompts/knowledge_promotion_system_prompt.txt
     user_prompt_file: /shared/chaolei.liu/SURE-Evolve/playground/sure_master/prompts/knowledge_promotion_user_prompt.txt
   wisdom_promotion:
-    llm: openai
+    llm: zai_flash
     max_turns: 10
     tools:
       builtin: []
@@ -227,7 +227,7 @@ agents:
 session:
   type: local
   local:
-    working_dir: /shared/chaolei.liu/SURE-Evolve/runs/tedlium3_evolution/workspace
+    working_dir: /shared/chaolei.liu/SURE-Evolve/runs/tedlium3_glm/workspace
     timeout: 86400
     gpu_devices: none
     parallel:
@@ -259,5 +259,12 @@ xlab:
     - /shared/chaolei.liu/XLab/xlab/skills/sure_master/scripts/xlab_idea_client.py
     timeout_seconds: 14400
     environment:
-      XLAB_SURE_RUN_ROOT: /shared/chaolei.liu/SURE-Evolve/runs/xlab_asr_evolution
+      XLAB_SURE_RUN_ROOT: /shared/chaolei.liu/SURE-Evolve/runs/xlab_asr_glm
       XLAB_SURE_SURVEY_PATH: /shared/chaolei.liu/XLab/.xlab/runs/20260910-survey-asr-v2/artifacts/survey.json
+      XLAB_RESEARCH_IDEA_AGENT_MODEL: glm-5.3
+      XLAB_RESEARCH_IDEA_GENERATION_MODEL: glm-5.3
+      XLAB_RESEARCH_IDEA_EVALUATION_MODEL: glm-5.3-flash
+      XLAB_RESEARCH_IDEA_FUSION_MODEL: glm-5.3-flash
+api_profile:
+  provider: zai
+  env_file: /shared/chaolei.liu/SURE-Evolve/.env

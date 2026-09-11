@@ -237,120 +237,16 @@ class SearchControllerTests(unittest.TestCase):
 
 
 class FullTrainingControllerTests(unittest.TestCase):
-    def test_baseline_and_finalists_use_fresh_full_budget_and_one_parallel_batch(self):
+    def test_post_search_never_dispatches_training(self):
         from playground.sure_master.core.full_training import retrain_selected
+        controller = SimpleNamespace(sure_config={})
+        baseline = {"idea_id": "baseline"}
+        candidates = [{"idea_id": "candidate"}]
+        self.assertEqual(retrain_selected(controller, baseline, candidates), (baseline, candidates))
+        controller.sure_config = {"full_training": {"enabled": True, "data": "/full", "epochs": 30}}
+        with self.assertRaisesRegex(ValueError, "Post-search retraining is retired"):
+            retrain_selected(controller, baseline, candidates)
 
-        with tempfile.TemporaryDirectory() as t:
-            root = Path(t)
-            dispatched = []
-
-            class Experiment:
-                def __init__(self, index):
-                    self.exp_name = f"exp_{index}"
-                    self.execution_env = {"SURE_PARENT_MODEL_ARTIFACT": "subset-parent"}
-
-                def run_existing_code(self, **kwargs):
-                    dispatched.append((self.execution_env.copy(), kwargs))
-                    return (
-                        True,
-                        0.2,
-                        "id",
-                        kwargs["code"],
-                        {
-                            "produced_artifacts": {
-                                "model_artifact": str(
-                                    root / self.exp_name / "manifest.json"
-                                )
-                            }
-                        },
-                    )
-
-            class Controller:
-                exp_index = 20
-                sure_config = {
-                    "full_training": {
-                        "enabled": True,
-                        "data": "/shared/full",
-                        "epochs": 30,
-                    }
-                }
-                task_card = SimpleNamespace(is_lower_better=True)
-                session = SimpleNamespace(
-                    config=SimpleNamespace(workspace_path=str(root))
-                )
-
-                def _is_valid_score(self, s):
-                    return s is not None
-
-                def _create_run_exp(self, stage, index):
-                    return Experiment(index)
-
-                def _role_paths(self):
-                    return {"ref": "/shared/regular.txt"}
-
-                def execute_parallel_tasks(self, jobs, **kwargs):
-                    self.workers = kwargs["max_workers"]
-                    return [job() for job in jobs]
-
-            controller = Controller()
-            plan = {
-                "recipe": "/shared/frozen-recipe",
-                "train_args": [],
-                "decode_args": [],
-                "inference": {
-                    "decoding_method": "greedy_search",
-                    "decode_avg": 1,
-                    "use_averaged_model": "0",
-                },
-            }
-            baseline = {
-                "idea_id": "baseline",
-                "score": 0.5,
-                "model_artifact": "baseline",
-            }
-            candidates = [
-                {"idea_id": str(i), "score": s, "model_artifact": str(i)}
-                for i, s in enumerate((0.4, 0.3, 0.2))
-            ]
-            with patch(
-                "playground.sure_master.core.full_training.training_plan",
-                side_effect=lambda artifact: {
-                    **plan,
-                    "train_args": [
-                        "--base-lr",
-                        "0.04" if artifact == "baseline" else "0.0" + artifact,
-                    ],
-                },
-            ):
-                full_baseline, finalists = retrain_selected(
-                    controller, baseline, candidates
-                )
-            self.assertEqual(controller.workers, 3)
-            self.assertEqual([r["idea_id"] for r in finalists], ["2", "1"])
-            self.assertEqual(full_baseline["idea_id"], "baseline")
-            for env, args in dispatched:
-                self.assertEqual(env["SURE_MAX_TRAIN_EPOCHS"], "30")
-                self.assertNotIn("SURE_PARENT_MODEL_ARTIFACT", env)
-                self.assertEqual(
-                    args["base_model_source_overrides"]["data"], "/shared/full"
-                )
-                self.assertNotIn("--model-artifact", args["code"])
-                self.assertEqual(args["role_paths"]["ref"], "/shared/regular.txt")
-
-            # Two decoding variants of the same training recipe must share training.
-            dispatched.clear()
-            controller = Controller()
-            with patch(
-                "playground.sure_master.core.full_training.training_plan",
-                return_value=plan,
-            ):
-                _, shared = retrain_selected(controller, baseline, candidates)
-            kinds = [args["candidate_type_hint"] for _, args in dispatched]
-            self.assertEqual(kinds.count("fine_tune"), 1)
-            self.assertEqual(kinds.count("inference"), 2)
-            self.assertTrue(
-                all(record["shared_training_with"] == "baseline" for record in shared)
-            )
 
 
 class RestartRuntimeTests(unittest.TestCase):

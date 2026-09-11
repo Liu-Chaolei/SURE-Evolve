@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import gzip
-import shutil
 import json
 import math
 import random
@@ -182,6 +181,8 @@ def main() -> None:
     if not args.refs_only:
         prepare_features(splits, output, args.jobs)
     summary = {"fingerprint": fingerprint, "corpus": str(root), "refs": counts,
+               "training_selection": "full" if args.train_hours == 0 else "subset",
+               "requested_train_hours": args.train_hours,
                "features_ready": previous_ready or not args.refs_only,
                "splits": {k: {"utterances": len(v), "hours": sum(s.duration for s in v) / 3600} for k, v in splits.items()}}
     marker.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

@@ -8,8 +8,10 @@
 固定基线 → 每轮冻结最佳代码和模型 → XLab 生成 4 个 idea → 执行与评分 →
 提交最佳代码/模型 → XLab 总结 → 下一轮 → selection → 冻结方案 → holdout。
 
-同轮所有推理候选继承同一个轮初最佳模型。训练候选按固定初始化来源和预算重新实验，
-不在上一轮的 checkpoint 上累计训练。候选类型没有配额。失败也进入 XLab 反馈；
+当前 `sure.search_scope: architecture_only`：每轮四个候选都必须是结构改动，
+按固定初始化来源和预算重新实验，不在上一轮的 checkpoint 上累计训练。
+训练方法、训练预算和推理设置固定；每个候选在搜索阶段直接完成配置中的最终训练预算，再进行评分。
+不再采用短训筛选后对少数方案重训的流程。失败也进入 XLab 反馈；
 XLab 失败不切回内置 research。selection/holdout 由可信 wrapper 恢复模型推理，
 不重训、不 debug 改代码，holdout 不参与后续选优。
 
@@ -57,14 +59,15 @@ ref/hyp 同时裁剪到 UEM。记录 SURE pipeline/report，不直接与论文�
 ```python
 subprocess.run([
     os.environ['SURE_WORKER_PYTHON'], os.environ['SURE_TASK_WRAPPER'],
-    '--action', 'infer',
-    '--parameters-json', json.dumps({'inference': {'speed': 0.95}}),
+    '--action', 'arch',
+    '--parameters-json', json.dumps({'architecture': {'depth': 20}}),
 ], check=True)
 ```
 
 F5/SD 参数分为 `inference`、`training`、`architecture` 三个对象。
 ASR wrapper 兼容 `train_args_json`、`decode_args_json`、`decode_method`。
-动作是 `infer`、`fine_tune`、`arch`；固定基线使用 `baseline`。
+底层执行接口仍有 `infer`、`fine_tune`、`arch`；当前搜索仅允许 `arch`，不允许用
+`training` 或 `inference` 参数覆盖夹带其他优化。固定基线使用 `baseline`。
 冻结复评只接受 `infer --model-artifact ...`，禁止传入候选参数覆盖。
 
 `sure.model_artifact.v2` 保存权重、模型/推理配置、词表、vocoder 或 embedding/PLDA、
@@ -103,3 +106,23 @@ python run.py --agent sure_master \
   --run-dir /shared/chaolei.liu/SURE-Evolve/runs/tts_npu \
   --task '在固定预算下改进 F5-TTS 中文 CER；由 XLab 产生方案。'
 ```
+
+## 当前搜索范围
+
+`search_strategy` 继续是 `ordinary`，`axis` 留空；结构限制由 `search_scope` 单独控制，
+不会恢复 staged_axes。SureMaster 将结构范围、固定训练/推理设置随 execution_contract
+送给 XLab，审核后的四个候选还必须通过本地领域校验，才能进入实现阶段。
+旧批次会按当前范围重新校验，不会把以前的混合候选当成结构候选执行。
+改动范围后应使用新的运行目录；已有断点的执行契约不一致时会明确拒绝恢复。
+
+## 搜索即完整训练
+
+正式 ASR 配置使用 `training_mode: full_during_search`，数据是完整 TEDLIUM train，
+`SURE_MAX_TRAIN_EPOCHS` 和基线 epoch 都为 30。`ordinary-asr-*` 的数据路径由
+`SURE_FULL_DATA_DIR` 指定，不能指向 1h 或 `search_100h` 准备结果。
+TTS/SD 也直接完成 `task.training` 声明的预算后评分，没有控制器后置重训阶段；
+它们的具体训练步数由各自任务配置设置。
+
+旧配置中的 `full_training.enabled=true` 会在模型和工作区初始化之前，把最终数据和 epoch
+迁移到搜索预算，避免仅删除后置阶段却仍然短训。旧运行与新预算的契约不同，必须新建运行目录。
+轻量组件测试和性能校准保留；它们不参与候选选优，不属于小规模搜索训练。

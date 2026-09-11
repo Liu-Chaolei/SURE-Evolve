@@ -146,6 +146,7 @@ class ControllerSmokeTests(unittest.TestCase):
                 "coordinator": {"local_gpu_policy": "auto"},
                 "remote_training": {"enabled": False},
                 "metric_gpu": {"enabled": False},
+                "search_scope": "all",
                 "search_strategy": "staged_axes",
                 "staged_axes": {
                     "enabled": True,

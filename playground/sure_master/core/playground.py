@@ -67,6 +67,7 @@ from ..runtime.accelerator import runtime_environment
 from ..tasks import get_adapter
 from .datasets import split_specs
 from .artifacts import load_bundle
+from .search_scope import execution_contract as scoped_execution_contract
 
 
 _NO_GPU_SENTINELS = {"", "none", "null", "false", "cpu", "-1"}
@@ -541,7 +542,9 @@ class SureMasterPlayground(BasePlayground):
         self._xlab_idea_metadata: dict[Any, dict[str, Any]] = {}
         self.prefetch_descriptor: str | None = None
 
-        self.sure_config = self.config_manager.get("sure", {}) or {}
+        from .full_training import promote_full_training_to_search
+        self.sure_config = promote_full_training_to_search(self.config_manager.get("sure", {}) or {})
+        self._sync_sure_config()
         self._source_snapshot_path: Path | None = None
         self.task_card = self._load_task_card()
         self.base_model_profile = self._resolve_base_model_profile()
@@ -1110,7 +1113,7 @@ class SureMasterPlayground(BasePlayground):
                     break
         xlab_config = self.config_manager.get("xlab", {}) or {}
         generation_policy = {"max_attempts": (xlab_config.get("idea_generation") or {}).get("max_attempts", 8)}
-        execution_contract = {**self.task_adapter.context(), **dict(self.sure_config.get("execution_contract") or {})}
+        execution_contract = scoped_execution_contract(self.task_adapter.context(), self.sure_config)
         payload = {
             "request_id": request_id,
             "sure_run_id": run_id,
@@ -1188,6 +1191,8 @@ class SureMasterPlayground(BasePlayground):
             validate_idea_batch(batch, request)
         else:
             batch = self.xlab_provider.generate(request)
+        from .contracts import validate_idea_batch
+        validate_idea_batch(batch, request)
         batch_path.parent.mkdir(parents=True, exist_ok=True)
         batch_path.write_text(json.dumps(asdict(batch), ensure_ascii=False, indent=2) + "\n")
         self._xlab_last_batch_digest = batch.batch_digest
@@ -1409,6 +1414,15 @@ class SureMasterPlayground(BasePlayground):
                 baseline_record = state["baseline"]
                 scored_candidates = state["candidates"]
                 successful_training_candidates = state["successful_training_candidates"]
+            elif self.sure_config.get("initial_baseline_run"):
+                from .baseline_import import import_baseline
+                baseline_record, self.best_model_artifact = import_baseline(
+                    Path(self.sure_config["initial_baseline_run"]), self.sure_config,
+                    Path(self.session.config.workspace_path))
+                self.baseline_score = self.best_score = baseline_record["score"]
+                self.initial_code = self.best_solution = self.real_time_best_solution = baseline_record["code"]
+                scored_candidates = []
+                successful_training_candidates = 0
             else:
                 data_knowledge = ""
                 model_knowledge = ""
@@ -1764,8 +1778,7 @@ class SureMasterPlayground(BasePlayground):
                     break
 
             search_best_score = self.best_score
-            full_baseline, full_candidates = self.task_adapter.final_candidates(self, baseline_record, scored_candidates)
-            final_evaluation = self._final_evaluation(full_baseline, full_candidates)
+            final_evaluation = self._final_evaluation(baseline_record, scored_candidates)
             self._commit_best_state()
             best_dir = Path(self.session.config.workspace_path) / "best_solution"
             best_dir.mkdir(parents=True, exist_ok=True)

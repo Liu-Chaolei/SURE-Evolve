@@ -6,7 +6,6 @@ import fcntl
 import json
 import os
 import shlex
-import subprocess
 import time
 from pathlib import Path
 import yaml
@@ -132,7 +131,9 @@ def main():
 
     status(args.stage)
     config = yaml.safe_load(args.config.read_text())
-    data = config["sure"]["full_training"]["data"]
+    from playground.sure_master.core.full_training import promote_full_training_to_search
+    config["sure"] = promote_full_training_to_search(config["sure"])
+    data = config["sure"]["base_models"][config["sure"]["task_id"]]["source_paths"]["data"]
     if args.stage in ("prepare", "all"):
         status("prepare")
         job = submit_gate(
@@ -148,7 +149,7 @@ def main():
                 "--train-hours",
                 "0",
                 "--search-hours",
-                "100",
+                "0",
                 "--seed",
                 "42",
                 "--jobs",
@@ -229,9 +230,22 @@ def main():
         report = json.loads((args.output / "benchmark/benchmark.json").read_text())
         if report.get("status") != "passed":
             raise RuntimeError("Common training duration has not passed calibration")
-        from playground.sure_master.tools.with_xlab_environment import xlab_environment
+        from playground.sure_master.tools.benchmark_tedlium import training_signature
+        if report.get("training_signature") != training_signature(config["sure"]):
+            raise RuntimeError("Calibration is from another training data/budget; rerun benchmark for full-budget search")
+        from playground.sure_master.tools.with_xlab_environment import xlab_environment, zai_environment
 
-        os.environ.update(xlab_environment(Path("/shared/chaolei.liu/.pi/agent")))
+        api_profile = config.get("api_profile") or {}
+        if api_profile.get("provider") == "zai":
+            env = zai_environment(Path(api_profile["env_file"]))
+            os.environ.update(env)
+            from playground.sure_master.tools.zai_preflight import check_zai_api
+            api_result = check_zai_api(env)
+            atomic_json(args.output / "api_preflight.json", api_result)
+            if api_result["status"] != "passed":
+                raise RuntimeError("ZAI model access/compatibility check failed; see api_preflight.json")
+        else:
+            os.environ.update(xlab_environment(Path("/shared/chaolei.liu/.pi/agent")))
         from playground.sure_master.core.playground import SureMasterPlayground
 
         # Freeze the measured batch budget in a run-local config before any LLM call.

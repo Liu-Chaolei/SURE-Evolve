@@ -20,13 +20,15 @@ sure:
     log_tail_bytes: 65536
   execution_mode: local
   search_strategy: ordinary
+  search_scope: architecture_only
+  training_mode: full_during_search
   coordinator:
     local_gpu_policy: disabled
   remote_training:
     enabled: false
   initial_solution_path: playground/sure_master/baselines/zipformer_large_cr_ctc_rnnt_baseline.py
   inputs:
-    ref: ${SURE_DATA_DIR}/refs/asr_tedlium3_smoke_ref.txt
+    ref: ${SURE_FULL_DATA_DIR}/refs/asr_tedlium3_smoke_ref.txt
   execution_env:
     SURE_ASR_DATASET: tedlium3
     SURE_ASR_RECIPE_PROFILE: tedlium3_zipformer
@@ -36,7 +38,7 @@ sure:
     PYTHONPATH: ${SURE_EVOLVE_ROOT}:${SURE_ICEFALL_ROOT}
     SURE_ASR_ZIPFORMER_WRAPPER: ${SURE_EVOLVE_ROOT}/playground/sure_master/tools/run_icefall_zipformer_candidate.py
     SURE_ASR_REQUIRE_ZIPFORMER_WRAPPER: '1'
-    SURE_MAX_TRAIN_EPOCHS: '1'
+    SURE_MAX_TRAIN_EPOCHS: '30'
     SURE_ASR_FIXED_SEED: '42'
     SURE_MAX_DURATION: '30'
     SURE_BASELINE_TRAIN_MAX_DURATION: '30'
@@ -51,7 +53,7 @@ sure:
     SURE_USE_FP16: '0'
     SURE_BASELINE_USE_PRETRAINED: '0'
     SURE_DECODE_ONLY: '0'
-    SURE_BASELINE_EPOCH: '1'
+    SURE_BASELINE_EPOCH: '30'
     SURE_BASELINE_AVG: '1'
     SURE_BASELINE_USE_AVERAGED_MODEL: '0'
     SURE_BASELINE_WORLD_SIZE: '1'
@@ -60,14 +62,16 @@ sure:
     SURE_ASR_REQUIRE_LOCAL_CHECKPOINT: '1'
     SURE_ASR_FAIL_ON_TRAIN_FATAL_WITHOUT_CHECKPOINT: '1'
     SURE_DECODE_METHOD: greedy_search
-    SURE_RUN_TIMEOUT: '43200'
+    SURE_RUN_TIMEOUT: '0'
+    SURE_BASELINE_TRAIN_TIMEOUT: '0'
+    SURE_BASELINE_DECODE_TIMEOUT: '0'
     SURE_REQUIRE_CANDIDATE_CHANGES: '1'
   base_models:
     asr_en_wer:
       source_paths:
         root: ${SURE_ICEFALL_ROOT}
         recipe: ${SURE_ICEFALL_ROOT}/egs/tedlium3/ASR/zipformer
-        data: ${SURE_DATA_DIR}
+        data: ${SURE_FULL_DATA_DIR}
       python: ${SURE_WORKER_PYTHON}
   runtime:
     accelerator: npu
@@ -85,8 +89,9 @@ sure:
     accelerator: npu
     model_family: zipformer
     dataset: tedlium3
-    training_epochs: 1
-    training_hours: 1
+    training_epochs: 30
+    training_split: full_train
+    training_mode: full_during_search
     precision: fp32
     world_size: 1
     decode_method: greedy_search
@@ -105,10 +110,11 @@ sure:
     - Train only on train; never use test during search.
     - Use the same seed and epoch budget as baseline.
   final_evaluation:
-    selection_ref: ${SURE_DATA_DIR}/refs/asr_tedlium3_selection_ref.txt
-    test_ref: ${SURE_DATA_DIR}/refs/asr_tedlium3_test_ref.txt
+    selection_ref: ${SURE_FULL_DATA_DIR}/refs/asr_tedlium3_selection_ref.txt
+    test_ref: ${SURE_FULL_DATA_DIR}/refs/asr_tedlium3_test_ref.txt
   adapter: asr.zipformer
   require_model_artifact: true
+  controller_timeout_seconds: 0
   source_snapshot:
     enabled: true
   metric_runtime:

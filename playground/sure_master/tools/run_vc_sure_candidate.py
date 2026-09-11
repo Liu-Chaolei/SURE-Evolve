@@ -90,6 +90,8 @@ def load_sure_objects(config) -> tuple[Any, Any, SureMetricRunner, dict[str, str
     )
     if not task_cards_path.is_absolute():
         task_cards_path = PROJECT_ROOT / task_cards_path
+    from playground.sure_master.core.full_training import promote_full_training_to_search
+    sure_config = promote_full_training_to_search(sure_config)
     task_card = resolve_task_card(task_cards_path, sure_config.get("task_id", "asr_en_wer"))
 
     overrides = sure_config.get("base_models", {}) or {}

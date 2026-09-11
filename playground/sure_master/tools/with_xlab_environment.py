@@ -8,6 +8,26 @@ import subprocess
 from pathlib import Path
 
 
+def zai_environment(env_file: Path) -> dict[str, str]:
+    """Load the explicitly selected ZAI profile, without inheriting old providers."""
+    from dotenv import dotenv_values
+
+    values = dotenv_values(env_file)
+    missing = [key for key in ("ZAI_API_KEY", "ZAI_BASE_URL") if not values.get(key)]
+    if missing:
+        raise ValueError("Missing ZAI configuration: " + ", ".join(missing))
+    env = dict(os.environ)
+    env.update({key: str(values[key]) for key in ("ZAI_API_KEY", "ZAI_BASE_URL")})
+    env.update(OPENAI_API_KEY=env["ZAI_API_KEY"], OPENAI_BASE_URL=env["ZAI_BASE_URL"],
+               SURE_AGENT_MODEL="glm-5.3-flash", LLM_BASE_URL=env["ZAI_BASE_URL"],
+               LLM_MODEL="glm-5.3-flash")
+    for phase in ("AGENT", "GENERATION", "EVALUATION", "FUSION"):
+        env[f"XLAB_RESEARCH_IDEA_{phase}_MODEL"] = (
+            "glm-5.3" if phase in {"AGENT", "GENERATION"} else "glm-5.3-flash"
+        )
+    return env
+
+
 def xlab_environment(agent_dir: Path) -> dict[str, str]:
     settings = json.loads((agent_dir / "settings.json").read_text())
     models = json.loads((agent_dir / "models.json").read_text())

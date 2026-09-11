@@ -10,6 +10,35 @@ from pathlib import Path
 import yaml
 
 
+def training_signature(sure: dict) -> dict:
+    from playground.sure_master.core.artifacts import file_digest
+
+    data = Path(sure["base_models"][sure["task_id"]]["source_paths"]["data"]).resolve()
+    return {
+        "data": str(data),
+        "preparation_sha256": file_digest(data / "preparation.json"),
+        "epochs": int(sure["execution_env"]["SURE_MAX_TRAIN_EPOCHS"]),
+    }
+
+
+def training_cost_estimates(hours: float, epochs: int, throughput: float) -> dict:
+    import math
+
+    if not all(math.isfinite(v) and v > 0 for v in (hours, epochs, throughput)):
+        raise ValueError(
+            "Training size, epochs and throughput must be positive and finite"
+        )
+    per_candidate = hours * epochs / throughput
+    return {
+        "search_candidate_hours": per_candidate,
+        "six_round_training_hours": (1 + 4 * 6) * per_candidate,
+        "ten_round_training_hours": (1 + 4 * 10) * per_candidate,
+        "full_model_hours_estimate": per_candidate,
+        "post_search_training_hours": 0,
+        "estimate_unit": "aggregate training job-hours; excludes queueing and inference",
+    }
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", type=Path, required=True)
@@ -17,7 +46,12 @@ def main():
     p.add_argument("--duration", type=int)
     args = p.parse_args()
     config = yaml.safe_load(os.path.expandvars(args.config.read_text()))
-    sure = config["sure"]
+    from playground.sure_master.core.full_training import (
+        promote_full_training_to_search,
+    )
+
+    sure = promote_full_training_to_search(config["sure"])
+    config["sure"] = sure
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     if args.duration:
@@ -48,7 +82,10 @@ def main():
 
         baseline.ensure_workspace()
         cmd = baseline.build_train_command(
-            train_epochs=10, train_max_duration=args.duration, fp16="0", attempt_index=1
+            train_epochs=int(sure["execution_env"]["SURE_MAX_TRAIN_EPOCHS"]),
+            train_max_duration=args.duration,
+            fp16="0",
+            attempt_index=1,
         )
         subprocess.run(cmd, check=True, env=baseline.command_env())
         if not (output / "profile.json").exists():
@@ -96,16 +133,19 @@ def main():
         raise RuntimeError("No stable training duration passed; inspect benchmark logs")
     winner = max(eligible, key=lambda r: r["audio_hours_per_hour"])
     q = winner["audio_hours_per_hour"]
+    signature = training_signature(sure)
+    preparation = json.loads((Path(signature["data"]) / "preparation.json").read_text())
+    estimates = training_cost_estimates(
+        preparation["splits"]["train"]["hours"], signature["epochs"], q
+    )
     (output / "benchmark.json").write_text(
         json.dumps(
             {
                 "status": "passed",
                 "trials": trials,
                 "max_duration": winner["max_duration"],
-                "search_candidate_hours": 1000 / q,
-                "six_round_training_hours": 7000 / q,
-                "ten_round_training_hours": 11000 / q,
-                "full_model_hours_estimate": 453.8 * 30 / q,
+                "training_signature": signature,
+                **estimates,
             },
             indent=2,
         )

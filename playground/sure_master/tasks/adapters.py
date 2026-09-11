@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..core.artifacts import publish_bundle
+from ..core.search_scope import search_scope, STRUCTURE_ARGUMENTS
 from ..core.datasets import DatasetSplitSpec, split_specs, validate_split_groups
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -55,10 +56,6 @@ class BaseAdapter:
     def final_candidates(
         self, controller: Any, baseline: dict, candidates: list[dict]
     ) -> tuple[dict, list[dict]]:
-        if (controller.sure_config.get("full_training") or {}).get("enabled"):
-            raise ValueError(
-                f"Optional full_training is not implemented for {self.name}"
-            )
         return baseline, candidates
 
     def execute_candidate(
@@ -90,6 +87,9 @@ class BaseAdapter:
                 PROJECT_ROOT / "playground/sure_master/tools/run_task_candidate.py"
             ),
         }
+        env["SURE_SEARCH_SCOPE"] = search_scope(sure)
+        env["SURE_ARCH_ARGUMENTS_JSON"] = json.dumps((sure.get("execution_contract") or {}).get(
+            "structure_arguments", sorted(STRUCTURE_ARGUMENTS)))
         specs = split_specs(sure)
         if "search" in specs:
             env.update(self.phase_environment(specs["search"]))
@@ -186,9 +186,7 @@ class AsrAdapter(BaseAdapter):
         return "fine_tune" if trains or remote else "inference"
 
     def final_candidates(self, controller, baseline, candidates):
-        from ..core.full_training import retrain_selected
-
-        return retrain_selected(controller, baseline, candidates)
+        return baseline, candidates
 
     def execute_candidate(
         self, action, parameters, settings, manifest, resources, parent, frozen
@@ -244,6 +242,9 @@ class AsrAdapter(BaseAdapter):
         profile = sure["base_models"].get(sure["task_id"], {})
         sources = profile.get("source_paths") or {}
         data = Path(sources["data"])
+        if sure.get("training_mode") == "full_during_search":
+            from ..core.full_training import validate_full_training_data
+            validate_full_training_data(data)
         if not (data / "lang_bpe_500/bpe.model").is_file():
             raise FileNotFoundError("ASR BPE model missing")
         if (sure.get("execution_env") or {}).get("SURE_ASR_DATASET") == "tedlium3":

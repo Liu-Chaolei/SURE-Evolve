@@ -78,8 +78,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-timeout", default=os.environ.get("SURE_BASELINE_TRAIN_TIMEOUT", "43200"))
     parser.add_argument("--decode-timeout", default=os.environ.get("SURE_BASELINE_DECODE_TIMEOUT", "21600"))
     parser.add_argument("--decode-epoch", default="")
-    parser.add_argument("--decode-avg", default="1")
-    parser.add_argument("--use-averaged-model", default="0")
+    parser.add_argument("--decode-avg", default=os.environ.get("SURE_BASELINE_AVG", "1"))
+    parser.add_argument("--use-averaged-model", default=os.environ.get("SURE_BASELINE_USE_AVERAGED_MODEL", "0"))
     parser.add_argument("--decode-method", default=os.environ.get("SURE_DECODE_METHOD", "modified_beam_search"))
     parser.add_argument("--decode-max-duration", default=os.environ.get("SURE_BASELINE_DECODE_MAX_DURATION", "300"))
     return parser.parse_args()
@@ -327,6 +327,14 @@ def validate_candidate_args(
     train_extra_args: list[str],
     decode_extra_args: list[str],
 ) -> None:
+    from playground.sure_master.core.search_scope import restricted_search, validate_structure_args
+    if restricted_search(os.environ):
+        if candidate_type != ARCH or action != "train_decode":
+            raise ValueError("Architecture-only search requires arch training with the fixed recipe")
+        if train_extra_args:
+            validate_structure_args(train_extra_args, os.environ)
+        if decode_extra_args:
+            validate_structure_args(decode_extra_args, os.environ)
     train_names = arg_names(train_extra_args)
     decode_names = arg_names(decode_extra_args)
     reserved_train = train_names & {"--exp-dir", "--world-size", "--num-epochs", "--start-epoch", "--master-port", "--use-fp16"}
@@ -723,6 +731,17 @@ def write_candidate_record(
 
 def main() -> int:
     args = parse_args()
+    from playground.sure_master.core.search_scope import restricted_search
+    if restricted_search(os.environ):
+        fixed = {"train_epochs": os.environ.get("SURE_MAX_TRAIN_EPOCHS", "1"),
+                 "decode_method": os.environ.get("SURE_DECODE_METHOD", "modified_beam_search"),
+                 "decode_avg": os.environ.get("SURE_BASELINE_AVG", "1"),
+                 "use_averaged_model": os.environ.get("SURE_BASELINE_USE_AVERAGED_MODEL", "0")}
+        if args.decode_epoch and str(args.decode_epoch) != str(args.train_epochs):
+            raise ValueError("Architecture-only search must decode the fixed final training epoch")
+        for key, expected in fixed.items():
+            if str(getattr(args, key)) != str(expected):
+                raise ValueError(f"Architecture-only search fixes {key} to {expected}")
     if os.environ.get("SURE_ASR_FIXED_BUDGET") == "1":
         if args.action == "train_decode" and int(os.environ.get("SURE_REQUIRED_TRAIN_WORLD_SIZE", "8")) != current_world_size():
             raise ValueError("Training action does not match the allocated eight-card resource profile")

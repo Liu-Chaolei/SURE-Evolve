@@ -20,6 +20,7 @@ sure:
     log_tail_bytes: 65536
   execution_mode: local
   search_strategy: ordinary
+  search_scope: architecture_only
   coordinator:
     local_gpu_policy: disabled
   remote_training:

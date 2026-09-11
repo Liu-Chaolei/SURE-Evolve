@@ -41,6 +41,7 @@ from ..utils.code import (
 )
 from ..utils.metric import SureMetricResult, SureMetricRunner, format_metric_feedback
 from ...tasks import get_adapter
+from ..search_scope import restricted_search, GUIDANCE, validate_search_entrypoint, execution_contract as scoped_execution_contract
 from ..utils.task_cards import BaseModelProfile, SureTaskCard
 from ..utils.vc_remote import (
     VcRemoteTrainingExecutor,
@@ -421,6 +422,20 @@ class SureRunExp(BaseExp):
                     "detected": candidate_type,
                 }
             }
+            self._write_status(False, "candidate_type_mismatch", details=details)
+            return False, None, details
+
+        scope_env = {**self.execution_env, "SURE_CANDIDATE_PHASE": self.candidate_phase or self.stage}
+        try:
+            validate_search_entrypoint(code_to_run, scope_env)
+        except ValueError as exc:
+            self.metric_feedback = str(exc)
+            details = {"error": str(exc)}
+            self._write_status(False, "boundary_error", details=details)
+            return False, None, details
+        if restricted_search(scope_env) and candidate_type != ARCH:
+            self.metric_feedback = GUIDANCE
+            details = {"error": "Architecture-only search requires arch"}
             self._write_status(False, "candidate_type_mismatch", details=details)
             return False, None, details
 
@@ -1062,15 +1077,10 @@ class SureRunExp(BaseExp):
         return json.dumps(self.execution_env, ensure_ascii=False, indent=2)
 
     def _candidate_type_guidance_text(self) -> str:
-        return (
-            "Implement this reviewed XLab idea using the task wrapper and declared parameters. "
-            "There are no per-type quotas. inference never trains; fine_tune changes training; "
-            "arch changes model structure and trains. Training uses the fixed baseline initialization "
-            "and configured budget. Inference inherits the round's best model. "
-            "All replay-relevant settings must be recorded by the wrapper. "
-            + json.dumps(get_adapter(self.task_card.canonical_task).context())
-        )
-
+        sure = sure_config_from(self.config)
+        contract = scoped_execution_contract(get_adapter(self.task_card.canonical_task).context(), sure)
+        return (contract.get("research_guidance") or
+                "Implement the reviewed XLab idea with its declared execution type and fixed experiment budget.") + "\n" + json.dumps(contract)
 
     def _write_status(
         self,

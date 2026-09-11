@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import argparse
-import gzip
 import json
 import os
 import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import yaml
@@ -55,7 +53,8 @@ def check_config(config: dict, *, check_model: bool = True) -> dict:
     from playground.sure_master.core.utils.task_cards import resolve_task_card
     from playground.sure_master.runtime.accelerator import runtime_environment
 
-    sure = config["sure"]
+    from playground.sure_master.core.full_training import promote_full_training_to_search
+    sure = promote_full_training_to_search(config["sure"])
     card = resolve_task_card(sure["task_cards_path"], sure["task_id"])
     adapter = get_adapter(card.canonical_task, sure.get("adapter"))
     report = adapter.preflight(sure)

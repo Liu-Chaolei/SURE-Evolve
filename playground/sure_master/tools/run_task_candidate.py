@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from playground.sure_master.core.artifacts import bundle_resources
 from playground.sure_master.tasks import get_adapter
+from playground.sure_master.core.search_scope import validate_candidate_parameters
 
 
 def run(action: str, parameters: dict, artifact: str = "") -> None:
@@ -36,6 +37,7 @@ def run(action: str, parameters: dict, artifact: str = "") -> None:
         )
     if action == "baseline" and parameters:
         raise ValueError("Baseline parameters are fixed by the run configuration")
+    validate_candidate_parameters(action, parameters, os.environ, frozen=bool(frozen))
     parent = frozen or (
         os.environ.get("SURE_PARENT_MODEL_ARTIFACT", "") if action == "infer" else ""
     )

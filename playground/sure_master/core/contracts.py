@@ -1,7 +1,7 @@
 """Versioned contracts exchanged between SURE-Master and XLab."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .utils.fingerprints import digest, portable_path
@@ -248,6 +248,13 @@ def validate_idea_batch(batch: IdeaBatch, request: IdeaRequest) -> None:
         "inference": "inference",
     }
     for idea in batch.ideas:
+        if request.execution_contract.get("allowed_change_domains") == ["arch"]:
+            if (idea.candidate_type != "arch" or idea.spec.requires_training is not True
+                    or set(idea.spec.change_domains) != {"arch"}
+                    or not idea.spec.change_set
+                    or any(not isinstance(change, dict) or change.get("domain") != "arch"
+                           for change in idea.spec.change_set)):
+                raise ValueError("Architecture-only search requires arch candidates with only arch changes and fixed training/inference")
         if request.search_mode == "ordinary" and idea.axis is not None:
             raise ValueError("ordinary ideas must not specify axis")
         if request.axis is not None and idea.axis != request.axis:

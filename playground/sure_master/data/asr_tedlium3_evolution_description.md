@@ -1,24 +1,25 @@
 # TEDLIUM3 Zipformer evolution
 
-Optimize the native Icefall TEDLIUM3 Zipformer RNN-T. Use the supplied fixed
-100-hour train subset, shared 500-token BPE, FP32, seed 42, eight NPU ranks,
-and exactly ten training epochs. SURE evaluates English WER on the regular
-dev tier. Never read selection/test transcripts or optimize against their scores.
+Optimize the native Icefall TEDLIUM3 Zipformer RNN-T using the complete supplied
+training split and the final epoch budget in execution_contract. Every search
+candidate must finish that entire training budget before its WER can be compared.
+Do not use a small training subset, shortened screening training, or later finalist
+retraining. Keep the shared 500-token BPE, FP32, seed 42 and allocated world size.
+SURE evaluates English WER on the regular dev tier. Never read selection/test
+transcripts or optimize against their scores.
 
-XLab proposes four distinct evidence-backed hypotheses per round, freely mixing
-architecture, training and supported inference changes, with explicit ablations.
-All candidates that update weights train from scratch with the fixed budget;
-inherit implementation improvements, never extra training epochs. Inference uses
-the controller's frozen round-parent artifact. Keep RNN-T; CUDA-only beam kernels
-are unavailable on NPU. Do not change world size, seed, training data, tokenizer,
-common max-duration, training budget, evaluator, or accelerator environment.
+XLab proposes exactly four distinct evidence-backed architecture-only hypotheses
+per round, with explicit ablations. Keep the optimizer, loss, augmentation, data
+sampling and inference/decoding settings fixed. Training each changed architecture
+is required execution, not a training-strategy optimization. All candidates train
+from scratch using the same full data and final epoch budget as the baseline.
 
-Use SURE_TASK_WRAPPER with --action arch|fine_tune|infer and --parameters-json.
-For ASR, parameters accept train_args_json, decode_args_json, decode_method, decode_avg and use_averaged_model.
-Architecture source edits must occur in the materialized workspace recipe before
-invoking the wrapper. Always generate artifacts/hyp.txt through real decoding.
+Use SURE_TASK_WRAPPER with --action arch and --parameters-json. For ASR, only
+structural train_args_json overrides are allowed. Architecture source edits occur
+in the materialized workspace recipe before invoking the wrapper. Generate
+artifacts/hyp.txt through real decoding of the final checkpoint.
 
-The search baseline is trained once, then reused across six to ten rounds. The
-controller retrains the unchanged baseline and at most two selected complete
-recipes from scratch for thirty epochs on full train. Selection chooses the final
-model; holdout scoring is performed only after the choice is frozen.
+Train the full-budget baseline once and reuse it throughout the search rounds.
+After search, selection compares the retained final checkpoints of the baseline
+and strongest candidates using inference only. Holdout runs after the winner is
+frozen. Neither phase retrains any model.
