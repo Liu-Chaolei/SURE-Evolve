@@ -1,0 +1,33 @@
+{
+  "schema_version": "2",
+  "name": "paper_search",
+  "version": "1.0.0",
+  "visibility": "internal",
+  "description": "Search public scholarly APIs and normalize candidates without downloading full text.",
+  "prompt": "SKILL.md",
+  "runtime": {
+    "kind": "node",
+    "entrypoint": "scripts/search.mjs",
+    "executables": ["node"],
+    "optional_secrets": ["SEMANTIC_SCHOLAR_API_KEY"]
+  },
+  "permissions": {
+    "tools": ["bash", "read", "write"],
+    "network": true,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "output_schema": "schemas/paper_candidates.schema.json",
+  "hooks": {
+    "pre_start": [{ "module": "hooks/index.ts", "handler": "preStart" }],
+    "pre_finish": [{ "module": "hooks/index.ts", "handler": "preFinish" }]
+  },
+  "artifacts": [
+    {
+      "type": "paper_candidates",
+      "schema_version": "1",
+      "schema": "schemas/paper_candidates.schema.json",
+      "required": true
+    }
+  ]
+}

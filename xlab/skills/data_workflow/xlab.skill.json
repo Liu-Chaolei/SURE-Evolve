@@ -1,0 +1,71 @@
+{
+  "schema_version": "2",
+  "name": "data_workflow",
+  "version": "1.0.0",
+  "visibility": "public",
+  "description": "Build a validated, provenance-preserving scientific dataset.",
+  "prompt": "SKILL.md",
+  "runtime": { "kind": "workflow" },
+  "permissions": {
+    "tools": ["bash", "read", "write", "edit"],
+    "network": true,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "dependencies": [
+    { "name": "data_discover", "version": "1.0.0" },
+    { "name": "data_collect", "version": "1.0.0" },
+    { "name": "data_process", "version": "1.0.0" },
+    { "name": "data_validate", "version": "1.0.0" }
+  ],
+  "workflow": {
+    "stages": [
+      { "id": "discover", "skill": "data_discover", "max_attempts": 3 },
+      {
+        "id": "collect",
+        "skill": "data_collect",
+        "needs": ["discover"],
+        "max_attempts": 3
+      },
+      {
+        "id": "process",
+        "skill": "data_process",
+        "needs": ["collect"],
+        "max_attempts": 2
+      },
+      {
+        "id": "validate",
+        "skill": "data_validate",
+        "needs": ["process"],
+        "max_attempts": 2
+      }
+    ]
+  },
+  "hooks": {
+    "pre_start": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "pre_stage": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "post_stage": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "pre_finish": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_resume": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_cancel": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_error": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ]
+  },
+  "artifacts": [{ "type": "dataset", "schema_version": "1", "required": true }],
+  "ui": {
+    "argumentHint": "<dataset goal, sources, processing, and validation criteria>"
+  }
+}

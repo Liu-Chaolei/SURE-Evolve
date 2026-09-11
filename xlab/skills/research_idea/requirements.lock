@@ -1,0 +1,8 @@
+# Exact direct requirements for the XLab environment cache; transitive dependencies and wheel hashes are not fully locked.
+# Draft 2020-12 validation is required before public artifacts are finalized.
+jsonschema==4.26.0
+# Production retrieval runs only against declared local model/index snapshots.
+numpy==2.4.6
+torch==2.11.0
+sentence-transformers==5.3.0
+faiss-cpu==1.13.2

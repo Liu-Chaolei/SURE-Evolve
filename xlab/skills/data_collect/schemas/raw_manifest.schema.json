@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["schema_version","plan","sources"],"properties":{"schema_version":{"const":"xlab.raw_data_manifest.v1"},"sources":{"type":"array"}}}

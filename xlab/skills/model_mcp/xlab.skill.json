@@ -1,0 +1,75 @@
+{
+  "schema_version": "2",
+  "name": "model_mcp",
+  "version": "1.0.0",
+  "visibility": "public",
+  "description": "Package and test a local model as an MCP server, with optional registration.",
+  "prompt": "SKILL.md",
+  "runtime": { "kind": "workflow" },
+  "permissions": {
+    "tools": ["bash", "read", "write", "edit"],
+    "network": false,
+    "subprocess": true,
+    "external_mutations": true
+  },
+  "dependencies": [
+    { "name": "model_wrap", "version": "1.0.0" },
+    { "name": "mcp_validate", "version": "1.0.0" },
+    { "name": "mcp_register", "version": "1.0.0" }
+  ],
+  "workflow": {
+    "stages": [
+      { "id": "wrap", "skill": "model_wrap", "max_attempts": 2 },
+      {
+        "id": "validate",
+        "skill": "mcp_validate",
+        "needs": ["wrap"],
+        "max_attempts": 2
+      },
+      {
+        "id": "register",
+        "skill": "mcp_register",
+        "needs": ["validate"],
+        "optional": true,
+        "max_attempts": 1
+      }
+    ]
+  },
+  "hooks": {
+    "pre_start": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "pre_stage": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "post_stage": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "pre_finish": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_resume": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_cancel": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_error": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ]
+  },
+  "artifacts": [
+    { "type": "mcp_package", "schema_version": "1", "required": true },
+    { "type": "mcp_validation", "schema_version": "1", "required": true }
+  ],
+  "ui": {
+    "argumentHint": "<runner, schema, example, and registration request> [--approve]",
+    "arguments": [
+      {
+        "name": "--approve",
+        "description": "Explicitly approve optional MCP registration after validation.",
+        "takesValue": false
+      }
+    ]
+  }
+}

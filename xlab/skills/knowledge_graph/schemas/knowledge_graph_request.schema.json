@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlab.local/schemas/knowledge_graph_request.schema.json",
+  "title": "Knowledge Graph Request",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "input_directory",
+    "input_path",
+    "input_sha256",
+    "prior_manifest",
+    "prior_manifest_sha256",
+    "paper_set_sha256",
+    "paper_edges_path",
+    "paper_edges_sha256",
+    "pdf_root",
+    "paper_collect_run_id",
+    "mineru_backend",
+    "resolved_mineru_backend",
+    "mineru_method",
+    "llm",
+    "min_papers"
+  ],
+  "properties": {
+    "schema_version": { "const": "xlab.knowledge_graph_request.v2" },
+    "input_directory": { "type": "string", "minLength": 1 },
+    "input_path": { "type": "string", "minLength": 1 },
+    "input_schema_version": { "const": "xlab.paper_set.v3" },
+    "input_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "paper_set_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "paper_edges_path": { "type": "string", "minLength": 1 },
+    "paper_edges_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "prior_manifest": { "type": "string", "minLength": 1 },
+    "prior_manifest_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "paper_collect_run_id": { "type": "string", "minLength": 1 },
+    "paper_collect_skill_version": { "type": "string" },
+    "pdf_root": { "type": "string", "minLength": 1 },
+    "mineru_backend": {
+      "enum": ["auto", "pipeline", "vlm-engine", "hybrid-engine"]
+    },
+    "resolved_mineru_backend": {
+      "enum": ["pipeline", "vlm-engine", "hybrid-engine"]
+    },
+    "mineru_method": { "enum": ["auto", "txt", "ocr"] },
+    "mineru_language": { "type": "string", "minLength": 1 },
+    "mineru_device": { "enum": ["auto", "cpu", "cuda", "npu"] },
+    "mineru_batch_size": { "type": "integer", "minimum": 1, "maximum": 256 },
+    "gpu": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "mineru_workers": { "type": "integer", "minimum": 1, "maximum": 32 },
+    "mineru_timeout": { "type": "integer", "minimum": 300 },
+    "structure_workers": { "type": "integer", "minimum": 1, "maximum": 64 },
+    "llm_workers": { "type": "integer", "minimum": 1, "maximum": 128 },
+    "llm_timeout": { "type": "integer", "minimum": 10 },
+    "llm_retries": { "type": "integer", "minimum": 0, "maximum": 10 },
+    "llm_validation_retries": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5
+    },
+    "llm_rpm": { "type": "integer", "minimum": 0 },
+    "llm_max_input_chars": { "type": "integer", "minimum": 20000 },
+    "llm_max_output_tokens": { "type": "integer", "minimum": 1000 },
+    "llm_disable_thinking": { "type": "boolean" },
+    "llm": {
+      "type": "object",
+      "required": ["api_url", "model", "key_environment"],
+      "properties": {
+        "api_url": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "enable_thinking": { "type": ["boolean", "null"] },
+        "key_environment": {
+          "const": "KNOWLEDGE_GRAPH_LLM_API_KEY"
+        }
+      },
+      "additionalProperties": false
+    },
+    "min_papers": { "type": "integer", "minimum": 1 },
+    "min_nodes": { "type": "integer", "minimum": 1 },
+    "min_edges": { "type": "integer", "minimum": 1 },
+    "min_mineru_coverage": { "type": "number", "minimum": 0, "maximum": 1 },
+    "min_structure_success": { "type": "number", "minimum": 0, "maximum": 1 },
+    "min_extraction_success": { "type": "number", "minimum": 0, "maximum": 1 },
+    "min_core_coverage": { "type": "number", "minimum": 0, "maximum": 1 },
+    "min_evidence_coverage": { "type": "number", "minimum": 0, "maximum": 1 },
+    "desired_baseline_coverage": { "type": "number", "minimum": 0, "maximum": 1 },
+    "desired_dataset_coverage": { "type": "number", "minimum": 0, "maximum": 1 },
+    "max_ambiguous_alias_ratio": { "type": "number", "minimum": 0, "maximum": 1 }
+  },
+  "additionalProperties": true
+}

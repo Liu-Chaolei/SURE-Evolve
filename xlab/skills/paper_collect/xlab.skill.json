@@ -1,0 +1,114 @@
+{
+  "schema_version": "2",
+  "name": "paper_collect",
+  "version": "2.2.0",
+  "visibility": "public",
+  "description": "Collect a broad, graph-ready scholarly corpus with citation relations and available PDFs.",
+  "prompt": "SKILL.md",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "scripts/paper_collect.py",
+    "lockfile": "requirements.lock",
+    "executables": ["python"],
+    "required_secrets": ["SEMANTIC_SCHOLAR_API_KEY"]
+  },
+  "permissions": {
+    "tools": ["bash", "read"],
+    "network": true,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "input_schema": "schemas/request.schema.json",
+  "output_schema": "schemas/paper_collection.schema.json",
+  "hooks": {
+    "pre_start": [{ "module": "hooks/index.ts", "handler": "preStart" }],
+    "pre_tool_call": [{ "module": "hooks/index.ts", "handler": "preToolCall" }],
+    "post_tool_result": [
+      {
+        "module": "hooks/index.ts",
+        "handler": "postToolResult",
+        "blocking": false
+      }
+    ],
+    "pre_finish": [{ "module": "hooks/index.ts", "handler": "preFinish" }],
+    "post_finish": [{ "module": "hooks/index.ts", "handler": "postFinish" }],
+    "on_resume": [{ "module": "hooks/index.ts", "handler": "onResume" }],
+    "on_cancel": [{ "module": "hooks/index.ts", "handler": "onCancel" }],
+    "on_error": [{ "module": "hooks/index.ts", "handler": "onError" }]
+  },
+  "artifacts": [
+    {
+      "type": "paper_set",
+      "schema_version": "3",
+      "schema": "schemas/paper_collection.schema.json",
+      "required": true,
+      "description": "Broad paper metadata set for survey selection and graph construction"
+    },
+    {
+      "type": "paper_edges",
+      "schema_version": "1",
+      "schema": "schemas/paper_edge.schema.json",
+      "format": "jsonl",
+      "required": true,
+      "description": "Retained citation and recommendation relations; each JSONL row must satisfy the schema"
+    },
+    {
+      "type": "collection_report",
+      "schema_version": "1",
+      "schema": "schemas/collection_report.schema.json",
+      "required": true,
+      "description": "Quantity, relevance, metadata, graph, and download audit"
+    }
+  ],
+  "ui": {
+    "argumentHint": "\"<topic>\" [options]",
+    "arguments": [
+      {
+        "name": "--target-papers",
+        "description": "Set the target number of papers to collect.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--max-papers",
+        "description": "Set the hard maximum paper count.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--facet",
+        "description": "Add a topic facet; repeat for up to eight facets.",
+        "valueHint": "<facet>",
+        "takesValue": true,
+        "repeatable": true
+      },
+      {
+        "name": "--download-workers",
+        "description": "Set concurrent PDF download workers.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--download-per-host",
+        "description": "Set concurrent downloads allowed per host.",
+        "valueHint": "<count>",
+        "takesValue": true
+      }
+    ],
+    "primaryCounters": [
+      "api_calls",
+      "collected_papers",
+      "target_papers",
+      "edges",
+      "downloaded_pdfs",
+      "failed_downloads"
+    ],
+    "artifactTypes": [
+      "paper_set",
+      "paper_edges",
+      "collection_report",
+      "search_log"
+    ],
+    "defaultExpandedSections": ["diagnostics", "artifacts"]
+  }
+}

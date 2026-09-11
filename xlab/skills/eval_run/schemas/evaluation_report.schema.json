@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "plan_sha256", "benchmark_fingerprint", "case_count", "metrics", "failures", "cases"],
+  "properties": {
+    "schema_version": { "const": "xlab.evaluation_report.v1" },
+    "plan_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "benchmark_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "case_count": { "type": "integer", "minimum": 1 },
+    "metrics": { "type": "object" },
+    "failures": { "type": "array" },
+    "cases": { "type": "array" }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "schema_version": "xlab.literature_survey.request.v1",
+  "topic": "Retrieval augmented generation for scientific agents",
+  "language": "en",
+  "depth": "standard",
+  "max_papers": 12,
+  "min_papers": 3,
+  "full_text": false,
+  "facets": ["retrieval", "scientific agents", "evaluation"]
+}

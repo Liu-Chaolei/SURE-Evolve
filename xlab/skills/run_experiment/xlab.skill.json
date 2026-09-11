@@ -1,0 +1,65 @@
+{
+  "schema_version": "2",
+  "name": "run_experiment",
+  "version": "2.0.0",
+  "visibility": "public",
+  "description": "Execute and review a Research Idea with the native durable experiment runtime.",
+  "prompt": "SKILL.md",
+  "runtime": {
+    "kind": "native",
+    "driver": "experiment"
+  },
+  "permissions": {
+    "tools": ["read"],
+    "network": false,
+    "subprocess": false,
+    "external_mutations": false
+  },
+  "workflow": {
+    "stages": [
+      { "id": "prepare", "skill": "run_experiment", "max_attempts": 2 },
+      {
+        "id": "code",
+        "skill": "run_experiment",
+        "needs": ["prepare"],
+        "max_attempts": 3
+      },
+      {
+        "id": "science",
+        "skill": "run_experiment",
+        "needs": ["code"],
+        "max_attempts": 3
+      },
+      {
+        "id": "finalize",
+        "skill": "run_experiment",
+        "needs": ["science"],
+        "max_attempts": 2
+      }
+    ]
+  },
+  "artifacts": [
+    { "type": "ablation_results", "schema_version": "1", "required": true },
+    { "type": "final_audit", "schema_version": "1", "required": true },
+    { "type": "symbolic_memory_receipt", "schema_version": "1", "required": true }
+  ],
+  "ui": {
+    "argumentHint": "--idea <idea reference>",
+    "arguments": [
+      {
+        "name": "--idea",
+        "description": "Select an existing successful Research Idea by path, artifact ID, producer run, workspace handle, current workspace Idea, or exact indexed title.",
+        "valueHint": "<idea-reference>",
+        "dynamicSource": "idea",
+        "takesValue": true
+      }
+    ],
+    "primaryCounters": ["assignments", "review_issues"],
+    "artifactTypes": [
+      "ablation_results",
+      "final_audit",
+      "symbolic_memory_receipt"
+    ],
+    "defaultExpandedSections": ["workflow", "children", "artifacts"]
+  }
+}

@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlab.local/schemas/method_graph.schema.json",
+  "title": "XLab Method Evolution Graph",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "papergraph_compatibility",
+    "source_artifact",
+    "source_artifact_sha256",
+    "input_provenance",
+    "nodes_path",
+    "edges_path",
+    "aliases_path",
+    "database_path",
+    "visualization_path",
+    "visualization",
+    "nodes",
+    "edges",
+    "aliases",
+    "counts"
+  ],
+  "properties": {
+    "schema_version": { "const": "xlab.method_graph.v2" },
+    "papergraph_compatibility": {
+      "type": "object",
+      "required": ["algorithm", "merge", "xlab_extensions"],
+      "properties": {
+        "algorithm": { "const": "PaperGraph Step 1/2/3/4" },
+        "merge": {
+          "type": "object",
+          "properties": {
+            "baseline_total": { "type": "integer", "minimum": 0 },
+            "baseline_merged_citation_core": { "type": "integer", "minimum": 0 },
+            "baseline_merged_registry": { "type": "integer", "minimum": 0 },
+            "baseline_new": { "type": "integer", "minimum": 0 },
+            "baseline_skipped_generic": { "type": "integer", "minimum": 0 },
+            "baseline_skipped_survey": { "type": "integer", "minimum": 0 },
+            "dataset_total": { "type": "integer", "minimum": 0 },
+            "dataset_merged_registry": { "type": "integer", "minimum": 0 },
+            "dataset_new": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": true
+        },
+        "xlab_extensions": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": true
+    },
+    "source_artifact": { "type": ["string", "null"] },
+    "source_artifact_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "input_provenance": {
+      "type": "object",
+      "properties": {
+        "input_directory": { "type": ["string", "null"] },
+        "paper_set_path": { "type": ["string", "null"] },
+        "paper_set_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "paper_edges_path": { "type": ["string", "null"] },
+        "paper_edges_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "prior_manifest_path": { "type": ["string", "null"] },
+        "prior_manifest_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "paper_collect_run_id": { "type": ["string", "null"] },
+        "paper_collect_skill_version": { "type": ["string", "null"] },
+        "pdf_root": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "paper_documents_path": { "type": "string", "minLength": 1 },
+    "paper_extractions_path": { "type": "string", "minLength": 1 },
+    "nodes_path": { "type": "string", "minLength": 1 },
+    "edges_path": { "type": "string", "minLength": 1 },
+    "aliases_path": { "type": "string", "minLength": 1 },
+    "database_path": { "type": "string", "minLength": 1 },
+    "visualization_path": { "type": ["string", "null"] },
+    "visualization": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "overview_html": { "type": ["string", "null"] },
+        "auto_opened": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "node_type", "name", "paper_id", "aliases", "provenance"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "node_type": { "enum": ["Paper", "Core", "Baseline", "Dataset"] },
+          "name": { "type": "string", "minLength": 1 },
+          "label": { "type": ["string", "null"] },
+          "full_name": { "type": ["string", "null"] },
+          "acronym": { "type": ["string", "null"] },
+          "paper_id": { "type": ["string", "null"] },
+          "source_venue": { "type": ["string", "null"] },
+          "pub_year": { "type": ["integer", "string", "null"] },
+          "paper_title": { "type": ["string", "null"] },
+          "paper_domain": { "type": ["array", "string", "null"] },
+          "paper_type": { "type": ["array", "string", "null"] },
+          "is_survey": { "type": ["boolean", "string", "null"] },
+          "core_type": { "type": ["string", "null"] },
+          "summary": { "type": ["string", "null"] },
+          "keywords": { "type": ["array", "string", "null"] },
+          "insight": { "type": ["string", "null"] },
+          "quote": { "type": ["string", "null"] },
+          "aliases": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "code_url": { "type": ["string", "null"] },
+          "structured_summary": { "type": ["object", "string", "null"] },
+          "problems": { "type": ["array", "string", "null"] },
+          "components": { "type": ["array", "string", "null"] },
+          "innovations": { "type": ["array", "string", "null"] },
+          "limitations": { "type": ["array", "string", "null"] },
+          "future_work": { "type": ["array", "string", "null"] },
+          "urls": { "type": ["array", "string", "null"] },
+          "citation_count": { "type": ["integer", "string", "null"] },
+          "reference_count": { "type": ["integer", "string", "null"] },
+          "influential_citation_count": { "type": ["integer", "string", "null"] },
+          "fields_of_study": { "type": ["array", "string", "null"] },
+          "publication_date": { "type": ["string", "null"] },
+          "tldr": { "type": ["string", "null"] },
+          "citation_paper_id": { "type": ["string", "null"] },
+          "citation_paperId": { "type": ["string", "null"] },
+          "citation_title": { "type": ["string", "null"] },
+          "citation_venue": { "type": ["string", "null"] },
+          "citation_year": { "type": ["integer", "string", "null"] },
+          "citation_urls": { "type": ["array", "string", "null"] },
+          "s2_metadata": { "type": ["object", "null"] },
+          "provenance": { "type": "object" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "source",
+          "target",
+          "relation",
+          "edge_type",
+          "evidence_paper_id",
+          "evidence",
+          "provenance"
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "source": { "type": "string", "minLength": 1 },
+          "target": { "type": "string", "minLength": 1 },
+          "relation": {
+            "enum": [
+              "introduces",
+              "baseline_comparison",
+              "evaluated_on",
+              "core_relation",
+              "cites",
+              "recommended_with"
+            ]
+          },
+          "edge_type": {
+            "enum": [
+              "introduces",
+              "baseline_comparison",
+              "evaluated_on",
+              "core_relation",
+              "cites",
+              "recommended_with"
+            ]
+          },
+          "evidence_paper_id": { "type": ["string", "null"] },
+          "summary": { "type": ["string", "null"] },
+          "keywords": { "type": ["array", "string", "null"] },
+          "metrics": { "type": ["array", "string", "null"] },
+          "insight": { "type": ["string", "null"] },
+          "quote": { "type": ["string", "null"] },
+          "evidence": { "type": "object" },
+          "provenance": { "type": "object" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "aliases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["alias", "normalized_alias", "target_id", "paper_id"]
+      }
+    },
+    "counts": {
+      "type": "object",
+      "required": [
+        "papers",
+        "cores",
+        "baselines",
+        "datasets",
+        "nodes",
+        "edges",
+        "aliases",
+        "extractions"
+      ]
+    },
+    "audit": { "type": "object" }
+  },
+  "additionalProperties": true
+}

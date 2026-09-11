@@ -1,0 +1,30 @@
+{
+  "schema_version": "2",
+  "name": "eval_run",
+  "version": "1.0.0",
+  "visibility": "internal",
+  "description": "Execute a frozen benchmark against predictions or a bounded model command and emit per-case evidence.",
+  "prompt": "SKILL.md",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "scripts/evaluate.py",
+    "lockfile": "requirements.lock",
+    "executables": ["python"]
+  },
+  "permissions": {
+    "tools": ["bash", "read", "write"],
+    "network": false,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "input_schema": "schemas/benchmark_plan.schema.json",
+  "output_schema": "schemas/evaluation_report.schema.json",
+  "artifacts": [
+    {
+      "type": "evaluation_report",
+      "schema_version": "1",
+      "schema": "schemas/evaluation_report.schema.json",
+      "required": true
+    }
+  ]
+}

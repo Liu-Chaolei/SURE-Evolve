@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlab.local/schemas/paper_metadata.schema.json",
+  "title": "XLab Paper Metadata",
+  "type": "object",
+  "required": [
+    "id",
+    "title",
+    "authors",
+    "external_ids",
+    "pdf_candidates",
+    "discovery",
+    "dedupe_key",
+    "metadata_status",
+    "relevance",
+    "download"
+  ],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "paper_id": { "type": ["string", "null"] },
+    "title": { "type": "string", "minLength": 1 },
+    "authors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["author_id", "name"],
+        "properties": {
+          "author_id": { "type": ["string", "null"] },
+          "name": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "year": { "type": ["integer", "null"] },
+    "publication_date": { "type": ["string", "null"] },
+    "venue": { "type": ["string", "null"] },
+    "abstract": { "type": ["string", "null"] },
+    "tldr": { "type": ["string", "null"] },
+    "publication_types": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "fields_of_study": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "citation_count": { "type": ["integer", "number", "null"], "minimum": 0 },
+    "influential_citation_count": {
+      "type": ["integer", "number", "null"],
+      "minimum": 0
+    },
+    "reference_count": { "type": ["integer", "number", "null"], "minimum": 0 },
+    "external_ids": { "type": "object" },
+    "url": { "type": ["string", "null"] },
+    "open_access_pdf": { "type": ["object", "null"] },
+    "pdf_candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["url", "source", "priority"],
+        "properties": {
+          "url": { "type": "string", "minLength": 1 },
+          "source": { "type": "string", "minLength": 1 },
+          "priority": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": true
+      }
+    },
+    "discovery": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "seed_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "is_seed": { "type": "boolean" },
+    "metadata_sources": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "dedupe_key": { "type": "string", "minLength": 1 },
+    "metadata_status": {
+      "enum": ["complete", "partial", "minimal", "invalid"]
+    },
+    "relevance": {
+      "type": "object",
+      "required": [
+        "tier",
+        "score",
+        "lexical_score",
+        "direct_score",
+        "graph_support"
+      ],
+      "properties": {
+        "tier": { "enum": ["core", "related", "boundary"] },
+        "score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "lexical_score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "direct_score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "graph_support": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "download": {
+      "type": "object",
+      "required": ["status", "path", "url", "sha256", "bytes", "error"],
+      "properties": {
+        "status": {
+          "enum": [
+            "not_requested",
+            "downloaded",
+            "existing",
+            "failed",
+            "unavailable"
+          ]
+        },
+        "path": {
+          "type": ["string", "null"],
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).*$"
+        },
+        "url": { "type": ["string", "null"] },
+        "sha256": { "type": ["string", "null"], "pattern": "^[a-fA-F0-9]{64}$" },
+        "bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "error": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

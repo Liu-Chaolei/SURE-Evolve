@@ -1,0 +1,841 @@
+import requests
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+import re
+
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+from tqdm import tqdm
+from pathlib import Path
+from .rich_logger import get_logger
+import tiktoken
+import xml.etree.ElementTree as ET
+from .utils import extract_json
+from .completion import complete_chat
+
+import requests
+import json
+import time
+
+class ArxivAPI:
+    def __init__(self, config):
+        self.base_url = "http://export.arxiv.org/api/query"
+        self.logger = get_logger("ArxivAPI")
+        self.config = config
+
+    def get_paper_details(self, paper_id: str):
+        arxiv_url = f"https://export.arxiv.org/api/query?id_list={paper_id}"
+        paper = {}
+        
+        for retry_count in range(self.config.APIInfo.arxiv_api_max_retry):
+            response = requests.get(arxiv_url, timeout=120)
+            if response.status_code == 200:
+                break
+            else:
+                self.logger.warning(f"arXiv API request failed for {paper_id}: {response.status_code}. Retrying {retry_count + 1}/3...")
+                if response.status_code == 429:
+                    time.sleep(60)
+
+        if response.status_code == 200:
+            root = ET.fromstring(response.content)
+            ns = {'atom': 'http://www.w3.org/2005/Atom'}
+            entry = root.find('.//atom:entry', ns)
+            if entry is not None:
+                paper["title"] = entry.find('atom:title', ns).text.strip() if entry.find('atom:title', ns) is not None else ""
+                paper["authors"] = [author.find('atom:name', ns).text for author in entry.findall('atom:author', ns) if author.find('atom:name', ns) is not None]
+                published = entry.find('atom:published', ns).text[:4] if entry.find('atom:published', ns) is not None else ""  # Extract year
+                paper["venue"] = "arXiv"  # Default venue for arXiv
+                paper["year"] = published
+                summary_el = entry.find('atom:summary', ns)
+                paper["abstract"] = summary_el.text.strip() if summary_el is not None else ""
+                self.logger.info(f"Fetched details from arXiv for {paper_id}")
+            else:
+                self.logger.warning(f"No entry found in arXiv response for {paper_id}")
+                raise ValueError("No entry found in arXiv response in mla generation")
+        else:
+            self.logger.warning(f"arXiv API request failed for {paper_id}: {response.status_code}")
+            raise ValueError("No entry found in arXiv response in mla generation")
+        
+        return paper
+
+    def search_papers_by_title(self, title: str):
+        """通过标题搜索arXiv论文"""
+        import urllib.parse
+        # 标题搜索使用 ti: 前缀
+        search_query = f"ti:{urllib.parse.quote(title)}"
+        arxiv_url = f"{self.base_url}?search_query={search_query}&start=0&max_results=10"
+        
+        papers = []
+        for retry_count in range(self.config.APIInfo.arxiv_api_max_retry):
+            response = requests.get(arxiv_url, timeout=120)
+            if response.status_code == 200:
+                break
+            else:
+                self.logger.warning(f"arXiv search request failed for command{title}: {response.status_code}. Retrying {retry_count + 1}/3...")
+                if response.status_code == 429:
+                    time.sleep(60)
+        
+        if response.status_code == 200:
+            root = ET.fromstring(response.content)
+            ns = {'atom': 'http://www.w3.org/2005/Atom'}
+            
+            for entry in root.findall('.//atom:entry', ns):
+                paper = {}
+                # 提取 arXiv ID (从链接中提取)
+                id_link = entry.find('atom:id', ns)
+                if id_link is not None:
+                    # 从 URL 中提取 arXiv ID，如 http://arxiv.org/abs/2301.00001v1
+                    paper_id = id_link.text.split('/')[-1]
+                    # 移除版本号
+                    paper['paper_id'] = paper_id.split('v')[0] if 'v' in paper_id else paper_id
+                paper["api_platform"] = "arxiv"
+                paper["title"] = entry.find('atom:title', ns).text.strip() if entry.find('atom:title', ns) is not None else ""
+                paper["authors"] = [author.find('atom:name', ns).text for author in entry.findall('atom:author', ns) if author.find('atom:name', ns) is not None]
+                paper["year"] = entry.find('atom:published', ns).text[:4] if entry.find('atom:published', ns) is not None else ""
+                paper["venue"] = "arXiv"
+                summary_el = entry.find('atom:summary', ns)
+                paper["abstract"] = summary_el.text.strip() if summary_el is not None else ""
+                papers.append(paper)
+            
+            self.logger.info(f"Found {len(papers)} papers from arXiv for title: {title}")
+        else:
+            self.logger.warning(f"arXiv search request failed: {response.status_code}")
+        
+        return papers
+
+class SemanticScholarAPI:
+    def __init__(self, config):
+        self.headers = {"x-api-key": config.APIInfo.semantic_scholar_api_key}
+        self.base_url = "https://api.semanticscholar.org/graph/v1"
+        self.logger = get_logger("SemanticScholarAPI")
+        self.config = config
+
+    def search_papers(self, query: str, fields: str, retry_time: int = 0):
+        """Search papers with bounded retries; log every attempt."""
+        max_retry = self.config.APIInfo.semantic_scholar_api_max_retry
+        url = f"{self.base_url}/paper/search"
+        params = {"query": query, "fields": fields}
+
+        resp = requests.get(url, headers=self.headers, params=params, timeout=60)
+        if resp.status_code == 200:
+            return resp.json()
+
+        if retry_time >= max_retry:
+            self.logger.error(
+                f"Error occurs in search_papers. Status code: {resp.status_code}, reached max retry {max_retry}."
+            )
+            return None
+
+        self.logger.error(
+            f"Error occurs in search_papers. Status code: {resp.status_code}, retrying {retry_time + 1}/{max_retry}..."
+        )
+        if resp.status_code == 429:
+            self.logger.info("Rate limit exceeded. Waiting 60 seconds before retrying...")
+            time.sleep(60)
+            return self.search_papers(query, fields, retry_time + 1)
+        else:
+            time.sleep(min(5, 1 + retry_time))
+
+        return self.search_papers(query, fields, retry_time+1)
+
+    def get_paper_details(self, paper_id: str, fields: str, retry_time: int = 0):
+        """Fetch paper details with bounded retries; raises on final failure."""
+        max_retry = self.config.APIInfo.semantic_scholar_api_max_retry
+        url = f"{self.base_url}/paper/{paper_id}?fields={fields}"
+        resp = requests.get(url, headers=self.headers, timeout=60)
+
+        if resp.status_code == 200:
+            return resp.json()
+
+        if retry_time >= max_retry:
+            self.logger.error(
+                f"Failed to fetch paper details for {paper_id} after {max_retry} retries. Status code: {resp.status_code}"
+            )
+            raise ValueError(f"Failed to fetch paper details for {paper_id} from Semantic Scholar")
+
+        self.logger.error(
+            f"Error occurs in get_paper_details. Status code: {resp.status_code}, retrying {retry_time + 1}/{max_retry}..."
+        )
+        if resp.status_code == 429:
+            self.logger.info("Rate limit exceeded. Waiting 60 seconds before retrying...")
+            time.sleep(60)
+            return self.get_paper_details(paper_id, fields, retry_time + 1)
+        else:
+            time.sleep(min(5, 1 + retry_time))
+
+        return self.get_paper_details(paper_id, fields, retry_time+1)
+
+
+class TransientHTTPError(requests.RequestException):
+    """Raised for retryable HTTP status codes."""
+    pass
+
+
+class ProviderHTTPError(RuntimeError):
+    """Raised for non-retryable provider HTTP failures."""
+    pass
+
+
+def provider_error_message(status_code: int, message: str = "") -> str:
+    hint_by_status = {
+        400: "request rejected; check model-specific OpenAI-compatible payload support",
+        401: "authorization failed; check OPENAI_API_KEY, LLM_BASE_URL, and LLM_MODEL",
+        403: "access forbidden; check account/model permissions",
+        404: "endpoint or model not found; check LLM_BASE_URL and LLM_MODEL",
+    }
+    cleaned = re.sub(r"Bearer\s+[A-Za-z0-9._\-]+", "Bearer [REDACTED]", str(message or ""))
+    cleaned = re.sub(r"(?i)(api[_-]?key[\"':=\s]+)[A-Za-z0-9._\-]+", r"\1[REDACTED]", cleaned)
+    cleaned = " ".join(cleaned.split())[:300]
+    hint = hint_by_status.get(status_code, "provider returned a non-retryable HTTP error")
+    suffix = f" Provider message: {cleaned}" if cleaned else ""
+    return f"LLM provider returned HTTP {status_code}: {hint}.{suffix}"
+
+
+def normalize_chat_completions_url(url: str) -> str:
+    """Accept either an OpenAI-compatible base URL or a full chat completions URL."""
+    normalized = str(url or "").strip().rstrip("/")
+    if not normalized:
+        return ""
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    return f"{normalized}/chat/completions"
+
+
+def fake_survey_agent_response(prompt: str) -> str:
+    """Return deterministic SurveyAgent-shaped LLM output for offline tests."""
+    text = prompt or ""
+    titles = _extract_prompt_titles(text)
+    paper_ids = _extract_prompt_ids(text)
+    citations = " ".join(f"<{title}>" for title in titles[: min(3, len(titles))])
+    if not citations and titles:
+        citations = f"<{titles[0]}>"
+
+    if "Assign each paper in the batch" in text and "cluster_name" in text:
+        return json.dumps(_fake_cluster_assignments(paper_ids, titles), ensure_ascii=False)
+    if "New batch of papers" in text and "papers: list of paper objects" in text and "cluster_name" in text:
+        return json.dumps(_fake_clusters_with_papers(paper_ids, titles), ensure_ascii=False)
+    if "New batch of papers" in text and "cluster_name" in text:
+        return json.dumps(_fake_cluster_descriptions(), ensure_ascii=False)
+    if "comparison_dimensions" in text and "table_data" in text:
+        return json.dumps(_fake_cluster_table(paper_ids, titles), ensure_ascii=False)
+    if "Produce a clear, specific, and actionable" in text or "Output format (exact):" in text and "suggestion" in text:
+        return "[]"
+    if '"action":"replace"' in text or "originalText" in text and "newText" in text:
+        return json.dumps({"action": "done"}, ensure_ascii=False)
+    if "Citation Recall" in text or "Criterion_Description" in text or "Score_1_Description" in text:
+        return "5"
+    if "NLI" in text or "CLAIM" in text and "SOURCE" in text:
+        return "yes"
+    if "refined_survey" in text and "Draft Text:" in text:
+        draft = _extract_draft_text(text) or _fake_section_text(citations)
+        return json.dumps({"refined_survey": draft, "references": titles[:3]}, ensure_ascii=False)
+    if "Directly output the refined draft text" in text and "Draft Text:" in text:
+        return _extract_draft_text(text) or _fake_section_text(citations)
+    if "assign papers" in text and "assignment" in text and "paper_id" in text:
+        if not paper_ids:
+            paper_ids = [f"paper-{index}" for index, _title in enumerate(titles, start=1)]
+        assignments = []
+        for index, paper_id in enumerate(paper_ids):
+            title = titles[index] if index < len(titles) else paper_id
+            assignments.append(
+                {
+                    "paper_id": paper_id,
+                    "paper_title": title,
+                    "assignment": {"Survey Agent synthesis": ["Citation traceability and evidence reuse"]},
+                }
+            )
+        return json.dumps(assignments, ensure_ascii=False)
+    if "generate and iteratively update an existing survey outline" in text or "Output JSON format" in text and "Survey_Title" in text:
+        return json.dumps(
+            {
+                "title": "Survey Agent Fixture",
+                "sections": [
+                    {
+                        "title": "Survey Agent synthesis",
+                        "description": "Synthesize graph-grounded literature evidence into a coherent survey narrative.",
+                        "subsections": [
+                            {
+                                "title": "Citation traceability and evidence reuse",
+                                "description": "Analyze how paper evidence supports reusable survey claims and research planning.",
+                            }
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+    if "well-written subsection" in text or "Subsection Title:" in text:
+        return _fake_section_text(citations)
+    if "Introductory Paragraphs" in text or "Section Title:" in text:
+        return _fake_section_text(citations)
+    return _fake_section_text(citations)
+
+
+def _extract_prompt_titles(text: str) -> list[str]:
+    titles: list[str] = []
+    for match in re.finditer(r"^Title:\s*(.+)$", text, flags=re.MULTILINE):
+        title = match.group(1).strip()
+        if title and title not in titles:
+            titles.append(title)
+    for match in re.finditer(r"\[([^\]]+)\]\s+([^\n]+?)(?:\s*\(|\.|$)", text):
+        title = match.group(2).strip()
+        if title and len(title.split()) > 1 and title not in titles:
+            titles.append(title)
+    return titles
+
+
+def _extract_prompt_ids(text: str) -> list[str]:
+    paper_ids: list[str] = []
+    for match in re.finditer(r"Paper ID:\s*([^\n]+)", text):
+        paper_id = match.group(1).strip()
+        if paper_id and paper_id not in paper_ids:
+            paper_ids.append(paper_id)
+    return paper_ids
+
+
+def _fake_cluster_descriptions() -> list[dict[str, str]]:
+    return [
+        {
+            "cluster_name": "Survey Agent synthesis",
+            "summary": "Graph-grounded literature synthesis with citation traceability and evidence reuse.",
+        }
+    ]
+
+
+def _fake_cluster_assignments(paper_ids: list[str], titles: list[str]) -> list[dict[str, object]]:
+    if not paper_ids:
+        paper_ids = [f"paper-{index}" for index, _title in enumerate(titles, start=1)] or ["paper-1"]
+    assignments: list[dict[str, object]] = []
+    for index, paper_id in enumerate(paper_ids):
+        title = titles[index] if index < len(titles) else paper_id
+        assignments.append(
+            {
+                "id": paper_id,
+                "title": title,
+                "tldr": "This paper supports graph-grounded survey generation and citation traceability.",
+                "clusters": ["Survey Agent synthesis"],
+            }
+        )
+    return assignments
+
+
+def _fake_clusters_with_papers(paper_ids: list[str], titles: list[str]) -> list[dict[str, object]]:
+    return [
+        {
+            **_fake_cluster_descriptions()[0],
+            "papers": [
+                {
+                    "id": paper["id"],
+                    "title": paper["title"],
+                    "tldr": paper["tldr"],
+                }
+                for paper in _fake_cluster_assignments(paper_ids, titles)
+            ],
+        }
+    ]
+
+
+def _fake_cluster_table(paper_ids: list[str], titles: list[str]) -> dict[str, object]:
+    dimensions = ["Evidence grounding", "Evaluation focus", "Research planning"]
+    return {
+        "comparison_dimensions": dimensions,
+        "table_data": [
+            {
+                "paper_id": paper["id"],
+                "paper_title": paper["title"],
+                "columns": {
+                    "Evidence grounding": "Uses structured paper evidence",
+                    "Evaluation focus": "Supports citation traceability",
+                    "Research planning": "Connects claims to reusable artifacts",
+                },
+            }
+            for paper in _fake_cluster_assignments(paper_ids, titles)
+        ],
+    }
+
+
+def _extract_draft_text(text: str) -> str:
+    match = re.search(r"Draft Text:\s*(.*)$", text, flags=re.DOTALL)
+    return match.group(1).strip() if match else ""
+
+
+def _fake_section_text(citations: str) -> str:
+    citations = citations or "<Survey Agent Fixture>"
+    return (
+        "This section synthesizes the supplied graph-grounded evidence into an academic survey narrative. "
+        f"It emphasizes reusable citation traces, comparative structure, and downstream research planning {citations}.\n\n"
+        "The integrated SurveyAgent path keeps the original outline, paper-assignment, drafting, review, and refinement loop while preserving XLab artifact traceability. "
+        f"The resulting synthesis remains grounded in the provided papers {citations}.\n\n"
+        f"An open challenge is evaluating citation traceability consistently across research domains {citations}."
+    )
+
+
+class ChatAgent:
+    Record_splitter = "||"
+    Record_show_length = 200
+
+    def __init__(self, config, use_different_api_for_judge=False) -> None:
+        self.config = config
+        self.remote_url = normalize_chat_completions_url(config.APIInfo.llm_api_base_url)
+        self.token = config.APIInfo.llm_api_key
+        self.header = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.token}",
+        }
+        self.batch_workers = config.APIInfo.batch_chat_agent_worker
+        self.model_name = config.APIInfo.llm_model_name
+        self.logger = get_logger("ChatAgent")
+
+        if use_different_api_for_judge:
+            self.logger.info("Using different LLM API key and URL for Judge module.")
+            self.remote_url = normalize_chat_completions_url(config.ModuleInfo.Judge.judge_llm_api_base_url)
+            self.token = config.ModuleInfo.Judge.judge_llm_api_key
+            self.model_name = config.ModuleInfo.Judge.model
+            self.header = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.token}",
+            }
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(min=1, max=30),
+        retry=retry_if_exception_type((requests.RequestException, TransientHTTPError)),
+    )
+    def remote_chat(
+        self,
+        text_content: str,
+        image_urls: list[str] = None,
+        local_images: list[Path] = None,
+        temperature: float = 0.5,
+        debug: bool = False,
+        model=None,
+        max_output_tokens: int = 16000,
+        request_timeout: float = None,
+    ) -> str:
+        """Chat with remote LLM, return result. Minimal logging; no file writes."""
+        if os.environ.get("XLAB_LITERATURE_SURVEY_FAKE_LLM", "").strip().lower() in {"1", "true", "yes", "on"}:
+            return fake_survey_agent_response(text_content)
+        if model is None:
+            model = self.model_name
+
+        # Estimate input tokens and truncate if necessary to leave room for output.
+        context_window = int(self.config.APIInfo.llm_max_context_length)
+        input_tokens, enc = self.encode_with_fallback(text_content, model=model)
+        input_token_count = len(input_tokens)
+
+        configured_output_tokens = getattr(self.config.APIInfo, "max_output_tokens", None)
+        if configured_output_tokens:
+            try:
+                max_output_tokens = max(512, min(max_output_tokens, int(configured_output_tokens)))
+            except (TypeError, ValueError):
+                pass
+
+        # Reserve space for output tokens
+        max_input_tokens = context_window - max_output_tokens
+
+        if input_token_count > max_input_tokens:
+            self.logger.warning(
+                f"Input tokens ({input_token_count}) exceeds max allowed ({max_input_tokens}). "
+                f"Truncating to fit context window."
+            )
+            truncated_tokens = input_tokens[:max_input_tokens]
+            text_content = enc.decode(truncated_tokens)
+
+        url = self.remote_url
+        header = self.header
+        messages = [{"role": "user", "content": text_content}]
+
+        if image_urls:
+            image_url_frame = [
+                {"type": "image_url", "image_url": {"url": u}} for u in image_urls
+            ]
+            messages.append({"role": "user", "content": image_url_frame})
+
+        # Determine if streaming is enabled
+        use_stream = self.config.APIInfo.use_stream_mode
+        
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": use_stream,
+            "max_tokens": max_output_tokens,
+        }
+        enable_thinking = getattr(self.config.APIInfo, "enable_thinking", None)
+        if enable_thinking is not None:
+            payload["chat_template_kwargs"] = {"enable_thinking": bool(enable_thinking)}
+        if use_stream:
+            payload["stream_options"] = {"include_usage": True}
+        if request_timeout is None:
+            request_timeout = getattr(self.config.APIInfo, "chat_timeout", 120)
+        try:
+            res_text, response = complete_chat(url, header, payload, request_timeout, self.config.BasicInfo.base_dir,
+                                               stream_timeout=getattr(self.config.APIInfo, "stream_read_timeout", None))
+        except requests.HTTPError as error:
+            status = error.response.status_code if error.response is not None else 0
+            if status not in {408, 429, 500, 502, 503, 504}:
+                raise ProviderHTTPError(provider_error_message(status)) from error
+            raise
+        if self.config.APIInfo.low_flow_mode:
+            time.sleep(self.config.APIInfo.low_flow_latency)
+        if debug:
+            return res_text, response
+        return res_text
+
+    def __remote_chat(
+        self,
+        index,
+        content,
+        temperature: float = 0.5,
+        debug: bool = False,
+        request_timeout: float = None,
+    ):
+        model = self.model_name
+        return index, self.remote_chat(
+            text_content=content,
+            image_urls=None,
+            local_images=None,
+            temperature=temperature,
+            debug=debug,
+            model=model,
+            request_timeout=request_timeout,
+        )
+
+    def _default_validate_fn(self, result: str, info_dict: dict = None) -> bool:
+        """Default validation function that checks if the result is a non-empty string."""
+        if not result or len(result) == 0:
+            raise ValueError("Validation failed: Result is empty or not a string.")
+        return True
+
+    def remote_chat_with_retry(
+        self,
+        prompt: str,
+        validate_fn: callable = None,
+        max_retry: int = 5,
+        temperature: float = 0.5,
+        debug: bool = False,
+        model=None,
+        info_dict: dict = {},
+    ) -> str:
+        """
+        Chat with remote LLM with retry logic for failed validations.
+        
+        Args:
+            prompt: The prompt to send to the LLM
+            validate_fn: A function that takes a result string and returns True if valid, 
+                        raises ValueError/Exception if invalid. If None, no validation.
+            max_retry: Maximum number of retry attempts
+            temperature: Temperature for LLM
+            debug: If True, return (response, response) tuple
+            model: Model to use (defaults to self.model_name)
+            
+        Returns:
+            The validated response string
+            
+        Raises:
+            ValueError: If validation fails after max_retry attempts
+        """
+        if model is None:
+            model = self.model_name
+        if validate_fn is None:
+            validate_fn = self._default_validate_fn
+
+        info_dict["max_retry"] = max_retry
+        for retry in range(max_retry):
+            info_dict["retry_time"] = retry
+            try:
+                result = self.remote_chat(
+                    text_content=prompt,
+                    temperature=temperature,
+                    debug=debug,
+                    model=model,
+                )
+                
+                # If no validation function, return directly
+                if validate_fn is None:
+                    return result
+                
+                # Validate the result
+                val, result = validate_fn(result, info_dict)
+                if not val:
+                    raise ValueError("Validation failed for remote chat")
+                return result
+                
+            except Exception as e:
+                if retry < max_retry - 1:
+                    self.logger.warning(
+                        f"remote_chat_with_retry attempt {retry + 1}/{max_retry} failed: {e}. Retrying..."
+                    )
+                    if self.config.BasicInfo.debug:
+                        self.logger.warning(f"return text: {result}...")
+                    time.sleep(min(5, 1 + retry))  # Exponential backoff
+                else:
+                    self.logger.error(
+                        f"remote_chat_with_retry failed after {max_retry} attempts: {e}"
+                    )
+                    if self.config.BasicInfo.debug:
+                        self.logger.warning(f"return text: {result[:50]}...")
+                    raise ValueError(
+                        f"remote_chat_with_retry failed after {max_retry} attempts: {e}"
+                    )
+        
+        # Should not reach here, but just in case
+        raise ValueError(f"remote_chat_with_retry failed after {max_retry} retries")
+
+    def batch_remote_chat(
+        self,
+        prompt_l: list[str],
+        desc: str = "batch_chating...",
+        workers: int = None,
+        temperature: float = 0.5,
+        future_timeout: float = 600.0,
+    ) -> list[str]:
+        if workers is None:
+            workers = self.batch_workers
+        request_timeout = min(
+            future_timeout,
+            getattr(self.config.APIInfo, "chat_timeout", future_timeout),
+        )
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_l = [
+                executor.submit(
+                    self.__remote_chat,
+                    i,
+                    prompt_l[i],
+                    temperature,
+                    False,
+                    request_timeout,
+                )
+                for i in range(len(prompt_l))
+            ]
+            res_l = [None] * len(prompt_l)
+            for future in tqdm(
+                as_completed(future_l),
+                desc=desc,
+                total=len(future_l),
+                dynamic_ncols=True,
+            ):
+                try:
+                    i, resp = future.result()
+                except Exception as e:
+                    self.logger.warning(
+                        f"batch_remote_chat future failed or timed out at request layer: {e}. Marking as timeout."
+                    )
+                    continue
+                res_l[i] = resp
+                if self.config.APIInfo.low_flow_mode:
+                    time.sleep(self.config.APIInfo.low_flow_latency)  # to reduce the API call frequency
+            for res in res_l:
+                if res is None:
+                    self.logger.warning(
+                        f"Some batch_remote_chat tasks did not complete successfully."
+                    )
+        return res_l
+
+    def batch_remote_chat_with_retry(
+        self,
+        prompts: list[str],
+        validate_fn: callable,
+        max_retry: int = 5,
+        desc: str = "batch_chating with retry...",
+        workers: int = None,
+        temperature: float = 0.5,
+        future_timeout: float = 600.0,
+        model: str = None,
+        info_dict: dict = {},
+    ) -> list[str]:
+        """
+        Batch remote chat with retry logic for failed validations.
+        
+        Args:
+            prompts: List of prompts to send to the LLM
+            validate_fn: A function that takes a result string and returns True if valid, 
+                        raises ValueError/Exception if invalid
+            max_retry: Maximum number of retry attempts
+            desc: Description for progress bar
+            workers: Number of parallel workers (defaults to self.batch_workers)
+            temperature: Temperature for LLM
+            future_timeout: Timeout for each future
+            
+        Returns:
+            List of results in the same order as input prompts
+            
+        Raises:
+            ValueError: If not all results pass validation after max_retry attempts
+        """
+        if workers is None:
+            workers = self.batch_workers
+        if model is None:
+            model = self.model_name
+        if validate_fn is None:
+            validate_fn = self._default_validate_fn
+
+        input_prompts = prompts.copy()
+        input_indices = list(range(len(prompts)))
+        all_results = [None] * len(prompts)
+        finished = False
+        info_dict["max_retry"] = max_retry
+        
+        for retry in range(max_retry):
+            info_dict["retry_time"] = retry
+            error_prompts = []
+            error_indices = []
+            
+            # Call batch_remote_chat for current batch of prompts
+            results = self.batch_remote_chat(
+                input_prompts, 
+                desc=f"{desc} (retry {retry + 1}/{max_retry})",
+                workers=workers,
+                temperature=temperature,
+                future_timeout=future_timeout
+            )
+            if not results:
+                self.logger.info(
+                    f"return None "
+                    f"retrying {retry + 1}/{max_retry}"
+                )
+                continue
+            
+            # Validate each result
+            for i in range(len(results)):
+                info_dict["idx"] = input_indices[i]
+                try:
+                    # Validate the result using the provided validation function
+                    val, result = validate_fn(results[i], info_dict)
+                    if not val:
+                        raise ValueError("Validation failed")
+                    # If validation passes, store the result
+                    all_results[input_indices[i]] = result
+                except Exception as e:
+                    self.logger.warning(f"Validation failed for prompt {input_indices[i]}: {e}")
+                    if self.config.BasicInfo.debug and results[i]:
+                        self.logger.warning(f"return text: {results[i][:50]}...")
+                    error_prompts.append(
+                        input_prompts[i] + "\n\nYour previous response failed validation: " + str(e)[:2000]
+                        + "\nReturn a corrected complete response, preserving exact supplied identifiers and field names."
+                    )
+                    error_indices.append(input_indices[i])
+            
+            # Check if all results are valid
+            if len(error_indices) == 0 and len(error_prompts) == 0:
+                finished = True
+                break
+            else:
+                self.logger.info(
+                    f"Validation failed for {len(error_prompts)}/{len(prompts)} prompts, "
+                    f"retrying {retry + 1}/{max_retry}"
+                )
+                # Update for next retry - only process failed prompts
+                input_prompts = error_prompts
+                input_indices = error_indices
+        
+        if not finished:
+            self.logger.error(
+                f"batch_remote_chat_with_retry failed after {max_retry} retries. "
+                f"Failed prompts: {len(error_prompts)}"
+            )
+            raise ValueError(
+                f"batch_remote_chat_with_retry failed after {max_retry} retries. "
+                f"{len(error_prompts)} prompts still failing validation."
+            )
+        
+        return all_results
+
+    def encode_with_fallback(self, text: str, model: str = "gpt-4o-mini"):
+        try:
+            enc = tiktoken.encoding_for_model(model)
+        except Exception:
+            enc = tiktoken.get_encoding("cl100k_base")
+        return enc.encode(text), enc
+
+    def truncate_prompt(self, text: str, allowed: int, model: str = None) -> str:
+        if model is None:
+            model = self.model_name
+        tokens, enc = self.encode_with_fallback(text, model=model)
+        token_len = len(tokens)
+        
+        if token_len > allowed:
+            self.logger.warning(f"Prompt tokens={token_len}, truncate to {allowed}")
+            if allowed < 1000:
+                self.logger.warning(f"Allowed tokens {allowed} too small, need to debug!")
+            tokens = tokens[:allowed]
+            truncate_text = enc.decode(tokens)
+
+            if(truncate_text[:3000] != text[:3000]):
+                self.logger.warning(f"Truncation error for prompt, fallback to approiximation.")
+                approx_tokens = len(text) / 4  # 1 token ≈ 4 chars
+                if approx_tokens > allowed:
+                    new_char_len = int(allowed * 4)
+                    self.logger.warning(
+                        f"Paper {pid} markdown too long: ~{approx_tokens:.0f} tokens, "
+                        f"truncating to ~{allowed}."
+                    )
+                    text = text[:new_char_len]
+            else:
+                text = truncate_text
+        return text
+
+    def truncate_text(self, pid:str, text: str, allowed: int) -> str:
+
+        tokens, enc = self.encode_with_fallback(text, model=self.config.APIInfo.llm_model_name)
+        token_len = len(tokens)
+        
+        if token_len > allowed:
+            self.logger.warning(f"Paper {pid} tokens={token_len}, truncate to {allowed}")
+            if allowed < 1000:
+                self.logger.warning(f"Allowed tokens {allowed} too small, need to debug!")
+            tokens = tokens[:allowed]
+            truncate_text = enc.decode(tokens)
+
+            if(truncate_text[:3000] != text[:3000]):
+                self.logger.warning(f"Truncation error for paper {pid}, fallback to approiximation.")
+                approx_tokens = len(text) / 4  # 1 token ≈ 4 chars
+                if approx_tokens > allowed:
+                    new_char_len = int(allowed * 4)
+                    self.logger.warning(
+                        f"Paper {pid} markdown too long: ~{approx_tokens:.0f} tokens, "
+                        f"truncating to ~{allowed}."
+                    )
+                    text = text[:new_char_len]
+            else:
+                text = truncate_text
+        return text
+
+    def estimate_tokens(self, text: str) -> int:
+        tokens, enc = self.encode_with_fallback(text, model=self.config.APIInfo.llm_model_name)
+        token_len = len(tokens)
+        return token_len
+
+
+if __name__ == "__main__":
+    # # test LLM API call
+    # test_prompt = "Explain the theory of relativity in simple terms."
+    # # load config
+    # from omegaconf import OmegaConf
+
+    # config = OmegaConf.load("config/deep_survey.yaml")
+    # chat_agent = ChatAgent(config)
+    # response = chat_agent.remote_chat(test_prompt, temperature=0.7, debug=True)
+    # print("LLM API Response:")
+    # print(response)
+
+    # test Semantic Scholar API call
+    from omegaconf import OmegaConf
+
+    config = OmegaConf.load("config/deep_survey.yaml")
+    semantic_scholar_api = SemanticScholarAPI(config)
+    # query = '"auto survey"'
+    # fields = "title,externalIds,openAccessPdf"
+    # response = semantic_scholar_api.search_papers(query=query, fields=fields)
+    # print("Semantic Scholar API Response:")
+    # print(response["data"][:10])
+    paper_id = "ARXIV:2505.11711"
+    fields = "title,year,abstract,authors,externalIds,citations"
+    response = semantic_scholar_api.get_paper_details(paper_id=paper_id, fields=fields)
+    print("Semantic Scholar API Paper Details Response:")
+    print(response)

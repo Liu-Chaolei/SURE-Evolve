@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlab.local/schemas/paper_collection.schema.json",
+  "title": "XLab Graph-Ready Paper Collection",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "query",
+    "target_count",
+    "max_count",
+    "candidate_count",
+    "collected_count",
+    "seed_count",
+    "edge_count",
+    "search",
+    "quality",
+    "files",
+    "papers"
+  ],
+  "properties": {
+    "schema_version": { "const": "xlab.paper_set.v3" },
+    "query": { "type": "string", "minLength": 1 },
+    "facets": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "target_count": { "type": "integer", "minimum": 1 },
+    "max_count": { "type": "integer", "minimum": 1 },
+    "candidate_count": { "type": "integer", "minimum": 0 },
+    "collected_count": { "type": "integer", "minimum": 0 },
+    "seed_count": { "type": "integer", "minimum": 0 },
+    "edge_count": { "type": "integer", "minimum": 0 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "search": {
+      "type": "object",
+      "required": ["round", "followup_count"],
+      "properties": {
+        "round": { "type": "integer", "minimum": 1 },
+        "stop_reason": { "type": ["string", "null"] },
+        "followup_count": { "type": "integer", "minimum": 0 },
+        "novelty_ratio": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "quality": {
+      "type": "object",
+      "required": [
+        "tiers",
+        "metadata",
+        "abstract_coverage",
+        "graph_connected_ratio"
+      ],
+      "properties": {
+        "tiers": { "type": "object" },
+        "metadata": { "type": "object" },
+        "abstract_coverage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "graph_connected_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "files": { "type": "object" },
+    "papers": {
+      "type": "array",
+      "items": { "$ref": "paper_metadata.schema.json" }
+    }
+  },
+  "additionalProperties": true
+}

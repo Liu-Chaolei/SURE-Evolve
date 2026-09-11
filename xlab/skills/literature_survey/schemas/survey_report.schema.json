@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlab.local/schemas/survey_report.schema.json",
+  "title": "XLab Literature Survey Audit Report",
+  "type": "object",
+  "required": ["schema_version", "generated_at", "passed", "blocking_errors", "warnings", "counts", "checks"],
+  "properties": {
+    "schema_version": { "const": "xlab.literature_survey.report.v1" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "passed": { "type": "boolean" },
+    "blocking_errors": { "type": "array", "items": { "type": "string" } },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "papers": { "type": "integer", "minimum": 0 },
+        "clusters": { "type": "integer", "minimum": 0 },
+        "sections": { "type": "integer", "minimum": 0 },
+        "claims": { "type": "integer", "minimum": 0 },
+        "gaps": { "type": "integer", "minimum": 0 },
+        "references": { "type": "integer", "minimum": 0 },
+        "traces": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": { "type": "boolean" }
+    },
+    "source": { "type": "object" },
+    "stages": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "checkpoint": { "type": "object" },
+    "metrics": { "type": "object" },
+    "files": { "type": "object" }
+  },
+  "additionalProperties": true
+}

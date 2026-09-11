@@ -1,0 +1,45 @@
+---
+import "../styles/docs.css";
+import XLabMark from "../components/XLabMark.astro";
+import { REPOSITORY_URL } from "../data/site";
+
+interface Props { title: string; description: string }
+const { title, description } = Astro.props;
+const canonical = Astro.site ? new URL(Astro.url.pathname, Astro.site) : undefined;
+const fullTitle = `${title} — XLab Docs`;
+const navigation = [
+  ["Overview", "overview"],
+  ["Quickstart", "quickstart"],
+  ["Installation", "installation"],
+  ["Configuration", "configuration"],
+  ["Core concepts", "core-concepts"],
+  ["Command reference", "command-reference"],
+  ["Security", "security"],
+  ["Source reference", "source-reference"],
+] as const;
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#0b1211" />
+    {canonical && <link rel="canonical" href={canonical} />}
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta property="og:type" content="website" /><meta property="og:title" content={fullTitle} /><meta property="og:description" content={description} /><meta property="og:image" content="/social-card.svg" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <title>{fullTitle}</title>
+  </head>
+  <body class="docs-shell">
+    <a class="docs-skip" href="#main-content">Skip to content</a>
+    <header class="docs-topbar"><a class="docs-brand" href="/" aria-label="XLab home"><XLabMark class="docs-mark" /><strong>XLab</strong><span>Docs</span></a><nav aria-label="Docs links"><a href="/">Home</a><a href={REPOSITORY_URL}>GitHub <span aria-hidden="true">↗</span></a></nav></header>
+    <details class="docs-mobile-nav"><summary>Documentation navigation</summary><nav aria-label="Mobile documentation">{navigation.map(([label, id]) => <a href={`#${id}`}>{label}</a>)}</nav></details>
+    <div class="docs-grid">
+      <aside class="docs-sidebar"><nav aria-label="Documentation">{navigation.map(([label, id]) => <a href={`#${id}`}>{label}</a>)}</nav></aside>
+      <main id="main-content" class="docs-content"><slot /></main>
+      <aside class="docs-toc"><strong>On this page</strong><nav aria-label="On this page">{navigation.map(([label, id]) => <a href={`#${id}`}>{label}</a>)}</nav></aside>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,295 @@
+{
+  "schema_version": "2",
+  "name": "knowledge_graph",
+  "version": "3.0.0",
+  "visibility": "public",
+  "description": "Build and audit a queryable method graph from a completed paper collection.",
+  "prompt": "SKILL.md",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "scripts/build_graph.py",
+    "lockfile": "requirements.lock",
+    "executables": ["python"],
+    "required_secrets": [
+      "KNOWLEDGE_GRAPH_LLM_API_URL",
+      "KNOWLEDGE_GRAPH_LLM_API_KEY",
+      "KNOWLEDGE_GRAPH_LLM_MODEL"
+    ],
+    "optional_secrets": ["HF_TOKEN", "SEMANTIC_SCHOLAR_API_KEY", "S2_API_KEY"]
+  },
+  "permissions": {
+    "tools": ["bash", "read"],
+    "network": true,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "input_schema": "schemas/knowledge_graph_request.schema.json",
+  "output_schema": "schemas/method_graph.schema.json",
+  "hooks": {
+    "pre_start": [{ "module": "hooks/index.ts", "handler": "preStart" }],
+    "pre_tool_call": [{ "module": "hooks/index.ts", "handler": "preToolCall" }],
+    "post_tool_result": [
+      {
+        "module": "hooks/index.ts",
+        "handler": "postToolResult",
+        "blocking": false
+      }
+    ],
+    "pre_finish": [{ "module": "hooks/index.ts", "handler": "preFinish" }],
+    "post_finish": [{ "module": "hooks/index.ts", "handler": "postFinish" }],
+    "on_resume": [{ "module": "hooks/index.ts", "handler": "onResume" }],
+    "on_cancel": [{ "module": "hooks/index.ts", "handler": "onCancel" }],
+    "on_error": [{ "module": "hooks/index.ts", "handler": "onError" }]
+  },
+  "artifacts": [
+    {
+      "type": "mineru_documents",
+      "schema_version": "1",
+      "schema": "schemas/mineru_manifest.schema.json",
+      "required": true,
+      "description": "MinerU Markdown, content-list layout records, middle/layout JSON, images, and checksums"
+    },
+    {
+      "type": "paper_structures",
+      "schema_version": "1",
+      "schema": "schemas/paper_structures.schema.json",
+      "required": true,
+      "description": "PaperGraph Step 1 structures with upstream, Semantic Scholar, and local reference alignment"
+    },
+    {
+      "type": "paper_extractions",
+      "schema_version": "2",
+      "schema": "schemas/paper_extractions.schema.json",
+      "required": true,
+      "description": "Three-pass, deterministically validated PaperGraph Step 2 LLM extractions"
+    },
+    {
+      "type": "method_graph",
+      "schema_version": "2",
+      "schema": "schemas/method_graph.schema.json",
+      "required": true,
+      "description": "PaperGraph-compatible Paper, Core, Baseline, and Dataset nodes with grounded relations and static preview metadata"
+    },
+    {
+      "type": "graph_db",
+      "schema_version": "1",
+      "required": true,
+      "description": "PaperGraph-compatible SQLite graph with wide node/edge columns, aliases, extraction records, indexes, and FTS"
+    },
+    {
+      "type": "graph_report",
+      "schema_version": "2",
+      "schema": "schemas/graph_report.schema.json",
+      "required": true,
+      "description": "MinerU, PaperGraph, grounding, provenance, graph compatibility, SQLite, and FTS audit"
+    }
+  ],
+  "ui": {
+    "argumentHint": "\"<paper-collect-run>\" [options]",
+    "arguments": [
+      {
+        "name": "--llm-disable-thinking",
+        "description": "Disable thinking through chat_template_kwargs for compatible extraction models.",
+        "takesValue": false
+      },
+      {
+        "name": "--mineru-device",
+        "description": "Select CPU, CUDA, or an allocated Ascend NPU for parsing.",
+        "valueHint": "<device>",
+        "choices": ["auto", "cpu", "cuda", "npu"],
+        "takesValue": true
+      },
+      {
+        "name": "--mineru-batch-size",
+        "description": "Maximum PDFs per worker batch; each completed batch is checkpointed.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--mineru-backend",
+        "description": "Select the MinerU execution backend.",
+        "valueHint": "<backend>",
+        "choices": ["auto", "pipeline", "vlm-engine", "hybrid-engine"],
+        "takesValue": true
+      },
+      {
+        "name": "--mineru-method",
+        "description": "Select automatic, text, or OCR parsing.",
+        "valueHint": "<method>",
+        "choices": ["auto", "txt", "ocr"],
+        "takesValue": true
+      },
+      {
+        "name": "--mineru-language",
+        "description": "Set the MinerU document language.",
+        "valueHint": "<language>",
+        "takesValue": true
+      },
+      {
+        "name": "--gpu",
+        "description": "Select a GPU index; repeat to select multiple devices.",
+        "valueHint": "<index>",
+        "dynamicSource": "gpu",
+        "takesValue": true,
+        "repeatable": true
+      },
+      {
+        "name": "--mineru-workers",
+        "description": "Set MinerU worker count.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--mineru-timeout",
+        "description": "Set the MinerU timeout in seconds.",
+        "valueHint": "<seconds>",
+        "takesValue": true
+      },
+      {
+        "name": "--min-gpu-free-gb",
+        "description": "Require minimum free GPU memory in GiB.",
+        "valueHint": "<gb>",
+        "takesValue": true
+      },
+      {
+        "name": "--max-gpu-utilization",
+        "description": "Set maximum allowed GPU utilization percent.",
+        "valueHint": "<percent>",
+        "takesValue": true
+      },
+      {
+        "name": "--structure-workers",
+        "description": "Set structure extraction workers.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--llm-workers",
+        "description": "Set concurrent graph extraction LLM workers.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--llm-timeout",
+        "description": "Set each graph extraction LLM timeout.",
+        "valueHint": "<seconds>",
+        "takesValue": true
+      },
+      {
+        "name": "--llm-retries",
+        "description": "Set graph extraction LLM retry count.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--llm-validation-retries",
+        "description": "Set validation repair retry count.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--llm-rpm",
+        "description": "Set the LLM request-per-minute limit.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--llm-max-input-chars",
+        "description": "Bound characters sent for each paper extraction.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--llm-max-output-tokens",
+        "description": "Bound graph extraction output tokens.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--min-papers",
+        "description": "Set the minimum paper count audit gate.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--min-nodes",
+        "description": "Set the minimum graph node audit gate.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--min-edges",
+        "description": "Set the minimum graph edge audit gate.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--min-mineru-coverage",
+        "description": "Set minimum MinerU coverage ratio.",
+        "valueHint": "<ratio>",
+        "takesValue": true
+      },
+      {
+        "name": "--min-structure-success",
+        "description": "Set minimum structure success ratio.",
+        "valueHint": "<ratio>",
+        "takesValue": true
+      },
+      {
+        "name": "--min-extraction-success",
+        "description": "Set minimum extraction success ratio.",
+        "valueHint": "<ratio>",
+        "takesValue": true
+      },
+      {
+        "name": "--min-core-coverage",
+        "description": "Set minimum core-method coverage ratio.",
+        "valueHint": "<ratio>",
+        "takesValue": true
+      },
+      {
+        "name": "--min-evidence-coverage",
+        "description": "Set minimum evidence coverage ratio.",
+        "valueHint": "<ratio>",
+        "takesValue": true
+      },
+      {
+        "name": "--desired-baseline-coverage",
+        "description": "Set desired baseline coverage ratio.",
+        "valueHint": "<ratio>",
+        "takesValue": true
+      },
+      {
+        "name": "--desired-dataset-coverage",
+        "description": "Set desired dataset coverage ratio.",
+        "valueHint": "<ratio>",
+        "takesValue": true
+      },
+      {
+        "name": "--max-ambiguous-alias-ratio",
+        "description": "Set maximum ambiguous alias ratio.",
+        "valueHint": "<ratio>",
+        "takesValue": true
+      }
+    ],
+    "primaryCounters": [
+      "papers",
+      "downloaded_pdfs",
+      "parsed_papers",
+      "structured_papers",
+      "extracted_papers",
+      "nodes",
+      "edges",
+      "aliases"
+    ],
+    "artifactTypes": [
+      "mineru_documents",
+      "paper_structures",
+      "paper_extractions",
+      "method_graph",
+      "graph_db",
+      "graph_report"
+    ],
+    "defaultExpandedSections": ["diagnostics", "artifacts"]
+  }
+}

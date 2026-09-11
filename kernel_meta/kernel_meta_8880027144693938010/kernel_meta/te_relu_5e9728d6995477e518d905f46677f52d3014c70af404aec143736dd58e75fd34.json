@@ -1,0 +1,18 @@
+{
+    "KBHit":false,
+    "binFileName":"te_relu_5e9728d6995477e518d905f46677f52d3014c70af404aec143736dd58e75fd34",
+    "binFileSuffix":".o",
+    "blockDim":1,
+    "coreType":"VectorCore",
+    "deterministic":"ignore",
+    "intercoreSync":0,
+    "kernelName":"te_relu_5e9728d6995477e518d905f46677f52d3014c70af404aec143736dd58e75fd34__kernel0",
+    "magic":"RT_DEV_BINARY_MAGIC_ELF_AIVEC",
+    "memoryStamping":[],
+    "opParaSize":0,
+    "parameters":[
+        null,
+        null
+    ],
+    "sha256":"358423de08e13141b7a9af1e77c73272464202339d88b354cd4050149574ea56"
+}

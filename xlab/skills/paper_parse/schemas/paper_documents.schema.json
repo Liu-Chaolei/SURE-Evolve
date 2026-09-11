@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "generated_at", "documents", "summary"],
+  "properties": {
+    "schema_version": { "const": "xlab.paper_documents.v1" },
+    "documents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["paper_id", "title", "status", "parser", "text_path", "sha256", "blocker"],
+        "properties": {
+          "status": { "enum": ["parsed", "metadata_only", "failed"] }
+        }
+      }
+    }
+  }
+}

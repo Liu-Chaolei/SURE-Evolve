@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlab.local/schemas/literature_survey.schema.json",
+  "title": "XLab Literature Survey",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "topic",
+    "paper_count",
+    "clusters",
+    "chronology",
+    "sections",
+    "key_claims",
+    "research_gaps",
+    "references",
+    "citation_trace_path",
+    "runtime",
+    "generated_at"
+  ],
+  "properties": {
+    "schema_version": { "const": "xlab.literature_survey.v1" },
+    "run_id": { "type": "string", "minLength": 1 },
+    "topic": { "type": "string", "minLength": 1 },
+    "language": { "type": "string" },
+    "depth": { "enum": ["brief", "standard", "deep"] },
+    "paper_count": { "type": "integer", "minimum": 1 },
+    "clusters": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "paper_ids", "summary"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "keywords": { "type": "array", "items": { "type": "string" } },
+          "paper_ids": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "summary": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": true
+      }
+    },
+    "chronology": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["year", "paper_ids"],
+        "properties": {
+          "year": { "type": "integer" },
+          "paper_ids": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": true
+      }
+    },
+    "sections": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "summary", "paper_ids"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "summary": { "type": "string", "minLength": 1 },
+          "paper_ids": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "evidence": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "key_claims": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "claim", "paper_ids"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "claim": { "type": "string", "minLength": 1 },
+          "paper_ids": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "confidence": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "research_gaps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "gap", "paper_ids"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "gap": { "type": "string", "minLength": 1 },
+          "paper_ids": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+        },
+        "additionalProperties": true
+      }
+    },
+    "references": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["paper_id", "title"],
+        "properties": {
+          "paper_id": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "year": { "type": ["integer", "null"] },
+          "venue": { "type": ["string", "null"] },
+          "authors": { "type": "array", "items": { "type": "string" } },
+          "url": { "type": ["string", "null"] },
+          "source": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "citation_trace_path": { "type": "string", "minLength": 1 },
+    "runtime": { "type": "object" },
+    "source": { "type": "object" },
+    "graph_context": { "type": "object" },
+    "generated_at": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": true
+}

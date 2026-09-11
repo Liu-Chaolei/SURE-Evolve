@@ -1,0 +1,50 @@
+{
+  "schema_version": "2",
+  "run_id": "example-run",
+  "skill_name": "paper_collect",
+  "skill_version": "2.2.0",
+  "status": "success",
+  "created_at": "2026-07-19T00:00:00Z",
+  "inputs": {
+    "query": "graph neural networks",
+    "facets": [
+      "node representation learning",
+      "graph transformers"
+    ],
+    "target_papers": 500,
+    "max_papers": 1500
+  },
+  "outputs": {
+    "paper_collection": ".xlab/runs/example-run/artifacts/papers.manifest.json",
+    "papers": ".xlab/runs/example-run/artifacts/metadata/papers.jsonl",
+    "edges": ".xlab/runs/example-run/artifacts/metadata/edges.jsonl",
+    "pdf_dir": ".xlab/runs/example-run/artifacts/pdfs",
+    "collection_report": ".xlab/runs/example-run/artifacts/collection_report.json",
+    "collected_count": 612,
+    "edge_count": 1840,
+    "downloaded_pdf_count": 371
+  },
+  "validation": {
+    "passed": true,
+    "blocking_errors": [],
+    "warnings": [],
+    "report": ".xlab/runs/example-run/artifacts/collection_report.json"
+  },
+  "artifacts": [
+    {
+      "type": "paper_set",
+      "schema_version": "3",
+      "path": ".xlab/runs/example-run/artifacts/papers.manifest.json"
+    },
+    {
+      "type": "paper_edges",
+      "schema_version": "1",
+      "path": ".xlab/runs/example-run/artifacts/metadata/edges.jsonl"
+    },
+    {
+      "type": "collection_report",
+      "schema_version": "1",
+      "path": ".xlab/runs/example-run/artifacts/collection_report.json"
+    }
+  ]
+}

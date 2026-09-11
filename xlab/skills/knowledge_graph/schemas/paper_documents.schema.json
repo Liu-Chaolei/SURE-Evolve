@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlab.local/schemas/knowledge_graph_paper_documents.schema.json",
+  "title": "MinerU Paper Documents",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "input_directory",
+    "paper_set_path",
+    "paper_set_sha256",
+    "paper_edges_path",
+    "paper_edges_sha256",
+    "prior_manifest_path",
+    "prior_manifest_sha256",
+    "pdf_root",
+    "paper_collect_run_id",
+    "documents",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": { "const": "xlab.paper_documents.v2" },
+    "input_directory": { "type": "string", "minLength": 1 },
+    "paper_set_path": { "type": "string", "minLength": 1 },
+    "paper_set_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "paper_edges_path": { "type": "string", "minLength": 1 },
+    "paper_edges_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "prior_manifest_path": { "type": "string", "minLength": 1 },
+    "prior_manifest_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "paper_collect_run_id": { "type": "string", "minLength": 1 },
+    "paper_collect_skill_version": { "type": "string" },
+    "pdf_root": { "type": "string", "minLength": 1 },
+    "documents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "paper_id",
+          "title",
+          "status",
+          "parser",
+          "source_pdf",
+          "source_sha256",
+          "source_download_sha256",
+          "source_manifest",
+          "source_manifest_sha256",
+          "paper_collect_manifest",
+          "paper_collect_manifest_sha256",
+          "paper_collect_run_id",
+          "source_pdf_root",
+          "paper_edges_path",
+          "paper_edges_sha256",
+          "markdown_path",
+          "content_list_path",
+          "middle_json_path",
+          "markdown_sha256",
+          "content_list_sha256",
+          "middle_json_sha256",
+          "blocker",
+          "metadata"
+        ],
+        "properties": {
+          "paper_id": { "type": "string" },
+          "title": { "type": "string" },
+          "status": {
+            "enum": ["pending", "parsed", "metadata_only", "failed"]
+          },
+          "parser": { "enum": ["mineru", null] },
+          "source_pdf": { "type": ["string", "null"] },
+          "source_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+          "source_download_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+          "source_manifest": { "type": "string", "minLength": 1 },
+          "source_manifest_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "paper_collect_manifest": { "type": "string", "minLength": 1 },
+          "paper_collect_manifest_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "paper_collect_run_id": { "type": "string", "minLength": 1 },
+          "source_pdf_root": { "type": "string", "minLength": 1 },
+          "paper_edges_path": { "type": "string", "minLength": 1 },
+          "paper_edges_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "markdown_path": { "type": ["string", "null"] },
+          "content_list_path": { "type": ["string", "null"] },
+          "middle_json_path": { "type": ["string", "null"] },
+          "model_json_path": { "type": ["string", "null"] },
+          "images_dir": { "type": ["string", "null"] },
+          "markdown_sha256": { "type": ["string", "null"] },
+          "content_list_sha256": { "type": ["string", "null"] },
+          "middle_json_sha256": { "type": ["string", "null"] },
+          "blocker": { "type": ["string", "null"] },
+          "metadata": { "type": "object" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "total",
+        "downloaded_pdfs",
+        "parsed",
+        "metadata_only",
+        "failed",
+        "reused"
+      ]
+    }
+  },
+  "additionalProperties": true
+}

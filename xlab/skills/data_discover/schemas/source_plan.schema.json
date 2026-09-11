@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "generated_at", "sources", "collect_now"],
+  "properties": {
+    "schema_version": { "const": "xlab.data_source_plan.v1" },
+    "sources": { "type": "array" },
+    "collect_now": { "type": "array", "items": { "type": "string" } }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlab.local/schemas/mineru_manifest.schema.json",
+  "title": "MinerU Document Manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "documents_path",
+    "backend",
+    "method",
+    "language",
+    "records",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": { "const": "xlab.mineru_manifest.v1" },
+    "documents_path": { "type": "string", "minLength": 1 },
+    "backend": {
+      "enum": ["pipeline", "vlm-engine", "hybrid-engine"]
+    },
+    "method": { "enum": ["auto", "txt", "ocr"] },
+    "language": { "type": "string", "minLength": 1 },
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "paper_id",
+          "status",
+          "markdown_path",
+          "content_list_path",
+          "middle_json_path",
+          "blocker"
+        ],
+        "properties": {
+          "paper_id": { "type": "string" },
+          "status": {
+            "enum": ["pending", "parsed", "metadata_only", "failed"]
+          },
+          "markdown_path": { "type": ["string", "null"] },
+          "content_list_path": { "type": ["string", "null"] },
+          "middle_json_path": { "type": ["string", "null"] },
+          "blocker": { "type": ["string", "null"] }
+        },
+        "additionalProperties": true
+      }
+    },
+    "summary": { "type": "object" }
+  },
+  "additionalProperties": true
+}

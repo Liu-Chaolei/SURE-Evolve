@@ -1,0 +1,33 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import HeroTerminal from "../components/HeroTerminal.astro";
+import ResearchPipeline from "../components/ResearchPipeline.astro";
+import RunLifecycle from "../components/RunLifecycle.astro";
+import ArtifactTrace from "../components/ArtifactTrace.astro";
+import CommandBlock from "../components/CommandBlock.astro";
+import HomeMotion from "../components/HomeMotion.astro";
+import { commands, commandText } from "../data/commands";
+import { reliabilityClaims, REPOSITORY_URL, sourceUrl } from "../data/site";
+
+const featuredClaims = reliabilityClaims.filter((claim) => ["Durable runs", "Typed artifacts", "Acceptance gates"].includes(claim.title));
+const featuredCommands = ["run-research-workflow", "show-run", "resume-run"].map((task) => commands.find((command) => command.task === task)).filter((command) => command !== undefined);
+---
+<BaseLayout title="XLab" description="XLab turns research tasks into durable, inspectable runs with traceable artifacts and explicit acceptance gates.">
+  <HomeMotion />
+  <section class="hero"><div class="shell hero-grid">
+    <div data-reveal><span class="kicker">Research-agent harness · built on Pi</span><h1>Research agents you can resume, inspect, and verify.</h1><p class="hero-copy">Durable runs, traceable artifacts, explicit gates, and a clear next action when work is incomplete.</p><div class="button-row"><a class="button" href="/docs/#quickstart">Get started from source</a><a class="button secondary" href={REPOSITORY_URL}>View on GitHub <span aria-hidden="true">↗</span></a></div></div>
+    <HeroTerminal />
+  </div></section>
+
+  <section class="section"><div class="shell"><div class="section-head section-head-simple" data-reveal><span class="section-index">01 · Pipeline</span><h2>From papers to an uncertainty-aware novelty report.</h2></div><ResearchPipeline /></div></section>
+
+  <section class="section"><div class="shell"><div class="section-head section-head-simple" data-reveal><span class="section-index">02 · Inspect &amp; resume</span><h2>Know what is running—and what needs repair.</h2></div><RunLifecycle /><div class="lineage-panel"><div><span class="meta-label">Artifact lineage</span><h3>Follow a claim back to evidence.</h3><p>Producer and parent metadata preserve a reviewable path from source passage to analysis.</p></div><ArtifactTrace /></div></div></section>
+
+  <section class="section"><div class="shell"><div class="section-head section-head-simple" data-reveal><span class="section-index">03 · Evidence controls</span><h2>Mechanisms, not magic.</h2></div><div class="claim-grid" data-reveal>{featuredClaims.map((claim, index) => <article class="claim-card" data-stagger style={`--stagger:${index}`}><h3>{claim.title}</h3><p>{claim.body}</p><a class="source-link" href={sourceUrl(claim.source.path)}>Inspect source <span aria-hidden="true">↗</span></a></article>)}</div><div class="mechanism-strip" aria-label="Additional reliability mechanisms">{reliabilityClaims.filter((claim) => !featuredClaims.includes(claim)).map((claim) => <a href={sourceUrl(claim.source.path)}>{claim.title}<span aria-hidden="true">↗</span></a>)}</div></div></section>
+
+  <section class="section"><div class="shell"><div class="section-head section-head-simple" data-reveal><span class="section-index">04 · Operate</span><h2>Start, inspect, continue.</h2></div><div class="command-catalog command-catalog-compact" data-reveal>{featuredCommands.map((command, index) => <article class="command-card" data-stagger style={`--stagger:${index}`}><h3>{command.task}</h3><p>{command.description}</p><CommandBlock command={commandText(command)} /></article>)}</div><div class="button-row"><a class="button secondary" href="/docs/#command-reference">Read all 25 commands</a><a class="source-link" href="/docs/#core-concepts">Understand runs and artifacts</a></div></div></section>
+
+  <section class="section"><div class="shell"><div class="section-head section-head-simple" data-reveal><span class="section-index">05 · Trust boundary</span><h2>Local execution, explicit trust.</h2></div><div class="trust-panels" data-reveal><article><span class="boundary-tag">Current user</span><h3>Local harness and state</h3><p>XLab runs with your operating-system permissions. Repository skills, run records, checkpoints, and artifacts stay visible under the project and <code>.xlab</code>.</p></article><span class="boundary-connector" aria-hidden="true">configured network calls →</span><article class="external"><span class="boundary-tag">External providers</span><h3>Model and scholarly services</h3><p>Configured providers may receive task data. Pi does not provide an OS sandbox, and novelty analysis reports evidence, overlap risk, and uncertainty—not proof.</p></article></div><div class="button-row"><a class="button secondary" href="/docs/#security">Review security boundaries</a><a class="source-link" href={`${REPOSITORY_URL}/blob/main/SECURITY.md`}>Security policy <span aria-hidden="true">↗</span></a></div></div></section>
+
+  <section class="section start-section"><div class="shell start-grid" data-reveal><div><span class="section-index">Start from source</span><h2>Open the TUI and run a research command.</h2></div><div class="command-catalog"><CommandBlock command="npm install --ignore-scripts" label="Install"/><CommandBlock command="./pi-test.sh" label="Launch"/><CommandBlock command={'/xlab collect-papers "graph neural networks after 2022" --target-papers 50'} label="First research run"/><div class="button-row"><a class="button" href="/docs/#quickstart">Read quickstart</a></div></div></div></section>
+</BaseLayout>

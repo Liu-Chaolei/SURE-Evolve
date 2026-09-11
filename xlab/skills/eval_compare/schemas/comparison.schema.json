@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "same_benchmark", "threshold", "metrics", "passed"],
+  "properties": {
+    "schema_version": { "const": "xlab.evaluation_comparison.v1" },
+    "same_benchmark": { "type": "boolean" },
+    "threshold": { "type": "number" },
+    "metrics": { "type": "object" },
+    "passed": { "type": "boolean" }
+  }
+}

@@ -1,0 +1,20 @@
+---
+import { pipeline, sourceUrl } from "../data/site";
+---
+<div class="pipeline-visual pipeline-simple" data-reveal>
+  <div class="pipeline-rail" aria-hidden="true"><span data-loop-motion></span></div>
+  <ol class="pipeline" aria-label="Research pipeline">
+    {pipeline.map((stage, index) => (
+      <li data-stagger style={`--stagger:${index}`}>
+        <span class="pipeline-number">{String(index + 1).padStart(2, "0")}</span>
+        <span class="pipeline-node" aria-hidden="true"></span>
+        <div>
+          <h3>{stage.label}</h3>
+          <code>{stage.command}</code>
+          <p>Produces: {stage.artifact}</p>
+          <a class="source-link" href={sourceUrl(stage.source.path)}>Manifest <span aria-hidden="true">↗</span></a>
+        </div>
+      </li>
+    ))}
+  </ol>
+</div>

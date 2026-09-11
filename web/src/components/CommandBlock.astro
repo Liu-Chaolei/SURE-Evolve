@@ -1,0 +1,33 @@
+---
+interface Props { command: string; label?: string }
+const { command, label = "Command" } = Astro.props;
+---
+<div class="command-block" data-copy-block>
+  <span class="command-label">{label}</span>
+  <code>{command}</code>
+  <button type="button" data-copy={command} aria-label={`Copy ${label.toLowerCase()}`}><span data-copy-label>Copy</span></button>
+  <span class="sr-only" aria-live="polite" data-copy-status></span>
+</div>
+<script>
+  const copyState = window as Window & { __xlabCopyReady?: boolean };
+  if (!copyState.__xlabCopyReady) {
+    copyState.__xlabCopyReady = true;
+    document.addEventListener("click", async (event) => {
+      const button = (event.target as Element).closest<HTMLButtonElement>("[data-copy]");
+      if (!button) return;
+      const text = button.dataset.copy ?? "";
+      const block = button.closest("[data-copy-block]");
+      try {
+        await navigator.clipboard.writeText(text);
+        const label = button.querySelector("[data-copy-label]");
+        const status = block?.querySelector("[data-copy-status]");
+        if (label) label.textContent = "Copied";
+        if (status) status.textContent = "Command copied to clipboard.";
+        window.setTimeout(() => { if (label) label.textContent = "Copy"; }, 1800);
+      } catch {
+        const status = block?.querySelector("[data-copy-status]");
+        if (status) status.textContent = "Copy failed. Select the command text instead.";
+      }
+    });
+  }
+</script>

@@ -1,0 +1,67 @@
+{
+  "schema_version": "2",
+  "name": "model_eval",
+  "version": "1.0.0",
+  "visibility": "public",
+  "description": "Benchmark a model against a frozen dataset and metric contract.",
+  "prompt": "SKILL.md",
+  "runtime": { "kind": "workflow" },
+  "permissions": {
+    "tools": ["bash", "read", "write", "edit"],
+    "network": false,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "dependencies": [
+    { "name": "eval_prepare", "version": "1.0.0" },
+    { "name": "eval_run", "version": "1.0.0" },
+    { "name": "eval_compare", "version": "1.0.0" }
+  ],
+  "workflow": {
+    "stages": [
+      { "id": "prepare", "skill": "eval_prepare", "max_attempts": 2 },
+      {
+        "id": "evaluate",
+        "skill": "eval_run",
+        "needs": ["prepare"],
+        "max_attempts": 2
+      },
+      {
+        "id": "compare",
+        "skill": "eval_compare",
+        "needs": ["evaluate"],
+        "optional": true,
+        "max_attempts": 1
+      }
+    ]
+  },
+  "hooks": {
+    "pre_start": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "pre_stage": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "post_stage": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "pre_finish": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_resume": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_cancel": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_error": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ]
+  },
+  "artifacts": [
+    { "type": "evaluation_report", "schema_version": "1", "required": true }
+  ],
+  "ui": {
+    "argumentHint": "<model, dataset, metrics, and optional baseline>"
+  }
+}

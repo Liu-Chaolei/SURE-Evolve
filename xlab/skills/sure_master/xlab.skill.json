@@ -1,0 +1,55 @@
+{
+  "schema_version": "2",
+  "name": "sure_master",
+  "version": "1.0.0",
+  "visibility": "public",
+  "description": "Run SURE-Master speech-model self-evolution with XLab idea generation and round feedback.",
+  "prompt": "SKILL.md",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "scripts/run_sure_master.py",
+    "lockfile": "requirements.lock",
+    "executables": ["python"]
+  },
+  "permissions": {
+    "tools": ["bash", "read", "write"],
+    "network": false,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "config": {
+    "environment": [
+      {
+        "name": "SURE_EVOLVE_ROOT",
+        "description": "Absolute local path to the authorized SURE-Evolve checkout.",
+        "secret": false,
+        "required": true
+      },
+      {
+        "name": "SURE_PYTHON",
+        "description": "Python executable used to run the configured SURE-Master process.",
+        "secret": false,
+        "required": false,
+        "default": "python"
+      }
+    ]
+  },
+  "artifacts": [
+    {"type": "sure_master_result", "schema_version": "sure_master.result.v1", "required": true},
+    {"type": "sure_idea_batch", "schema_version": "sure.idea_batch.v1", "required": false},
+    {"type": "sure_round_result", "schema_version": "sure.round_result.v1", "required": false},
+    {"type": "sure_round_summary", "schema_version": "sure.round_summary.v1", "required": false},
+    {"type": "sure_xlab_history", "schema_version": "sure.xlab_history.v1", "required": false},
+    {"type": "sure_xlab_receipts", "schema_version": "sure.xlab_receipts.v1", "required": false}
+  ],
+  "ui": {
+    "argumentHint": "--config <path> --task <description> [options]",
+    "arguments": [
+      {"name": "--config", "description": "SURE-Master configuration path.", "valueHint": "<path>", "takesValue": true},
+      {"name": "--task", "description": "Speech task description.", "valueHint": "<text>", "takesValue": true},
+      {"name": "--task-file", "description": "Task description file.", "valueHint": "<path>", "takesValue": true},
+      {"name": "--run-dir", "description": "Workspace-relative SURE run directory.", "valueHint": "<path>", "takesValue": true},
+      {"name": "--timeout-seconds", "description": "Bounded wait time before reporting incomplete.", "valueHint": "<seconds>", "takesValue": true}
+    ]
+  }
+}

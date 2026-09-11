@@ -1,0 +1,80 @@
+{
+  "schema_version": "2",
+  "name": "research_workflow",
+  "version": "1.0.0",
+  "visibility": "public",
+  "description": "Run the resumable papers-to-novelty research workflow.",
+  "prompt": "SKILL.md",
+  "runtime": { "kind": "workflow" },
+  "permissions": {
+    "tools": ["bash", "read", "write", "edit"],
+    "network": true,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "dependencies": [
+    { "name": "paper_collect", "version": "2.2.0" },
+    { "name": "knowledge_graph", "version": "3.0.0" },
+    { "name": "literature_survey", "version": "1.0.0" },
+    { "name": "research_idea", "version": "1.0.0" },
+    { "name": "novelty_check", "version": "1.0.0" }
+  ],
+  "workflow": {
+    "stages": [
+      { "id": "collect", "skill": "paper_collect", "max_attempts": 3 },
+      {
+        "id": "graph",
+        "skill": "knowledge_graph",
+        "needs": ["collect"],
+        "max_attempts": 2
+      },
+      {
+        "id": "survey",
+        "skill": "literature_survey",
+        "needs": ["collect", "graph"],
+        "max_attempts": 2
+      },
+      {
+        "id": "idea",
+        "skill": "research_idea",
+        "needs": ["survey", "graph"],
+        "max_attempts": 3
+      },
+      {
+        "id": "novelty",
+        "skill": "novelty_check",
+        "needs": ["idea", "collect", "graph"],
+        "max_attempts": 3
+      }
+    ]
+  },
+  "hooks": {
+    "pre_start": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "pre_stage": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "post_stage": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "pre_finish": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_resume": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_cancel": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_error": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ]
+  },
+  "artifacts": [
+    { "type": "novelty_report", "schema_version": "1", "required": true }
+  ],
+  "ui": {
+    "argumentHint": "<research topic and workflow constraints>"
+  }
+}

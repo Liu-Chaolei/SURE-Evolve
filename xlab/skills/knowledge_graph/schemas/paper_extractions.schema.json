@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlab.local/schemas/paper_extractions.schema.json",
+  "title": "PaperGraph Step 2 LLM Extractions",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "extractor",
+    "prompt_version",
+    "structures_path",
+    "model",
+    "extractions",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": { "const": "xlab.paper_extractions.v2" },
+    "extractor": { "type": "string", "minLength": 1 },
+    "prompt_version": { "type": "string", "minLength": 1 },
+    "structures_path": { "type": "string", "minLength": 1 },
+    "model": { "type": "string", "minLength": 1 },
+    "extractions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["paper_id", "path", "status"],
+        "properties": {
+          "paper_id": { "type": "string" },
+          "path": { "type": ["string", "null"] },
+          "status": { "enum": ["extracted", "failed", "pending"] },
+          "error": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["eligible", "extracted", "failed", "reused"]
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "paper_extraction_record": {
+      "type": "object",
+      "description": "Shape of each per-paper checkpoint referenced from extractions[].path.",
+      "required": [
+        "schema_version",
+        "extractor",
+        "prompt_version",
+        "paper_id",
+        "metadata",
+        "ideation_resource",
+        "graph_data",
+        "candidate_hints",
+        "provenance",
+        "quality"
+      ],
+      "properties": {
+        "schema_version": { "const": "xlab.paper_extraction.v2" },
+        "extractor": { "type": "string", "minLength": 1 },
+        "prompt_version": { "type": "string", "minLength": 1 },
+        "paper_id": { "type": "string", "minLength": 1 },
+        "source_venue": { "type": ["string", "null"] },
+        "pub_year": { "type": ["integer", "string", "null"] },
+        "metadata": { "type": "object" },
+        "ideation_resource": {
+          "type": "object",
+          "required": ["core_contributions"]
+        },
+        "graph_data": {
+          "type": "object",
+          "properties": {
+            "baselines": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/graph_entity" }
+            },
+            "datasets": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/graph_entity" }
+            }
+          },
+          "additionalProperties": true
+        },
+        "candidate_hints": {
+          "type": "object",
+          "description": "High-recall regex candidates supplied to the graph and calibration passes.",
+          "properties": {
+            "baselines": { "type": "array" },
+            "datasets": { "type": "array" }
+          },
+          "additionalProperties": true
+        },
+        "provenance": {
+          "type": "object",
+          "properties": {
+            "structure_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "selected_text_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "semantic_references_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "candidate_hints_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "llm_max_input_chars": { "type": ["integer", "string", "null"] },
+            "paper_edges_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "source_manifest_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "paper_collect_manifest_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
+          },
+          "additionalProperties": true
+        },
+        "quality": {
+          "type": "object",
+          "properties": {
+            "llm_validated": { "type": "boolean" },
+            "grounded": { "type": "boolean" },
+            "passes": {
+              "type": "array",
+              "items": { "enum": ["main", "graph", "calibration"] }
+            },
+            "input_truncated": { "type": "boolean" },
+            "rejected_items": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "graph_entity": {
+      "type": "object",
+      "description": "Grounded Baseline or Dataset item after high-recall extraction and calibration.",
+      "required": ["name", "related_to_core", "quote"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "acronym": { "type": ["string", "null"] },
+        "related_to_core": { "type": "string", "minLength": 1 },
+        "keywords": { "type": "array" },
+        "summary": { "type": ["string", "null"] },
+        "metrics": { "type": ["array", "null"] },
+        "insight": { "type": ["string", "null"] },
+        "quote": { "type": "string", "minLength": 1 },
+        "hint_source": { "type": ["string", "null"] },
+        "calibration_added": { "type": "boolean" },
+        "citation_paper_id": { "type": ["string", "null"] },
+        "citation_paperId": { "type": ["string", "null"] },
+        "citation_title": { "type": ["string", "null"] },
+        "citation_venue": { "type": ["string", "null"] },
+        "citation_year": { "type": ["integer", "string", "null"] },
+        "s2_metadata": { "type": ["object", "null"] },
+        "urls": { "type": "array" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

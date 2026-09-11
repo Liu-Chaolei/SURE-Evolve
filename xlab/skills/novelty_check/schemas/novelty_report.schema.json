@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "idea_claims", "closest_work", "overlap", "differences", "evidence_gaps", "risk_level", "confidence", "recommendations"],
+  "properties": {
+    "schema_version": { "const": "xlab.novelty_report.v1" },
+    "idea_claims": { "type": "array", "minItems": 1 },
+    "closest_work": { "type": "array" },
+    "overlap": { "type": "array" },
+    "differences": { "type": "array" },
+    "evidence_gaps": { "type": "array" },
+    "risk_level": { "enum": ["low", "medium", "high", "unknown"] },
+    "confidence": { "enum": ["low", "medium", "high"] },
+    "recommendations": { "type": "array", "minItems": 1 }
+  }
+}

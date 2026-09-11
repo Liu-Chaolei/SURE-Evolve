@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlab.local/schemas/paper_edge.schema.json",
+  "title": "XLab Paper Relation",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "source_paper_id",
+    "target_paper_id",
+    "relation",
+    "discovered_from"
+  ],
+  "properties": {
+    "schema_version": { "const": "xlab.paper_edge.v1" },
+    "source_paper_id": { "type": "string", "minLength": 1 },
+    "target_paper_id": { "type": "string", "minLength": 1 },
+    "relation": { "enum": ["cites", "recommended_with"] },
+    "discovered_from": { "type": "string", "minLength": 1 },
+    "seed_id": { "type": ["string", "null"] }
+  },
+  "additionalProperties": true
+}

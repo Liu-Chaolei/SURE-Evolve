@@ -1,0 +1,47 @@
+{
+  "schema_version": "xlab.paper_set.v3",
+  "query": "Retrieval augmented generation for scientific agents",
+  "target_count": 3,
+  "max_count": 3,
+  "candidate_count": 3,
+  "collected_count": 3,
+  "seed_count": 1,
+  "edge_count": 0,
+  "search": { "round": 1, "followup_count": 0 },
+  "quality": {
+    "tiers": {},
+    "metadata": {},
+    "abstract_coverage": 1,
+    "graph_connected_ratio": 0
+  },
+  "files": {},
+  "papers": [
+    {
+      "id": "paper:rag-foundations",
+      "title": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+      "year": 2020,
+      "venue": "NeurIPS",
+      "abstract": "Retrieval-augmented generation combines parametric sequence models with non-parametric retrieved evidence for knowledge-intensive tasks.",
+      "authors": [{ "name": "Patrick Lewis" }],
+      "citationCount": 1000
+    },
+    {
+      "id": "paper:scientific-agents",
+      "title": "Scientific Agents with Tool Use and Evidence-Grounded Reasoning",
+      "year": 2024,
+      "venue": "ExampleConf",
+      "abstract": "Scientific agents combine retrieval, planning, tools, and evidence ledgers to support research workflows.",
+      "authors": [{ "name": "Example Author" }],
+      "citationCount": 12
+    },
+    {
+      "id": "paper:rag-evaluation",
+      "title": "Evaluating Retrieval-Augmented Systems for Traceable Answers",
+      "year": 2023,
+      "venue": "ExampleEval",
+      "abstract": "Evaluation of retrieval-augmented systems requires traceability, attribution, and robustness checks across retrieved sources.",
+      "authors": [{ "name": "Example Researcher" }],
+      "citationCount": 23
+    }
+  ]
+}

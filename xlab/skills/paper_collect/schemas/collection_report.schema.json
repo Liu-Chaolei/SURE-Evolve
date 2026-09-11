@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlab.local/schemas/paper_collection_report.schema.json",
+  "title": "XLab Paper Collection Audit",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "passed",
+    "counts",
+    "metrics",
+    "checks",
+    "blocking_errors",
+    "warnings"
+  ],
+  "properties": {
+    "schema_version": { "const": "xlab.paper_collection_report.v1" },
+    "passed": { "type": "boolean" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "counts": { "type": "object" },
+    "metrics": { "type": "object" },
+    "checks": { "type": "object" },
+    "blocking_errors": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,33 @@
+{
+  "schema_version": "2",
+  "name": "paper_fetch",
+  "version": "1.0.0",
+  "visibility": "internal",
+  "description": "Download available paper full text while preserving metadata, checksums, and concrete blockers.",
+  "prompt": "SKILL.md",
+  "runtime": {
+    "kind": "node",
+    "entrypoint": "scripts/fetch.mjs",
+    "executables": ["node"]
+  },
+  "permissions": {
+    "tools": ["bash", "read", "write"],
+    "network": true,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "input_schema": "schemas/paper_candidates.schema.json",
+  "output_schema": "schemas/fetch_manifest.schema.json",
+  "hooks": {
+    "pre_start": [{ "module": "hooks/index.ts", "handler": "preStart" }],
+    "pre_finish": [{ "module": "hooks/index.ts", "handler": "preFinish" }]
+  },
+  "artifacts": [
+    {
+      "type": "paper_fetch_manifest",
+      "schema_version": "1",
+      "schema": "schemas/fetch_manifest.schema.json",
+      "required": true
+    }
+  ]
+}

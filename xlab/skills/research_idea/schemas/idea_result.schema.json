@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlab.dev/schemas/research_idea/idea_result.v2.schema.json",
+  "title": "research-idea workflow idea result artifact v2",
+  "$defs": {
+    "nonemptyString": { "type": "string", "minLength": 1 },
+    "nonemptyStringArray": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/nonemptyString" }
+    },
+    "nonemptyScientificItem": {
+      "anyOf": [
+        { "$ref": "#/$defs/nonemptyString" },
+        { "type": "object", "minProperties": 1 }
+      ]
+    },
+    "algorithmProvenance": {
+      "type": "object",
+      "required": [
+        "algorithm",
+        "runtime_profile",
+        "evidence_profile",
+        "success_profile"
+      ],
+      "properties": {
+        "algorithm": { "const": "xlab.research_idea.algorithm.v2" },
+        "runtime_profile": { "const": "xlab.research_idea.runtime.v1" },
+        "evidence_profile": { "const": "xlab.research_idea.evidence.v1" },
+        "success_profile": { "const": "xlab.research_idea.success.v1" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "blockers",
+    "completed_stages",
+    "algorithm_provenance"
+  ],
+  "properties": {
+    "schema_version": { "const": "xlab.research_idea.result.v2" },
+    "status": { "enum": ["success", "incomplete"] },
+    "incomplete_reason": { "type": "string", "minLength": 1 },
+    "blockers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonemptyString" }
+    },
+    "completed_stages": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonemptyString" },
+      "uniqueItems": true
+    },
+    "algorithm_provenance": { "$ref": "#/$defs/algorithmProvenance" },
+    "title": { "type": "string" },
+    "abstract": { "type": "string" },
+    "core_contribution": { "type": "string" },
+    "research_question": { "type": "string" },
+    "hypothesis": { "type": "string" },
+    "method": { "type": "string" },
+    "experiment_plan": { "type": "array" },
+    "data_requirements": { "type": "array" },
+    "baselines": { "type": "array" },
+    "metrics": { "type": "array" },
+    "risks": { "type": "array" },
+    "introduction": { "type": "string" },
+    "components": { "type": "array" },
+    "algorithm": { "type": "array" },
+    "reference_papers": { "type": "array" },
+    "reference_ids": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonemptyString" },
+      "uniqueItems": true
+    },
+    "evidence_ids": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonemptyString" },
+      "uniqueItems": true
+    },
+    "root_domains": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonemptyString" },
+      "uniqueItems": true
+    },
+    "mcts_evolution": { "type": "object" },
+    "idea_source": { "type": "string" },
+    "source_modes": { "type": "array", "items": { "type": "string" } },
+    "fusion_metadata": { "type": "object" },
+    "fusion_evolution": { "type": "object" },
+    "idea_contract": { "type": "object" }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "status": { "const": "success" },
+        "blockers": { "maxItems": 0 },
+        "title": { "$ref": "#/$defs/nonemptyString" },
+        "abstract": { "$ref": "#/$defs/nonemptyString" },
+        "core_contribution": { "$ref": "#/$defs/nonemptyString" },
+        "research_question": { "$ref": "#/$defs/nonemptyString" },
+        "hypothesis": { "$ref": "#/$defs/nonemptyString" },
+        "method": { "$ref": "#/$defs/nonemptyString" },
+        "experiment_plan": { "$ref": "#/$defs/nonemptyStringArray" },
+        "data_requirements": { "$ref": "#/$defs/nonemptyStringArray" },
+        "baselines": { "$ref": "#/$defs/nonemptyStringArray" },
+        "metrics": { "$ref": "#/$defs/nonemptyStringArray" },
+        "risks": { "$ref": "#/$defs/nonemptyStringArray" },
+        "introduction": { "$ref": "#/$defs/nonemptyString" },
+        "components": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/nonemptyScientificItem" }
+        },
+        "algorithm": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/nonemptyScientificItem" }
+        },
+        "reference_papers": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/nonemptyScientificItem" }
+        },
+        "reference_ids": { "minItems": 1 },
+        "evidence_ids": { "minItems": 1 },
+        "mcts_evolution": { "type": "object", "minProperties": 1 },
+        "idea_source": {
+          "type": "string",
+          "minLength": 1,
+          "not": { "const": "incomplete" }
+        },
+        "source_modes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/nonemptyString" }
+        }
+      },
+      "required": [
+        "title",
+        "abstract",
+        "core_contribution",
+        "research_question",
+        "hypothesis",
+        "method",
+        "experiment_plan",
+        "data_requirements",
+        "baselines",
+        "metrics",
+        "risks",
+        "introduction",
+        "components",
+        "algorithm",
+        "reference_papers",
+        "reference_ids",
+        "evidence_ids",
+        "root_domains",
+        "mcts_evolution",
+        "idea_source",
+        "source_modes"
+      ]
+    },
+    {
+      "properties": {
+        "status": { "const": "incomplete" },
+        "blockers": { "minItems": 1 }
+      },
+      "required": ["incomplete_reason"]
+    }
+  ],
+  "additionalProperties": true
+}

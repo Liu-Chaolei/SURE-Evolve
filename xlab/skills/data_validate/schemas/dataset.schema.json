@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["schema_version","path","sha256","rows","duplicates","errors","required_fields","valid"],"properties":{"schema_version":{"const":"xlab.dataset.v1"},"valid":{"const":true}}}

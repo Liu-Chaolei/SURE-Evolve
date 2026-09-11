@@ -1,0 +1,53 @@
+{
+  "schema_version": "2",
+  "name": "research_discussion",
+  "version": "1.0.0",
+  "visibility": "public",
+  "description": "Run a bounded, evidence-linked multi-role research discussion.",
+  "prompt": "SKILL.md",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "scripts/finalize.py",
+    "lockfile": "requirements.lock",
+    "executables": ["python"]
+  },
+  "permissions": {
+    "tools": ["bash", "read", "write", "edit"],
+    "network": false,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "dependencies": [
+    { "name": "science_gateway", "version": "1.0.0" },
+    { "name": "scholar_profile", "version": "1.0.0" }
+  ],
+  "output_schema": "schemas/discussion.schema.json",
+  "hooks": {
+    "pre_start": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "pre_finish": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_resume": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_cancel": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_error": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ]
+  },
+  "artifacts": [
+    {
+      "type": "research_discussion",
+      "schema_version": "1",
+      "schema": "schemas/discussion.schema.json",
+      "required": true
+    }
+  ],
+  "ui": {
+    "argumentHint": "<topic, goal, roles, round limit, and source artifacts>"
+  }
+}

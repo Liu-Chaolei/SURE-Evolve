@@ -1,0 +1,107 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+import CommandBlock from "../../components/CommandBlock.astro";
+import { commandGroups, commands } from "../../data/commands";
+import { REPOSITORY_URL, sourceUrl } from "../../data/site";
+---
+<DocsLayout title="Documentation" description="Install and configure XLab, understand durable research runs, and reference every public /xlab command.">
+  <header class="docs-hero">
+    <span class="docs-kicker">XLab documentation</span>
+    <h1>Build research runs you can inspect, repair, and resume.</h1>
+    <p>XLab is a repository-managed research-agent workbench built on Pi. It turns research tasks into persisted runs with explicit state, traceable artifacts, and acceptance gates.</p>
+    <div class="docs-actions"><a class="docs-button" href="#quickstart">Start with the quickstart</a><a href={REPOSITORY_URL}>View source ↗</a></div>
+  </header>
+
+  <section id="overview" class="docs-section">
+    <span class="docs-section-label">Overview</span><h2>What XLab does</h2>
+    <p>XLab coordinates repository-defined research skills through one <code>/xlab</code> command surface. Its primary synthesis path moves from collected papers to a knowledge graph, literature survey, research ideas, and an overlap-risk report.</p>
+    <p>The harness owns the shared execution contract: command dispatch, run persistence, checkpoints, artifact envelopes, validation gates, and resume behavior. Skill packages under <code>xlab/skills/</code> own task-specific prompts, scripts, stages, declared dependencies, and repair guidance. Product commands invoke those packages; control commands configure XLab or inspect its persisted state.</p>
+    <div class="docs-feature-grid">
+      <article><strong>Durable runs</strong><p>Phases, diagnostics, checkpoints, artifacts, and next actions persist below <code>.xlab</code>.</p></article>
+      <article><strong>Traceable evidence</strong><p>Producer and parent metadata preserve lineage from source passages to later claims.</p></article>
+      <article><strong>Explicit gates</strong><p>Outputs remain reviewable when validation or acceptance requirements are incomplete.</p></article>
+    </div>
+    <div class="docs-note"><strong>Scope:</strong> Novelty analysis reports prior-work overlap, supporting evidence, and uncertainty. It does not prove that an idea is novel.</div>
+  </section>
+
+  <section id="quickstart" class="docs-section">
+    <span class="docs-section-label">Quickstart</span><h2>Run XLab from source</h2>
+    <div class="docs-note"><strong>Two command contexts:</strong> Run clone, install, and launch commands in your shell from the repository root. Enter commands beginning with <code>/xlab</code> inside the Pi TUI opened by <code>./pi-test.sh</code>.</div>
+    <ol class="docs-steps">
+      <li><h3>Clone and install</h3><p>Install the pinned workspace dependencies without running package lifecycle scripts.</p><CommandBlock command={`git clone ${REPOSITORY_URL}.git`} label="Clone"/><CommandBlock command="cd XLab && npm install --ignore-scripts" label="Install"/></li>
+      <li><h3>Launch the TUI</h3><p>Launch from the repository root so XLab can discover repository-managed skill packages and keep state below the local <code>.xlab</code> directory.</p><CommandBlock command="./pi-test.sh" label="Launch"/></li>
+      <li><h3>Verify setup</h3><p>Run the setup check inside the TUI. It reports discovered packages, required executables, missing integration values, and concrete repair guidance without starting a research run.</p><CommandBlock command="/xlab check-xlab-setup"/></li>
+      <li><h3>Collect your first paper set</h3><p>A product command creates a durable run and prints its run ID. Add <code>--workspace &lt;slug&gt;</code> when you want accepted outputs registered in a named research workspace.</p><CommandBlock command={'/xlab collect-papers "graph neural networks after 2022" --target-papers 50'}/></li>
+      <li><h3>Inspect and continue</h3><p>Use the returned run ID to inspect status, diagnostics, artifacts, checkpoints, and the suggested next action. If an eligible run stops incomplete, resume that run rather than silently creating a replacement.</p><CommandBlock command="/xlab list-runs"/><CommandBlock command="/xlab show-run <run-id>"/><CommandBlock command="/xlab resume-run <run-id>"/></li>
+    </ol>
+  </section>
+
+  <section id="installation" class="docs-section">
+    <span class="docs-section-label">Installation</span><h2>Requirements and source setup</h2>
+    <h3>Base requirements</h3><ul><li>Node.js <strong>22.19.0 or newer</strong>.</li><li>Git and a supported shell environment.</li><li>Provider credentials and local executables required by the skills you intend to run.</li></ul>
+    <p>The base installation starts the Pi extension and discovers skill packages. Individual manifests may additionally declare Python, pinned lockfiles, executables, secrets, and network access. Inspect the manifest for a product command—or run <code>/xlab check-xlab-setup</code>—before assuming every skill is ready.</p>
+    <div class="docs-note"><strong>Python environments:</strong> For Python skills, XLab derives an environment identity from the skill, version, Python runtime, and lockfile. Prepared environments are recorded below <code>.xlab/environments/&lt;skill&gt;/&lt;digest&gt;</code>; a non-empty lockfile creates a virtual environment, while an empty lockfile records use of the system Python.</div>
+    <h3>Source installation</h3><p>XLab currently runs from this repository as an extension of the Pi coding-agent framework; the documentation does not assume a separate XLab package.</p><CommandBlock command={`git clone ${REPOSITORY_URL}.git
+cd XLab
+npm install --ignore-scripts
+./pi-test.sh`} label="Source setup"/>
+    <p>After launch, use <code>/xlab check-xlab-setup</code> to verify the installation and <code>/xlab show-help</code> to list the available commands.</p>
+  </section>
+
+  <section id="configuration" class="docs-section">
+    <span class="docs-section-label">Configuration</span><h2>Configure only the integrations you need</h2>
+    <p>The guided configuration command separates the Pi Agent runtime, knowledge-graph extraction, and scholarly-service setup.</p><CommandBlock command="/xlab configure-xlab <runtime|knowledge-graph|scholarly-services|all>"/>
+    <div class="docs-feature-grid">
+      <article><strong>Agent runtime</strong><p><code>runtime</code> saves an OpenAI-compatible model for the Pi Agent and applies it immediately. Its credential is stored through Pi authentication storage rather than in model metadata.</p></article><article><strong>Knowledge graph</strong><p><code>knowledge-graph</code> configures the separate extraction endpoint, model, and API key used by <code>build-knowledge-graph</code>. It is independent from the Pi Agent runtime model.</p></article><article><strong>Scholarly services</strong><p><code>scholarly-services</code> configures approved discovery and retrieval services, including the integrations declared by the skills you run.</p></article>
+    </div>
+    <p>Knowledge-graph and scholarly-service values entered through guided configuration are process-local: they remain available to the current XLab process, but are not a persistent cross-session secret store. For repeated use, set them in your shell environment or an appropriate secrets manager before launch.</p>
+    <div class="docs-warning"><strong>Keep secrets out of source control and command arguments.</strong> Interactive configuration uses masked prompts when the UI is available. Do not put API keys in slash-command arguments, prompts, committed files, or artifacts. Review each skill manifest for its required secrets, executables, and network permissions.</div>
+  </section>
+
+  <section id="core-concepts" class="docs-section">
+    <span class="docs-section-label">Core concepts</span><h2>The state model behind every task</h2>
+    <p>XLab separates an execution record from reusable research outputs. A run captures what happened once; a workspace names the accepted versions you want later tasks to consume; the artifact store preserves committed payloads by content digest.</p>
+    <dl class="concept-list">
+      <div><dt>Durable run</dt><dd>A persisted execution record below <code>.xlab/runs/&lt;run-id&gt;/</code>. Its directory can contain <code>run.json</code>, an append-only <code>events.jsonl</code>, display and workflow state, logs, inputs, children, and run-local outputs.</dd></div>
+      <div><dt>Workspace</dt><dd>A named research context below <code>.xlab/workspaces/</code>. Versioned handles such as <code>graph-v1</code>, <code>survey-v1</code>, and <code>idea-v1</code> let later commands refer to accepted outputs without confusing them with transient run files.</dd></div>
+      <div><dt>Artifact</dt><dd>A validated file or directory committed below <code>.xlab/artifacts/</code>. Artifact IDs use <code>sha256:&lt;digest&gt;</code>; object payloads are content-addressed, while a SQLite index records type, schema, producer, validation, and occurrences.</dd></div>
+      <div><dt>Lineage</dt><dd>Producer, parent, and occurrence metadata connect an artifact to source evidence and earlier artifacts. Identical content can still retain separate production occurrences and run-specific lineage.</dd></div>
+      <div><dt>Checkpoint and resume</dt><dd>A checkpoint records stage-level resumable state. <code>resume-run</code> continues an eligible incomplete run with its existing history and increments its resume count rather than silently starting over.</dd></div>
+      <div><dt>Acceptance gate</dt><dd>An explicit condition that determines whether a result is accepted or returned with blockers and a next repair action. Passing a deterministic gate validates the declared execution contract; it does not establish scientific truth or novelty.</dd></div>
+    </dl>
+    <div class="docs-note"><strong>Run-local versus committed:</strong> A path inside a run directory is an execution output. Once committed, its content-addressed artifact can be indexed, linked to parents, and registered under a workspace handle for reuse.</div>
+  </section>
+
+  <section id="command-reference" class="docs-section command-reference">
+    <span class="docs-section-label">Reference</span><h2>All /xlab commands</h2><p>The public command surface contains {commands.length} commands. Product commands invoke repository-managed skills; control commands inspect or operate XLab itself.</p>
+    <div class="docs-note"><strong>Command conventions:</strong> Quote multi-word topics or paths containing spaces. Every product command accepts <code>--workspace &lt;slug&gt;</code>. Run IDs come from product-command output or <code>/xlab list-runs</code>; artifact IDs come from accepted run output or <code>/xlab list-artifacts</code>. Use <code>/xlab show-help &lt;task&gt;</code> for focused help inside the TUI.</div>
+    <nav class="command-index" aria-label="Command groups">{commandGroups.map((group) => <a href={`#group-${group.id}`}>{group.label}</a>)}</nav>
+    {commandGroups.map((group) => (
+      <section id={`group-${group.id}`} class="command-group">
+        <h3>{group.label}</h3><p>{group.description}</p>
+        {commands.filter((command) => command.group === group.id).map((command) => (
+          <article id={command.anchor} class="command-entry">
+            <header><div><span class={`command-kind ${command.kind}`}>{command.kind}</span><h4>/xlab {command.task}</h4></div><a href={sourceUrl(command.sourcePath)}>Source ↗</a></header>
+            <p>{command.description}</p>
+            <div class="command-field"><strong>Syntax</strong><code>{command.usage}</code></div>
+            {command.arguments.length > 0 && <div class="argument-table" role="region" aria-label={`${command.task} arguments`} tabindex="0"><table><thead><tr><th>Argument</th><th>Description</th><th>Value</th></tr></thead><tbody>{command.arguments.map((argument) => <tr><td><code>{argument.name}</code>{argument.repeatable && <small>repeatable</small>}</td><td>{argument.description}{argument.choices && <small>Choices: {argument.choices.join(", ")}</small>}</td><td>{argument.valueHint ? <code>{argument.valueHint}</code> : "flag"}</td></tr>)}</tbody></table></div>}
+            <CommandBlock command={command.example} label="Example"/>
+            <div class="command-result"><strong>Result</strong><p>{command.result}</p></div>
+          </article>
+        ))}
+      </section>
+    ))}
+  </section>
+
+  <section id="security" class="docs-section">
+    <span class="docs-section-label">Security</span><h2>Execution and provider boundaries</h2>
+    <ul class="security-list"><li><strong>Use trusted repositories.</strong> Repository skills can invoke local code and tools. Review skill manifests, scripts, declared executables, secrets, and network permissions before execution.</li><li><strong>Current-user permissions.</strong> XLab and Pi execute with the operating-system permissions of the current user; XLab does not reduce those permissions.</li><li><strong>No integrated system sandbox.</strong> If the task requires stronger containment, run the repository inside an external container, virtual machine, or other sandbox you control.</li><li><strong>Secret handling.</strong> Use masked configuration prompts, environment variables, or a secrets manager. Do not place provider keys in slash-command arguments, prompts, artifacts, committed files, or command history unnecessarily.</li><li><strong>Network boundary.</strong> Configured model and scholarly providers may receive task data when their skills make network calls. Review provider policies and avoid sending data you are not authorized to disclose.</li><li><strong>Artifact boundary.</strong> Manifest artifact paths must resolve inside the run workspace. Committed payloads must be files or directories; symbolic-link payloads and symbolic links within artifact directories are rejected.</li><li><strong>Research claims.</strong> Deterministic validation and acceptance gates do not make research conclusions deterministic, establish novelty, or replace expert review.</li></ul>
+    <a class="docs-button secondary" href={`${REPOSITORY_URL}/blob/main/SECURITY.md`}>Read the security policy ↗</a>
+  </section>
+
+  <section id="source-reference" class="docs-section">
+    <span class="docs-section-label">Source reference</span><h2>Verify the documentation against the repository</h2>
+    <p>Public syntax is generated from the canonical command catalog and skill manifests. The implementation links below cover the persistence and configuration behavior described on this page.</p>
+    <ul class="source-list"><li><a href={`${REPOSITORY_URL}/blob/main/README.md`}>Repository guide and public syntax ↗</a></li><li><a href={`${REPOSITORY_URL}/blob/main/SECURITY.md`}>Security policy ↗</a></li><li><a href={`${REPOSITORY_URL}/tree/main/xlab/skills`}>Public skill packages and manifests ↗</a></li><li><a href={sourceUrl("packages/coding-agent/src/core/xlab/product-commands.ts")}>Canonical command catalog ↗</a></li><li><a href={sourceUrl("packages/coding-agent/src/core/xlab/run-manager.ts")}>Durable run manager ↗</a></li><li><a href={sourceUrl("packages/coding-agent/src/core/xlab/workspace-manager.ts")}>Workspace handles and lineage ↗</a></li><li><a href={sourceUrl("packages/coding-agent/src/core/xlab/artifact-store.ts")}>Content-addressed artifact store ↗</a></li><li><a href={sourceUrl("packages/coding-agent/src/core/xlab/secrets.ts")}>Integration and secret requirements ↗</a></li><li><a href={sourceUrl("packages/coding-agent/src/core/xlab/environment.ts")}>Python skill environments ↗</a></li></ul>
+  </section>
+</DocsLayout>

@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SURE-Master round summary",
+  "type": "object",
+  "required": ["schema_version", "sure_run_id", "search_mode", "round_index", "summary_digest"],
+  "properties": {
+    "schema_version": {"const": "sure.round_summary.v1"},
+    "sure_run_id": {"type": "string", "minLength": 1},
+    "search_mode": {"enum": ["ordinary", "staged_axes"]},
+    "axis": {"enum": ["arch", "train", "inference", null]},
+    "round_index": {"type": "integer", "minimum": 0},
+    "summary_digest": {"type": "string", "pattern": "^sha256:"},
+    "failure_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+  },
+  "additionalProperties": true
+}

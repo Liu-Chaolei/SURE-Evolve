@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "survey_path"],
+  "properties": {
+    "schema_version": { "const": "xlab.research_idea.request.v1" },
+    "survey_path": { "type": "string", "minLength": 1 },
+    "topic": { "type": "string" },
+    "mature_idea": { "type": "string" },
+    "refinement_scope": { "type": "string" },
+    "discussion": { "type": "string" },
+    "experiment_feedback": { "type": "string" },
+    "resume": { "type": "boolean" },
+    "raw_args": { "type": "string" }
+  },
+  "additionalProperties": true
+}

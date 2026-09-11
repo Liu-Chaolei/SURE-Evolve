@@ -1,0 +1,78 @@
+{
+  "schema_version": "2",
+  "name": "scholar_profile",
+  "version": "1.0.0",
+  "visibility": "public",
+  "description": "Build an evidence-grounded scholar profile and persona prompt.",
+  "prompt": "SKILL.md",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "scripts/run_pipeline.py",
+    "lockfile": "requirements.lock",
+    "executables": ["python"],
+    "required_secrets": ["OPENAI_API_KEY"]
+  },
+  "permissions": {
+    "tools": ["bash", "read", "write", "edit"],
+    "network": true,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "output_schema": "schemas/scholar_profile.schema.json",
+  "hooks": {
+    "pre_start": [{ "module": "hooks/index.ts", "handler": "preStart" }],
+    "pre_finish": [{ "module": "hooks/index.ts", "handler": "preFinish" }],
+    "post_finish": [{ "module": "hooks/index.ts", "handler": "postFinish" }],
+    "on_error": [{ "module": "hooks/index.ts", "handler": "onError" }],
+    "on_resume": [{ "module": "hooks/index.ts", "handler": "onResume" }],
+    "on_cancel": [{ "module": "hooks/index.ts", "handler": "onCancel" }]
+  },
+  "artifacts": [
+    {
+      "type": "scholar_profile",
+      "schema_version": "1",
+      "schema": "schemas/scholar_profile.schema.json",
+      "required": true,
+      "description": "Structured scholar knowledge pack and persona prompt"
+    },
+    {
+      "type": "system_prompt_docx",
+      "schema_version": "1",
+      "required": false,
+      "description": "Word document version of the system prompt"
+    }
+  ],
+  "ui": {
+    "argumentHint": "<scholar name> [key=value options]",
+    "arguments": [
+      {
+        "name": "scholar_name",
+        "description": "Set the scholar name explicitly.",
+        "valueHint": "<name>",
+        "takesValue": true
+      },
+      {
+        "name": "native_name",
+        "description": "Set the scholar's native-language name.",
+        "valueHint": "<name>",
+        "takesValue": true
+      },
+      {
+        "name": "seed_url",
+        "description": "Provide an optional seed profile or homepage URL.",
+        "valueHint": "<url>",
+        "takesValue": true
+      },
+      {
+        "name": "language",
+        "description": "Select the output language.",
+        "valueHint": "<en|zh>",
+        "choices": ["en", "zh"],
+        "takesValue": true
+      }
+    ],
+    "primaryCounters": ["completed_stages", "total_stages"],
+    "artifactTypes": ["scholar_profile", "system_prompt_docx"],
+    "defaultExpandedSections": ["artifacts", "diagnostics"]
+  }
+}

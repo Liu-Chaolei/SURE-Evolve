@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlab.dev/schemas/research_idea/idea_report.v2.schema.json",
+  "title": "Research idea audit report v2",
+  "$defs": {
+    "nonemptyString": { "type": "string", "minLength": 1 },
+    "algorithmProvenance": {
+      "type": "object",
+      "required": [
+        "algorithm",
+        "runtime_profile",
+        "evidence_profile",
+        "success_profile"
+      ],
+      "properties": {
+        "algorithm": { "const": "xlab.research_idea.algorithm.v2" },
+        "runtime_profile": { "const": "xlab.research_idea.runtime.v1" },
+        "evidence_profile": { "const": "xlab.research_idea.evidence.v1" },
+        "success_profile": { "const": "xlab.research_idea.success.v1" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "generated_at",
+    "passed",
+    "blocking_errors",
+    "blockers",
+    "warnings",
+    "counts",
+    "checks",
+    "completed_stages",
+    "algorithm_provenance"
+  ],
+  "properties": {
+    "schema_version": { "const": "xlab.research_idea.report.v2" },
+    "status": { "enum": ["success", "incomplete"] },
+    "generated_at": { "type": "string", "minLength": 1 },
+    "passed": { "type": "boolean" },
+    "blocking_errors": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonemptyString" }
+    },
+    "blockers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonemptyString" }
+    },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "counts": { "type": "object" },
+    "checks": { "type": "object" },
+    "completed_stages": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonemptyString" },
+      "uniqueItems": true
+    },
+    "algorithm_provenance": { "$ref": "#/$defs/algorithmProvenance" },
+    "source": { "type": "object" },
+    "stages": { "type": "array" },
+    "checkpoint": { "type": "object" },
+    "metrics": { "type": "object" },
+    "files": { "type": "object" }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "status": { "const": "success" },
+        "passed": { "const": true },
+        "blocking_errors": { "maxItems": 0 },
+        "blockers": { "maxItems": 0 }
+      }
+    },
+    {
+      "properties": {
+        "status": { "const": "incomplete" },
+        "passed": { "const": false },
+        "blocking_errors": { "minItems": 1 },
+        "blockers": { "minItems": 1 }
+      }
+    }
+  ],
+  "additionalProperties": true
+}

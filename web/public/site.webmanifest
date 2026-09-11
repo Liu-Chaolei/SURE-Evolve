@@ -1,0 +1,9 @@
+{
+  "name": "XLab",
+  "short_name": "XLab",
+  "description": "A research-agent harness built on Pi.",
+  "display": "standalone",
+  "background_color": "#f5f2ea",
+  "theme_color": "#173f3b",
+  "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

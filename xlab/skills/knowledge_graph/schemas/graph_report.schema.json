@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlab.local/schemas/graph_report.schema.json",
+  "title": "Knowledge Graph Quality Report",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "passed",
+    "blocking_errors",
+    "warnings",
+    "counts",
+    "coverage",
+    "deduplication",
+    "resources",
+    "input_provenance",
+    "database",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": { "const": "xlab.graph_report.v2" },
+    "passed": { "type": "boolean" },
+    "blocking_errors": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "input_papers": { "type": "integer", "minimum": 0 },
+        "downloaded_pdfs": { "type": "integer", "minimum": 0 },
+        "parsed_papers": { "type": "integer", "minimum": 0 },
+        "structured_papers": { "type": "integer", "minimum": 0 },
+        "extracted_papers": { "type": "integer", "minimum": 0 },
+        "nodes": { "type": "integer", "minimum": 0 },
+        "edges": { "type": "integer", "minimum": 0 },
+        "aliases": { "type": "integer", "minimum": 0 },
+        "node_types": { "type": "object" },
+        "edge_relations": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "coverage": {
+      "type": "object",
+      "properties": {
+        "mineru": { "type": "number" },
+        "papergraph_step1": { "type": "number" },
+        "papergraph_step2": { "type": "number" },
+        "core": { "type": "number" },
+        "baseline": { "type": "number" },
+        "dataset": { "type": "number" },
+        "semantic_edge_evidence": { "type": "number" }
+      },
+      "additionalProperties": true
+    },
+    "deduplication": {
+      "type": "object",
+      "properties": {
+        "duplicate_node_ids": { "type": "integer", "minimum": 0 },
+        "duplicate_edge_ids": { "type": "integer", "minimum": 0 },
+        "ambiguous_aliases": { "type": "integer", "minimum": 0 },
+        "ambiguous_alias_ratio": { "type": "number" }
+      },
+      "additionalProperties": true
+    },
+    "resources": { "type": "object" },
+    "input_provenance": {
+      "type": "object",
+      "properties": {
+        "input_directory": { "type": ["string", "null"] },
+        "paper_set_path": { "type": ["string", "null"] },
+        "paper_set_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "paper_edges_path": { "type": ["string", "null"] },
+        "paper_edges_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "prior_manifest_path": { "type": ["string", "null"] },
+        "prior_manifest_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "paper_collect_run_id": { "type": ["string", "null"] },
+        "paper_collect_skill_version": { "type": ["string", "null"] },
+        "pdf_root": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "database": {
+      "type": "object",
+      "required": [
+        "integrity",
+        "foreign_key_violations",
+        "node_rows",
+        "edge_rows",
+        "alias_rows",
+        "extraction_rows",
+        "queryable",
+        "wide_node_columns",
+        "wide_edge_columns",
+        "edge_type_matches_relation",
+        "fts_queryable"
+      ],
+      "properties": {
+        "integrity": { "type": ["string", "null"] },
+        "foreign_key_violations": { "type": ["integer", "null"] },
+        "node_rows": { "type": ["integer", "null"] },
+        "edge_rows": { "type": ["integer", "null"] },
+        "alias_rows": { "type": ["integer", "null"] },
+        "extraction_rows": { "type": ["integer", "null"] },
+        "queryable": { "type": "boolean" },
+        "wide_node_columns": { "type": "boolean" },
+        "wide_edge_columns": { "type": "boolean" },
+        "edge_type_matches_relation": { "type": "boolean" },
+        "fts_queryable": { "type": "boolean" },
+        "missing_node_columns": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "missing_edge_columns": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "artifacts": {
+      "type": "object",
+      "properties": {
+        "resource_plan": { "type": "string" },
+        "mineru_manifest": { "type": "string" },
+        "paper_structures": { "type": "string" },
+        "paper_extractions": { "type": "string" },
+        "method_graph": { "type": "string" },
+        "database": { "type": "string" },
+        "nodes": { "type": "string" },
+        "edges": { "type": "string" },
+        "aliases": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "protocol_version", "tool_name", "initialized", "listed", "called", "passed", "responses"],
+  "properties": {
+    "schema_version": { "const": "xlab.mcp_validation.v1" },
+    "protocol_version": { "const": "2025-11-25" },
+    "tool_name": { "type": "string" },
+    "initialized": { "type": "boolean" },
+    "listed": { "type": "boolean" },
+    "called": { "type": "boolean" },
+    "passed": { "type": "boolean" },
+    "responses": { "type": "array" }
+  }
+}

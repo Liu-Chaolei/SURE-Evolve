@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "topic", "goal", "roles", "round_count", "turns", "key_points", "consensus", "disputes", "actions", "open_questions", "source_artifacts"],
+  "properties": {
+    "schema_version": { "const": "xlab.research_discussion.v1" },
+    "topic": { "type": "string", "minLength": 1 },
+    "goal": { "type": "string", "minLength": 1 },
+    "roles": { "type": "array", "minItems": 2 },
+    "round_count": { "type": "integer", "minimum": 1 },
+    "turns": { "type": "array", "minItems": 2 },
+    "key_points": { "type": "array", "minItems": 1 },
+    "consensus": { "type": "array" },
+    "disputes": { "type": "array" },
+    "actions": { "type": "array", "minItems": 1 },
+    "open_questions": { "type": "array" },
+    "source_artifacts": { "type": "array", "minItems": 1 }
+  }
+}

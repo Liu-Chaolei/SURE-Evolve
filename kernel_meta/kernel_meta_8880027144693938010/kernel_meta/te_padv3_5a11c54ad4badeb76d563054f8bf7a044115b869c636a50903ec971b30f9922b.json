@@ -1,0 +1,34 @@
+{
+    "binFileName":"te_padv3_5a11c54ad4badeb76d563054f8bf7a044115b869c636a50903ec971b30f9922b",
+    "binFileSuffix":".o",
+    "blockDim":40,
+    "compileInfo":{
+        "_cube_vector_core_type":"VectorCore",
+        "device_id":null,
+        "dfx_size":8,
+        "vars":{
+            "core_num":40,
+            "mode":"constant",
+            "padding_contiguous":true,
+            "size":2,
+            "ub_size":47104
+        }
+    },
+    "coreType":"VectorCore",
+    "deterministic":"ignore",
+    "intercoreSync":0,
+    "kernelName":"te_padv3_5a11c54ad4badeb76d563054f8bf7a044115b869c636a50903ec971b30f9922b__kernel0",
+    "magic":"RT_DEV_BINARY_MAGIC_ELF_AIVEC",
+    "memoryStamping":[
+        -1
+    ],
+    "opParaSize":264,
+    "parameters":[
+        null,
+        null,
+        null,
+        null,
+        null
+    ],
+    "sha256":"d58f16d53927f59dbc91bbd99574b732886ea88a98fba7d72a10c16d9f5dfb85"
+}

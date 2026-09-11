@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "generated_at", "papers", "summary"],
+  "properties": {
+    "schema_version": { "const": "xlab.paper_fetch_manifest.v1" },
+    "generated_at": { "type": "string" },
+    "papers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "download_status", "pdf_path", "sha256", "blocker"]
+      }
+    },
+    "summary": { "type": "object" }
+  }
+}

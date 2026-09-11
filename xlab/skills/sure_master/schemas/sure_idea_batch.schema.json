@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SURE-Master idea batch",
+  "type": "object",
+  "required": ["schema_version", "status", "request_digest", "xlab_run_id", "workspace", "ideas", "batch_digest"],
+  "properties": {
+    "schema_version": {"const": "sure.idea_batch.v1"},
+    "status": {"enum": ["success", "incomplete", "failed"]},
+    "request_digest": {"type": "string", "pattern": "^sha256:"},
+    "xlab_run_id": {"type": "string", "minLength": 1},
+    "workspace": {"type": "string", "minLength": 1},
+    "ideas": {"type": "array", "items": {"$ref": "#/$defs/idea"}},
+    "batch_digest": {"type": "string", "pattern": "^sha256:"}
+  },
+  "$defs": {
+    "idea": {
+      "type": "object",
+      "required": ["idea_id", "artifact_id", "artifact_digest", "title", "candidate_type", "hypothesis", "mechanism", "spec"],
+      "properties": {
+        "idea_id": {"type": "string", "minLength": 1},
+        "artifact_id": {"type": "string", "minLength": 1},
+        "artifact_digest": {"type": "string", "pattern": "^sha256:"},
+        "candidate_type": {"enum": ["arch", "fine_tune", "inference"]},
+        "spec": {"type": "object", "required": ["implementation_instructions"]}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

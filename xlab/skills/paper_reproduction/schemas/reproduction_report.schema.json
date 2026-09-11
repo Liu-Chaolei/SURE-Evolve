@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "paper", "code", "target_experiment", "environment", "commands", "reported_metrics", "measured_metrics", "comparison", "stage_artifacts", "status", "limitations"],
+  "properties": {
+    "schema_version": { "const": "xlab.reproduction_report.v1" },
+    "paper": { "type": "object" },
+    "code": { "type": "object" },
+    "target_experiment": { "type": "string", "minLength": 1 },
+    "environment": { "type": "object" },
+    "commands": { "type": "array", "minItems": 1 },
+    "reported_metrics": { "type": "object" },
+    "measured_metrics": { "type": "object" },
+    "comparison": { "type": "object" },
+    "stage_artifacts": { "type": "array", "minItems": 4 },
+    "status": { "enum": ["success", "incomplete", "failed"] },
+    "limitations": { "type": "array" }
+  }
+}

@@ -1,0 +1,26 @@
+---
+import XLabMark from "./XLabMark.astro";
+import { navItems, REPOSITORY_URL } from "../data/site";
+
+const current = Astro.url.pathname;
+const active = (href: string) => current === href || (href !== "/" && current.startsWith(href));
+---
+<header class="site-header">
+  <div class="header-inner shell">
+    <a class="brand" href="/" aria-label="XLab home"><XLabMark class="brand-mark" /><span>XLab</span></a>
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-navigation"><span class="sr-only">Toggle navigation</span><span aria-hidden="true">Menu</span></button>
+    <nav id="site-navigation" class="site-nav" aria-label="Primary">
+      {navItems.map((item) => <a href={item.href} aria-current={active(item.href) ? "page" : undefined}>{item.label}</a>)}
+      <a class="nav-github" href={REPOSITORY_URL}>GitHub <span aria-hidden="true">↗</span></a>
+    </nav>
+  </div>
+</header>
+<script>
+  const toggle = document.querySelector<HTMLButtonElement>(".nav-toggle");
+  const nav = document.querySelector<HTMLElement>("#site-navigation");
+  toggle?.addEventListener("click", () => {
+    const open = toggle.getAttribute("aria-expanded") === "true";
+    toggle.setAttribute("aria-expanded", String(!open));
+    nav?.classList.toggle("is-open", !open);
+  });
+</script>

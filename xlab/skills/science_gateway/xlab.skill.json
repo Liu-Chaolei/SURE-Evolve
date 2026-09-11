@@ -1,0 +1,49 @@
+{
+  "schema_version": "2",
+  "name": "science_gateway",
+  "version": "1.0.0",
+  "visibility": "service-control",
+  "description": "Control the local scientific discussion and messaging service.",
+  "prompt": "SKILL.md",
+  "runtime": {
+    "kind": "service-control",
+    "entrypoint": "scripts/server.py",
+    "lockfile": "requirements.lock",
+    "executables": ["python"]
+  },
+  "permissions": {
+    "tools": ["bash", "read", "write"],
+    "network": false,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "output_schema": "schemas/communication_manifest.schema.json",
+  "hooks": {
+    "pre_start": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "pre_finish": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_resume": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_cancel": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_error": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ]
+  },
+  "artifacts": [
+    {
+      "type": "communication_manifest",
+      "schema_version": "1",
+      "schema": "schemas/communication_manifest.schema.json",
+      "required": true
+    }
+  ],
+  "ui": {
+    "argumentHint": "<gateway operation and communication context>"
+  }
+}

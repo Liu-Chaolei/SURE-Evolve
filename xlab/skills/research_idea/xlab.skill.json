@@ -1,0 +1,181 @@
+{
+  "schema_version": "2",
+  "name": "research_idea",
+  "version": "2.0.0",
+  "visibility": "public",
+  "description": "Generate evidence-linked research ideas with experiment-plan fields from the current survey.",
+  "prompt": "SKILL.md",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "scripts/run_idea_phase.py",
+    "lockfile": "requirements.lock",
+    "executables": ["python"],
+    "required_secrets": ["OPENAI_API_KEY"]
+  },
+  "permissions": {
+    "tools": ["bash", "read", "write", "edit"],
+    "network": true,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "config": {
+    "environment": [
+      {
+        "name": "OPENAI_BASE_URL",
+        "description": "OpenAI-compatible API base URL. HTTPS is required except for loopback HTTP used by local tests.",
+        "secret": false,
+        "required": false,
+        "default": "https://api.openai.com/v1"
+      },
+      {
+        "name": "XLAB_RESEARCH_IDEA_ENABLE_LLM",
+        "description": "Enable package-native provider calls.",
+        "secret": false,
+        "required": false,
+        "default": true
+      },
+      {
+        "name": "XLAB_RESEARCH_IDEA_AGENT_MODEL",
+        "description": "Model used by agent workflow operations.",
+        "secret": false,
+        "required": false
+      },
+      {
+        "name": "XLAB_RESEARCH_IDEA_GENERATION_MODEL",
+        "description": "Model used for idea generation.",
+        "secret": false,
+        "required": false
+      },
+      {
+        "name": "XLAB_RESEARCH_IDEA_EVALUATION_MODEL",
+        "description": "Model used for idea evaluation.",
+        "secret": false,
+        "required": false
+      },
+      {
+        "name": "XLAB_RESEARCH_IDEA_FUSION_MODEL",
+        "description": "Model used for idea fusion.",
+        "secret": false,
+        "required": false
+      },
+      {
+        "name": "XLAB_RESEARCH_IDEA_TIMEOUT_SECONDS",
+        "description": "Provider request timeout in seconds.",
+        "secret": false,
+        "required": false
+      },
+      {
+        "name": "XLAB_RESEARCH_IDEA_MAX_RETRIES",
+        "description": "Provider retry count.",
+        "secret": false,
+        "required": false
+      }
+    ]
+  },
+  "dependencies": [{ "name": "literature_survey", "version": "1.0.0" }],
+  "input_schema": "schemas/request.schema.json",
+  "output_schema": "schemas/idea.schema.json",
+  "hooks": {
+    "pre_start": [{ "module": "hooks/index.ts", "handler": "preStart" }],
+    "pre_tool_call": [{ "module": "hooks/index.ts", "handler": "preToolCall" }],
+    "post_tool_result": [
+      {
+        "module": "hooks/index.ts",
+        "handler": "postToolResult",
+        "blocking": false
+      }
+    ],
+    "pre_finish": [{ "module": "hooks/index.ts", "handler": "preFinish" }],
+    "post_finish": [{ "module": "hooks/index.ts", "handler": "postFinish" }],
+    "on_resume": [{ "module": "hooks/index.ts", "handler": "onResume" }],
+    "on_cancel": [{ "module": "hooks/index.ts", "handler": "onCancel" }],
+    "on_error": [{ "module": "hooks/index.ts", "handler": "onError" }]
+  },
+  "artifacts": [
+    {
+      "type": "research_idea",
+      "schema_version": "2",
+      "schema": "schemas/idea.schema.json",
+      "required": true,
+      "description": "XLab downstream research idea artifact with experiment-plan fields"
+    },
+    {
+      "type": "research_idea_result",
+      "schema_version": "2",
+      "schema": "schemas/idea_result.schema.json",
+      "required": true,
+      "description": "Package-native XLab research-idea workflow-shaped idea_result.json validated by the package schema"
+    },
+    {
+      "type": "research_idea_trace",
+      "schema_version": "2",
+      "schema": "schemas/idea_trace.schema.json",
+      "required": true,
+      "description": "Workflow, source, MCTS, and fusion provenance"
+    },
+    {
+      "type": "research_idea_report",
+      "schema_version": "2",
+      "schema": "schemas/idea_report.schema.json",
+      "required": true,
+      "description": "Audit report for idea completeness and evidence traceability"
+    }
+  ],
+  "ui": {
+    "argumentHint": "[--survey <handle-or-path>] [options]",
+    "arguments": [
+      {
+        "name": "--survey",
+        "description": "Use a survey workspace handle or artifact path; defaults to the current workspace survey.",
+        "valueHint": "<survey>",
+        "dynamicSource": "survey",
+        "takesValue": true
+      },
+      {
+        "name": "--topic",
+        "description": "Override the topic inferred from the survey.",
+        "valueHint": "<topic>",
+        "takesValue": true
+      },
+      {
+        "name": "--mature-idea",
+        "description": "Anchor contract-mode refinement to an existing mature idea.",
+        "valueHint": "<idea>",
+        "takesValue": true
+      },
+      {
+        "name": "--refinement-scope",
+        "description": "Provide free-text guidance for the desired refinement; this is not an exact component-name allowlist.",
+        "valueHint": "<scope>",
+        "takesValue": true
+      },
+      {
+        "name": "--discussion",
+        "description": "Add scientific discussion context.",
+        "valueHint": "<text>",
+        "takesValue": true
+      },
+      {
+        "name": "--experiment-feedback",
+        "description": "Add experiment feedback and trigger replanning; --mature-idea is required.",
+        "valueHint": "<text>",
+        "takesValue": true
+      }
+    ],
+    "primaryCounters": [
+      "references",
+      "rag_hits",
+      "components",
+      "candidates",
+      "mcts_iterations",
+      "warnings"
+    ],
+    "artifactTypes": [
+      "research_idea",
+      "research_idea_result",
+      "research_idea_trace",
+      "research_idea_report"
+    ],
+    "defaultExpandedSections": ["diagnostics", "artifacts"]
+  }
+}

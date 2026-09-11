@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "XLab Scholar Profile",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "scholar_name",
+    "sources",
+    "mainline_graph",
+    "representative_papers",
+    "evidence_warnings",
+    "system_prompt_path"
+  ],
+  "properties": {
+    "schema_version": { "const": "xlab.scholar_profile.v1" },
+    "scholar_name": { "type": "string", "minLength": 1 },
+    "sources": { "type": "array" },
+    "mainline_graph": { "type": "object" },
+    "representative_papers": { "type": "array" },
+    "evidence_warnings": { "type": "array", "items": { "type": "string" } },
+    "system_prompt_path": { "type": "string", "minLength": 1 }
+  }
+}

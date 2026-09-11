@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "protocol_version", "tool_name", "server", "config", "input_schema", "runner_command"],
+  "properties": {
+    "schema_version": { "const": "xlab.mcp_package.v1" },
+    "protocol_version": { "const": "2025-11-25" },
+    "tool_name": { "type": "string", "pattern": "^[a-zA-Z0-9_-]+$" },
+    "server": { "type": "string" },
+    "config": { "type": "string" },
+    "input_schema": { "type": "string" },
+    "runner_command": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+  }
+}

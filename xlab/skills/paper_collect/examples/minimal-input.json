@@ -1,0 +1,12 @@
+{
+  "query": "graph neural networks",
+  "invocation_arguments": "\"graph neural networks\" --target-papers 500 --max-papers 1500 --facet \"node representation learning\" --facet \"graph transformers\" --download-workers 8 --download-per-host 2",
+  "facets": [
+    "node representation learning",
+    "graph transformers"
+  ],
+  "target_papers": 500,
+  "max_papers": 1500,
+  "download_workers": 8,
+  "download_per_host": 2
+}

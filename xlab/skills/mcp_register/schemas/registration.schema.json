@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "server_name", "config_path", "backup_path", "changed", "registered"],
+  "properties": {
+    "schema_version": { "const": "xlab.mcp_registration.v1" },
+    "server_name": { "type": "string" },
+    "config_path": { "type": "string" },
+    "backup_path": { "type": ["string", "null"] },
+    "changed": { "type": "boolean" },
+    "registered": { "type": "boolean" }
+  }
+}

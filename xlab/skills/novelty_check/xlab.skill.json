@@ -1,0 +1,76 @@
+{
+  "schema_version": "2",
+  "name": "novelty_check",
+  "version": "1.0.0",
+  "visibility": "public",
+  "description": "Assess duplication risk and evidence uncertainty for a research idea.",
+  "prompt": "SKILL.md",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "scripts/check.py",
+    "lockfile": "requirements.lock",
+    "executables": ["python"]
+  },
+  "permissions": {
+    "tools": ["bash", "read", "write", "edit"],
+    "network": true,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "dependencies": [
+    { "name": "paper_search", "version": "1.0.0" },
+    { "name": "knowledge_graph", "version": "3.0.0" }
+  ],
+  "output_schema": "schemas/novelty_report.schema.json",
+  "hooks": {
+    "pre_start": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "pre_finish": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_resume": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_cancel": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_error": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ]
+  },
+  "artifacts": [
+    {
+      "type": "novelty_report",
+      "schema_version": "1",
+      "schema": "schemas/novelty_report.schema.json",
+      "required": true
+    }
+  ],
+  "ui": {
+    "argumentHint": "<idea and evidence context> [options]",
+    "arguments": [
+      {
+        "name": "--idea",
+        "description": "Provide a research idea artifact path or handle.",
+        "valueHint": "<idea>",
+        "dynamicSource": "file",
+        "takesValue": true
+      },
+      {
+        "name": "--papers",
+        "description": "Provide a paper-set evidence artifact path or handle.",
+        "valueHint": "<papers>",
+        "dynamicSource": "file",
+        "takesValue": true
+      },
+      {
+        "name": "--graph",
+        "description": "Provide a knowledge-graph evidence artifact path or handle.",
+        "valueHint": "<graph>",
+        "dynamicSource": "file",
+        "takesValue": true
+      }
+    ]
+  }
+}

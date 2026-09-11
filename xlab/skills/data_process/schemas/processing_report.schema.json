@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["schema_version","input_rows","output_rows","invalid_rows","mapping","dataset_path"],"properties":{"schema_version":{"const":"xlab.processing_report.v1"}}}

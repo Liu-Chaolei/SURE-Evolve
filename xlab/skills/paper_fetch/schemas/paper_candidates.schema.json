@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "candidates"],
+  "properties": {
+    "schema_version": { "const": "xlab.paper_candidates.v1" },
+    "candidates": { "type": "array" }
+  }
+}

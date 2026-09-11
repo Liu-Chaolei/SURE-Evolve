@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlab.local/schemas/paper_structures.schema.json",
+  "title": "PaperGraph Step 1 Structures",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "structurer",
+    "documents_path",
+    "references",
+    "structures",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": { "const": "xlab.paper_structures.v1" },
+    "structurer": { "type": "string", "minLength": 1 },
+    "documents_path": { "type": "string", "minLength": 1 },
+    "references": {
+      "type": "object",
+      "description": "PaperGraph Step 1 reference-enrichment summary.",
+      "properties": {
+        "upstream_edge_documents": { "type": "integer", "minimum": 0 },
+        "semantic_scholar_documents": { "type": "integer", "minimum": 0 },
+        "local_reference_documents": { "type": "integer", "minimum": 0 },
+        "total_references": { "type": "integer", "minimum": 0 },
+        "semantic_scholar_enabled": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "structures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["paper_id", "path", "status"],
+        "properties": {
+          "paper_id": { "type": "string" },
+          "path": { "type": ["string", "null"] },
+          "status": { "enum": ["structured", "failed"] },
+          "error": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["eligible", "structured", "failed", "reused"]
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "paper_structure_record": {
+      "type": "object",
+      "description": "Shape of each per-paper checkpoint referenced from structures[].path.",
+      "required": [
+        "schema_version",
+        "structurer",
+        "paper_id",
+        "metadata",
+        "structure",
+        "semantic_references",
+        "layout_summary",
+        "mineru_output",
+        "provenance"
+      ],
+      "properties": {
+        "schema_version": { "const": "xlab.paper_structure.v1" },
+        "structurer": { "type": "string", "minLength": 1 },
+        "paper_id": { "type": "string", "minLength": 1 },
+        "metadata": { "type": "object" },
+        "structure": { "type": "array" },
+        "semantic_references": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/semantic_reference" }
+        },
+        "layout_summary": { "type": "object" },
+        "mineru_output": {
+          "type": "object",
+          "required": ["markdown", "content_list_json", "middle_json"]
+        },
+        "provenance": {
+          "type": "object",
+          "properties": {
+            "source_manifest_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "paper_collect_manifest_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "paper_edges_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "semantic_references_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "markdown_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "content_list_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "middle_json_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "semantic_reference": {
+      "type": "object",
+      "description": "Reference aligned from paper_collect edges, Semantic Scholar, or local References text.",
+      "properties": {
+        "paperId": { "type": ["string", "null"] },
+        "title": { "type": ["string", "null"] },
+        "venue": { "type": ["string", "null"] },
+        "year": { "type": ["integer", "string", "null"] },
+        "externalIds": { "type": "object" },
+        "url": { "type": ["string", "null"] },
+        "abstract": { "type": ["string", "null"] },
+        "authors": { "type": "array" },
+        "source": {
+          "enum": [
+            "paper_collect_edges",
+            "semantic_scholar_doi",
+            "semantic_scholar_arxiv",
+            "semantic_scholar_paper_id",
+            "semantic_scholar_corpus_id",
+            "semantic_scholar_title",
+            "local_references_section"
+          ]
+        },
+        "reference_source": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": true
+    }
+  }
+}

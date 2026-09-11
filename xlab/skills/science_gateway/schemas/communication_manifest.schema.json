@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "database", "thread_count", "message_count", "threads", "messages", "exported_at"],
+  "properties": {
+    "schema_version": { "const": "xlab.communication_manifest.v1" },
+    "database": { "type": "string" },
+    "thread_count": { "type": "integer", "minimum": 0 },
+    "message_count": { "type": "integer", "minimum": 0 },
+    "threads": { "type": "array" },
+    "messages": { "type": "array" },
+    "exported_at": { "type": "string" }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xlab.local/schemas/literature_survey_request.schema.json",
+  "title": "XLab Literature Survey Request",
+  "type": "object",
+  "required": ["schema_version", "topic"],
+  "properties": {
+    "schema_version": { "const": "xlab.literature_survey.request.v1" },
+    "topic": { "type": "string", "minLength": 1 },
+    "input_path": { "type": ["string", "null"] },
+    "graph_path": { "type": ["string", "null"] },
+    "source_preference": { "enum": ["graph", "input", "missing"] },
+    "language": { "type": "string", "minLength": 1 },
+    "depth": { "enum": ["brief", "standard", "deep"] },
+    "max_papers": { "type": "integer", "minimum": 1, "maximum": 200 },
+    "min_papers": { "type": "integer", "minimum": 1 },
+    "full_text": { "type": "boolean" },
+    "resume": { "type": "boolean" },
+    "facets": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "raw_args": { "type": "string" },
+    "compatibility_warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": true
+}

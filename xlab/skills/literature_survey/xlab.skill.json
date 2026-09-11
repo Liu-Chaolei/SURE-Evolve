@@ -1,0 +1,283 @@
+{
+  "schema_version": "2",
+  "name": "literature_survey",
+  "version": "1.0.0",
+  "visibility": "public",
+  "description": "Create a citation-traceable literature survey from the current graph or a compatible paper set.",
+  "prompt": "SKILL.md",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "scripts/run_survey_phase.py",
+    "lockfile": "requirements.lock",
+    "executables": ["python"],
+    "required_secrets": ["OPENAI_API_KEY", "SEMANTIC_SCHOLAR_API_KEY"],
+    "secret_aliases": {
+      "OPENAI_API_KEY": ["LLM_API_KEY"],
+      "SEMANTIC_SCHOLAR_API_KEY": ["S2_API_KEY"]
+    }
+  },
+  "permissions": {
+    "tools": ["bash", "read"],
+    "network": true,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "dependencies": [
+    { "name": "paper_collect", "version": "2.2.0" },
+    { "name": "knowledge_graph", "version": "3.0.0" }
+  ],
+  "input_schema": "schemas/request.schema.json",
+  "output_schema": "schemas/literature_survey.schema.json",
+  "config": {
+    "environment": [
+      {
+        "name": "LLM_BASE_URL",
+        "description": "OpenAI-compatible base URL used by the packaged SurveyAgent runtime.",
+        "secret": false,
+        "required": false,
+        "default": "https://api.minimaxi.com/v1",
+        "aliases": ["LLM_API_BASE", "XLAB_LITERATURE_SURVEY_LLM_BASE_URL"]
+      },
+      {
+        "name": "LLM_MODEL",
+        "description": "Provider model id used by the packaged SurveyAgent runtime.",
+        "secret": false,
+        "required": false,
+        "default": "MiniMax-M3",
+        "aliases": ["XLAB_LITERATURE_SURVEY_MODEL"]
+      },
+      {
+        "name": "LLM_CONTEXT_WINDOW",
+        "description": "Context-window hint for survey prompt planning.",
+        "secret": false,
+        "required": false,
+        "default": 512000
+      },
+      {
+        "name": "XLAB_LITERATURE_SURVEY_DEFAULT_MAX_PAPERS",
+        "description": "Default paper budget materialized from the upstream graph or paper set.",
+        "secret": false,
+        "required": false,
+        "default": 24
+      },
+      {
+        "name": "XLAB_LITERATURE_SURVEY_MAX_PAPERS_LIMIT",
+        "description": "Hard upper bound for --max-papers in the packaged CLI.",
+        "secret": false,
+        "required": false,
+        "default": 200
+      },
+      {
+        "name": "XLAB_LITERATURE_SURVEY_DEFAULT_MIN_PAPERS",
+        "description": "Minimum real-paper count required for a successful survey audit.",
+        "secret": false,
+        "required": false,
+        "default": 3
+      },
+      {
+        "name": "XLAB_LITERATURE_SURVEY_DEFAULT_DEPTH",
+        "description": "Default compatibility depth metadata: brief, standard, or deep.",
+        "secret": false,
+        "required": false,
+        "default": "standard"
+      },
+      {
+        "name": "XLAB_LITERATURE_SURVEY_DEFAULT_LANGUAGE",
+        "description": "Default language metadata recorded in survey artifacts.",
+        "secret": false,
+        "required": false,
+        "default": "en"
+      },
+      {
+        "name": "XLAB_LITERATURE_SURVEY_ENABLE_FULL_TEXT",
+        "description": "Opt-in switch for full-text synthesis paths when supported by the runtime.",
+        "secret": false,
+        "required": false,
+        "default": false
+      }
+    ]
+  },
+  "hooks": {
+    "pre_start": [{ "module": "hooks/index.ts", "handler": "preStart" }],
+    "pre_tool_call": [{ "module": "hooks/index.ts", "handler": "preToolCall" }],
+    "post_tool_result": [
+      {
+        "module": "hooks/index.ts",
+        "handler": "postToolResult",
+        "blocking": false
+      }
+    ],
+    "pre_finish": [{ "module": "hooks/index.ts", "handler": "preFinish" }],
+    "post_finish": [{ "module": "hooks/index.ts", "handler": "postFinish" }],
+    "on_resume": [{ "module": "hooks/index.ts", "handler": "onResume" }],
+    "on_cancel": [{ "module": "hooks/index.ts", "handler": "onCancel" }],
+    "on_error": [{ "module": "hooks/index.ts", "handler": "onError" }]
+  },
+  "artifacts": [
+    {
+      "type": "literature_survey_document",
+      "schema_version": "1",
+      "required": true,
+      "description": "Readable Markdown literature survey with paper-id citations"
+    },
+    {
+      "type": "literature_survey_json",
+      "schema_version": "1",
+      "schema": "schemas/literature_survey.schema.json",
+      "required": true,
+      "description": "Structured survey sections, claims, gaps, and references"
+    },
+    {
+      "type": "citation_trace",
+      "schema_version": "1",
+      "schema": "schemas/citation_trace.schema.json",
+      "required": true,
+      "description": "Claim-to-paper traceability map"
+    },
+    {
+      "type": "survey_report",
+      "schema_version": "1",
+      "schema": "schemas/survey_report.schema.json",
+      "required": true,
+      "description": "Audit report for completeness and citation traceability"
+    }
+  ],
+  "ui": {
+    "argumentHint": "<topic> [options]",
+    "arguments": [
+      {
+        "name": "--topic",
+        "description": "Set the survey topic explicitly; a quoted positional topic is preferred.",
+        "valueHint": "<topic>",
+        "takesValue": true
+      },
+      {
+        "name": "--graph",
+        "description": "Override the active workspace knowledge graph with a graph handle or path.",
+        "valueHint": "<graph>",
+        "dynamicSource": "graph",
+        "takesValue": true
+      },
+      {
+        "name": "--language",
+        "description": "Set the language recorded for the generated survey.",
+        "valueHint": "<language>",
+        "takesValue": true
+      },
+      {
+        "name": "--depth",
+        "description": "Set survey depth metadata and planning detail.",
+        "valueHint": "<brief|standard|deep>",
+        "choices": ["brief", "standard", "deep"],
+        "takesValue": true
+      },
+      {
+        "name": "--max-papers",
+        "description": "Set the maximum number of real papers to materialize.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--min-papers",
+        "description": "Set the minimum real-paper count required by the audit.",
+        "valueHint": "<count>",
+        "takesValue": true
+      },
+      {
+        "name": "--facet",
+        "description": "Add a survey facet; repeat the flag to add more facets.",
+        "valueHint": "<facet>",
+        "takesValue": true,
+        "repeatable": true
+      },
+      {
+        "name": "--full-text",
+        "description": "Request full-text synthesis when the runtime supports it.",
+        "takesValue": false
+      },
+      {
+        "name": "--resume",
+        "description": "Resume from compatible run-local survey state.",
+        "takesValue": false
+      },
+      {
+        "name": "--input",
+        "description": "Use a local paper manifest compatibility input instead of the active graph.",
+        "valueHint": "<path>",
+        "dynamicSource": "file",
+        "takesValue": true
+      },
+      {
+        "name": "--papers",
+        "description": "Compatibility alias for --input.",
+        "valueHint": "<path>",
+        "dynamicSource": "file",
+        "takesValue": true
+      },
+      {
+        "name": "--paper-set",
+        "description": "Compatibility alias for --input.",
+        "valueHint": "<path>",
+        "dynamicSource": "file",
+        "takesValue": true
+      }
+    ],
+    "primaryCounters": [
+      "papers",
+      "clusters",
+      "sections",
+      "claims",
+      "traces",
+      "warnings"
+    ],
+    "artifactTypes": [
+      "literature_survey_document",
+      "literature_survey_json",
+      "citation_trace",
+      "survey_report"
+    ],
+    "defaultExpandedSections": ["diagnostics", "artifacts"],
+    "phases": [
+      {
+        "id": "init",
+        "label": "Initialize",
+        "description": "Parse arguments, snapshot runtime config, and prepare run-local state."
+      },
+      {
+        "id": "ingest_sources",
+        "label": "Ingest sources",
+        "description": "Load real papers from a graph or compatibility paper manifest."
+      },
+      {
+        "id": "ingest_graph_context",
+        "label": "Graph context",
+        "description": "Extract bounded knowledge-graph context for orientation."
+      },
+      {
+        "id": "cluster",
+        "label": "Cluster",
+        "description": "Cluster papers and build chronology context."
+      },
+      {
+        "id": "survey_agent",
+        "label": "SurveyAgent",
+        "description": "Run the integrated Xcientist outline, draft, review, refine, and judge path."
+      },
+      {
+        "id": "citation_traces",
+        "label": "Citation traces",
+        "description": "Build claim-to-paper traceability."
+      },
+      {
+        "id": "render_artifacts",
+        "label": "Render artifacts",
+        "description": "Write survey.md, survey.json, and citations.json."
+      },
+      {
+        "id": "audit",
+        "label": "Audit",
+        "description": "Validate schemas, citations, provenance, lineage, and secret-free artifacts."
+      }
+    ]
+  }
+}

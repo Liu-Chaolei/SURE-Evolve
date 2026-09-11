@@ -1,0 +1,30 @@
+{
+  "schema_version": "2",
+  "name": "data_collect",
+  "version": "1.0.0",
+  "visibility": "internal",
+  "description": "Download selected raw datasets without losing source separation or provenance.",
+  "prompt": "SKILL.md",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "scripts/collect.py",
+    "lockfile": "requirements.lock",
+    "executables": ["python"]
+  },
+  "permissions": {
+    "tools": ["bash", "read", "write"],
+    "network": true,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "input_schema": "schemas/source_plan.schema.json",
+  "output_schema": "schemas/raw_manifest.schema.json",
+  "artifacts": [
+    {
+      "type": "raw_data_manifest",
+      "schema_version": "1",
+      "schema": "schemas/raw_manifest.schema.json",
+      "required": true
+    }
+  ]
+}

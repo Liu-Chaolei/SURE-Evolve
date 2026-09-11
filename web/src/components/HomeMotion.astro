@@ -1,0 +1,61 @@
+<button class="ambient-control" type="button" aria-pressed="false" hidden>
+  Pause ambient animation
+</button>
+<script is:inline>
+  (() => {
+    const root = document.documentElement;
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const storageKey = "xlab-ambient-motion-paused";
+    let paused = false;
+
+    root.classList.add("motion-ready");
+    try {
+      paused = sessionStorage.getItem(storageKey) === "true";
+    } catch {}
+
+    const start = () => {
+      const targets = [...document.querySelectorAll("[data-reveal]")];
+      const control = document.querySelector(".ambient-control");
+
+      const updateMotion = () => {
+        const reduced = media.matches;
+        root.dataset.ambientMotion = reduced ? "reduced" : paused ? "paused" : "running";
+        if (!(control instanceof HTMLButtonElement)) return;
+        control.hidden = reduced;
+        control.setAttribute("aria-pressed", String(paused));
+        control.textContent = paused ? "Resume ambient animation" : "Pause ambient animation";
+      };
+
+      if (control instanceof HTMLButtonElement) {
+        control.addEventListener("click", () => {
+          paused = !paused;
+          try {
+            sessionStorage.setItem(storageKey, String(paused));
+          } catch {}
+          updateMotion();
+        });
+      }
+
+      media.addEventListener?.("change", updateMotion);
+      updateMotion();
+
+      if (media.matches || !("IntersectionObserver" in window)) {
+        targets.forEach((target) => target.classList.add("is-revealed"));
+        return;
+      }
+
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          entry.target.classList.add("is-revealed");
+          observer.unobserve(entry.target);
+        });
+      }, { rootMargin: "0px 0px -8%", threshold: 0.12 });
+
+      targets.forEach((target) => observer.observe(target));
+    };
+
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start, { once: true });
+    else start();
+  })();
+</script>

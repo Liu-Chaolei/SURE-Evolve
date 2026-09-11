@@ -1,0 +1,83 @@
+{
+  "schema_version": "2",
+  "name": "paper_reproduction",
+  "version": "1.0.0",
+  "visibility": "public",
+  "description": "Reproduce one declared paper experiment using official code and explicit metrics.",
+  "prompt": "SKILL.md",
+  "runtime": {
+    "kind": "workflow",
+    "entrypoint": "scripts/report.py",
+    "executables": ["python"]
+  },
+  "permissions": {
+    "tools": ["bash", "read", "write", "edit"],
+    "network": true,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "dependencies": [
+    { "name": "paper_parse", "version": "1.0.0" },
+    { "name": "data_workflow", "version": "1.0.0" },
+    { "name": "run_experiment", "version": "1.0.0" },
+    { "name": "model_eval", "version": "1.0.0" }
+  ],
+  "workflow": {
+    "stages": [
+      { "id": "parse", "skill": "paper_parse", "max_attempts": 2 },
+      {
+        "id": "data",
+        "skill": "data_workflow",
+        "needs": ["parse"],
+        "max_attempts": 2
+      },
+      {
+        "id": "execute",
+        "skill": "run_experiment",
+        "needs": ["data"],
+        "max_attempts": 3
+      },
+      {
+        "id": "evaluate",
+        "skill": "model_eval",
+        "needs": ["execute"],
+        "max_attempts": 2
+      }
+    ]
+  },
+  "output_schema": "schemas/reproduction_report.schema.json",
+  "hooks": {
+    "pre_start": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "pre_stage": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "post_stage": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "pre_finish": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_resume": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_cancel": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ],
+    "on_error": [
+      { "kind": "command", "command": "hooks/validate.py", "timeout_ms": 10000 }
+    ]
+  },
+  "artifacts": [
+    {
+      "type": "reproduction_report",
+      "schema_version": "1",
+      "schema": "schemas/reproduction_report.schema.json",
+      "required": true
+    }
+  ],
+  "ui": {
+    "argumentHint": "<paper, official code revision, experiment, metrics, and resource budget>"
+  }
+}

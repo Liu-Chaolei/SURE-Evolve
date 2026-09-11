@@ -1,0 +1,29 @@
+{
+  "schema_version": "2",
+  "name": "eval_prepare",
+  "version": "1.0.0",
+  "visibility": "internal",
+  "description": "Freeze model, dataset, metric, seed, and provenance inputs into a reproducible benchmark plan.",
+  "prompt": "SKILL.md",
+  "runtime": {
+    "kind": "python",
+    "entrypoint": "scripts/prepare.py",
+    "lockfile": "requirements.lock",
+    "executables": ["python"]
+  },
+  "permissions": {
+    "tools": ["bash", "read", "write"],
+    "network": false,
+    "subprocess": true,
+    "external_mutations": false
+  },
+  "output_schema": "schemas/benchmark_plan.schema.json",
+  "artifacts": [
+    {
+      "type": "benchmark_plan",
+      "schema_version": "1",
+      "schema": "schemas/benchmark_plan.schema.json",
+      "required": true
+    }
+  ]
+}

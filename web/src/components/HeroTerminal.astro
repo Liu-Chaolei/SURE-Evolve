@@ -1,0 +1,18 @@
+---
+import CommandBlock from "./CommandBlock.astro";
+---
+<div class="hero-terminal hero-walkthrough" aria-label="Illustrative XLab research run walkthrough" data-reveal>
+  <div class="terminal-bar"><span></span><span></span><span></span><strong>research run · literature_survey</strong></div>
+  <div class="terminal-body">
+    <CommandBlock command={'/xlab write-literature-survey "robustness under distribution shift"'} label="Research command" />
+    <ol class="walkthrough-steps" aria-label="Persisted run events">
+      <li data-loop-motion style="--loop-index:0"><span class="walkthrough-signal"></span><div><strong>Run created</strong><small>run_7f2a · durable state</small></div><b>ready</b></li>
+      <li data-loop-motion style="--loop-index:1"><span class="walkthrough-signal"></span><div><strong>Papers loaded</strong><small>paper_set · source passages retained</small></div><b>24</b></li>
+      <li data-loop-motion style="--loop-index:2"><span class="walkthrough-signal"></span><div><strong>Graph evidence linked</strong><small>graph-v1 · parent relationships recorded</small></div><b>linked</b></li>
+      <li data-loop-motion style="--loop-index:3"><span class="walkthrough-signal"></span><div><strong>Citation traces checked</strong><small>61 of 68 claims traced</small></div><b>review</b></li>
+      <li data-loop-motion style="--loop-index:4"><span class="walkthrough-signal"></span><div><strong>Survey artifact</strong><small>survey.md · acceptance gate pending</small></div><b>draft</b></li>
+    </ol>
+    <div class="walkthrough-route" aria-hidden="true"><span data-loop-motion></span></div>
+    <div class="walkthrough-checkpoint"><span><b>Checkpoint</b> after_synthesis</span><span><b>Next</b> repair 7 citation traces, then resume</span></div>
+  </div>
+</div>

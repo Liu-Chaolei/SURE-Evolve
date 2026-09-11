@@ -1,0 +1,21 @@
+---
+const traces = [
+  { kind: "Paper quote", text: "“Performance falls under distribution shift…”", meta: "paper_set · source passage" },
+  { kind: "Graph entity", text: "Robustness under shift", meta: "producer: knowledge_graph · parent: paper set" },
+  { kind: "Survey claim", text: "Robustness remains unevenly evaluated.", meta: "producer: literature_survey · parent: graph-v1" },
+  { kind: "Research idea", text: "Adaptive shift-aware evaluation protocol", meta: "producer: research_idea · parent: survey-v1" },
+  { kind: "Novelty analysis", text: "Moderate overlap risk; evidence incomplete", meta: "producer: novelty_check · reports uncertainty" },
+] as const;
+---
+<div class="artifact-lineage" data-reveal>
+  <ol class="artifact-trace" aria-label="Artifact lineage">
+    {traces.map((trace, index) => (
+      <li data-stagger style={`--stagger:${index}`}>
+        <span class="trace-node" aria-hidden="true"></span>
+        <span class="trace-kind">{trace.kind}</span>
+        <strong>{trace.text}</strong>
+        <small>{trace.meta}</small>
+      </li>
+    ))}
+  </ol>
+</div>
