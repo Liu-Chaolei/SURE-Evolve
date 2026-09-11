@@ -60,12 +60,10 @@ def main():
         check_accelerator(env["SURE_ACCELERATOR"])
         import torch
 
-        if env["SURE_ACCELERATOR"] == "npu" and torch.npu.device_count() != int(
-            env["ASR_WORLD_SIZE"]
-        ):
-            raise RuntimeError(
-                "Allocated NPU count differs from the candidate resource contract"
-            )
+        backend = env["SURE_ACCELERATOR"]
+        expected_devices = int(env.get("SURE_ALLOCATED_DEVICES", env.get("ASR_WORLD_SIZE", "1")))
+        if backend in {"cuda", "npu"} and getattr(torch, backend).device_count() != expected_devices:
+            raise RuntimeError("Allocated accelerator count differs from the task resource contract")
         card = resolve_task_card(sure["task_cards_path"], sure["task_id"])
         profile = merge_base_model_profile(
             card.base_model, sure["base_models"][sure["task_id"]]

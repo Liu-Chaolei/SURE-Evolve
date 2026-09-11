@@ -101,34 +101,18 @@ def model_probe(adapter, settings, backend, component, workspace):
             )[0]
     else:
         import toml
-
+        from playground.sure_master.tasks.training_resources import validate_wavlm_provenance
+        validate_wavlm_provenance(resources["wavlm"])
         sys.path[:0] = [str(root), str(root / "pyannote-audio")]
-        config = toml.load(resources["model"] / "config.toml")
+        config = toml.load(root / "recipes/diar_ssl/conf/wavlm_updated_conformer.toml")
         args = config["model"]["args"]
+        args["wavlm_src"] = str(resources["wavlm"])
         if component == "arch":
             args["num_layer"] = 3
         module, cls = config["model"]["path"].rsplit(".", 1)
         model = getattr(importlib.import_module(module), cls)(**args)
-        state = torch.load(
-            resources["model"] / "pytorch_model.bin",
-            map_location="cpu",
-            weights_only=True,
-        )
-        state = state.get("state_dict", state)
-        if component == "arch":
-            own = model.state_dict()
-            matched = {
-                k: v for k, v in state.items() if k in own and v.shape == own[k].shape
-            }
-            if (
-                sum(v.numel() for v in matched.values())
-                / sum(v.numel() for v in own.values())
-                < 0.7
-            ):
-                raise ValueError("SD probe partial-load match below .70")
-            model.load_state_dict(matched, strict=False)
-        else:
-            model.load_state_dict(state, strict=True)
+        state = torch.load(resources["wavlm"], map_location="cpu", weights_only=True)
+        model.wavlm_model.load_state_dict(state["state_dict"], strict=True)
         model.to(runtime.device)
 
         def loss_fn():
@@ -232,13 +216,10 @@ def child(request, workspace):
     selected = workspace / "probe_manifest.jsonl"
     selected.write_text(json.dumps(data[0], ensure_ascii=False) + "\n")
     env["SURE_EVAL_MANIFEST"] = str(selected)
+    env.update(SURE_COMPONENT_TEST="1", SURE_CANDIDATE_PHASE="component_test")
     os.environ.update(env)
-    run(
-        "infer" if request.get("artifact") else "baseline",
-        {},
-        request.get("artifact", ""),
-    )
-    bundle = adapter.collect_model(str(workspace), env)
+    run("infer", {}, request.get("artifact", ""))
+    bundle = {"model_artifact": request.get("artifact", ""), "synthetic_or_reference_probe": True}
     return {
         "status": "passed",
         "component": component,

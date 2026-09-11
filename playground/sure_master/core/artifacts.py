@@ -52,15 +52,21 @@ def publish_bundle(
             manifest = json.loads((pending / "manifest.json").read_text())
             (pending / "manifest.json").unlink()
         resolved = {}
-        for role, raw in resources.items():
+        copied_directories = []
+        ordered = sorted(resources.items(), key=lambda item: (not Path(item[1]).is_dir(), len(Path(item[1]).parts)))
+        for role, raw in ordered:
             if not role.replace("_", "").isalnum():
                 raise ValueError(f"Invalid resource role: {role}")
             source = Path(raw).expanduser()
             source = source if source.is_absolute() else workspace / source
             if not source.exists():
                 raise FileNotFoundError(f"Missing {role}: {source}")
+            contained = next(((original, relative) for original, relative in copied_directories
+                              if source.resolve().is_relative_to(original)), None)
             if legacy_root is not None:
                 relative = source.resolve().relative_to(legacy_root.resolve())
+            elif contained is not None:
+                relative = contained[1] / source.resolve().relative_to(contained[0])
             else:
                 relative = Path("assets") / role / source.name
                 target = pending / relative
@@ -74,6 +80,8 @@ def publish_bundle(
                     )
                 else:
                     shutil.copy2(source, target)
+            if source.is_dir() and contained is None:
+                copied_directories.append((source.resolve(), relative))
             resolved[role] = relative.as_posix()
         for relative in (
             "run_sure.py",

@@ -56,13 +56,13 @@ def write_jsonl(path: Path, data: list[dict]) -> None:
     path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in data))
 
 
-def premium_rows(root: Path, groups: Path) -> list[dict]:
+def premium_rows(root: Path, groups: Path | None) -> list[dict]:
     transcripts = sorted(root.glob("**/txts/*.txt"))
     if not transcripts:
         raise FileNotFoundError(
             f"Premium download/extraction is not ready: no txts/*.txt under {root}"
         )
-    mapping = json.loads(groups.read_text())
+    mapping = json.loads(groups.read_text()) if groups else {}
     result, seen = [], set()
     for transcript in transcripts:
         fields = transcript.read_text().splitlines()[0].split("\t")
@@ -72,6 +72,10 @@ def premium_rows(root: Path, groups: Path) -> list[dict]:
         if sid in seen:
             raise ValueError(f"Duplicate Premium utterance: {sid}")
         seen.add(sid)
+        if groups is None:
+            match = re.fullmatch(r"(.+)_S\d+(?:-S\d+)?", sid)
+            if match:
+                mapping[sid] = match.group(1)
         if sid not in mapping or not str(mapping[sid]).strip():
             raise ValueError(f"Missing speaker/original-recording group mapping: {sid}")
         audio = transcript.parent.parent / "wavs" / f"{sid}.wav"
@@ -145,7 +149,9 @@ def seed_rows(root: Path, language: str) -> list[dict]:
     return result
 
 
-def prepare_tts(root: Path, groups: Path, seed_root: Path, output: Path) -> dict:
+def prepare_tts(root: Path, groups: Path | None, seed_root: Path, output: Path) -> dict:
+    from playground.sure_master.tools.training_data_integrity import verify_premium_source, write_preparation
+    integrity = verify_premium_source(root, output / "source_integrity.json")
     raw = premium_rows(root, groups)
     splits = grouped_split(
         raw,
@@ -168,6 +174,7 @@ def prepare_tts(root: Path, groups: Path, seed_root: Path, output: Path) -> dict
     prepared["holdout"] = {
         "manifest": str((output / "holdout/manifest.jsonl").resolve())
     }
+    write_preparation(output, "tts.f5tts", prepared, integrity)
     return prepared
 
 
@@ -249,6 +256,10 @@ def prepare_sd(corpus: Path, recipe_data: Path, output: Path) -> dict:
             "manifest": str((directory / "manifest.jsonl").resolve()),
             "roles": {"ref": str((directory / "ref.rttm").resolve())},
         }
+    from playground.sure_master.tools.training_data_integrity import write_preparation
+    write_preparation(output, "sd.diarizen", prepared, {
+        "corpus": str(corpus.resolve()), "recipe_data": str(recipe_data.resolve()),
+        "sessions": {name: len(data) for name, data in splits.items()}})
     return prepared
 
 
@@ -269,10 +280,6 @@ def main():
     parser.add_argument("--language", choices=["zh", "en"], default="zh")
     args = parser.parse_args()
     if args.task == "tts":
-        if not args.groups:
-            parser.error(
-                "Premium requires --groups; utterance-level random splitting is not supported"
-            )
         prepared = prepare_tts(args.root, args.groups, args.seed_root, args.output)
     elif args.task == "sd":
         if not args.recipe_data:

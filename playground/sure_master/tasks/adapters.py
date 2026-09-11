@@ -87,9 +87,12 @@ class BaseAdapter:
                 PROJECT_ROOT / "playground/sure_master/tools/run_task_candidate.py"
             ),
         }
+        env["SURE_TRAIN_WORLD_SIZE"] = str(runtime.get("world_size", settings["training"].get("world_size", 1)))
         env["SURE_SEARCH_SCOPE"] = search_scope(sure)
         env["SURE_ARCH_ARGUMENTS_JSON"] = json.dumps((sure.get("execution_contract") or {}).get(
             "structure_arguments", sorted(STRUCTURE_ARGUMENTS)))
+        if sure.get("data_preparation"):
+            env["SURE_DATA_PREPARATION"] = str(sure["data_preparation"])
         specs = split_specs(sure)
         if "search" in specs:
             env.update(self.phase_environment(specs["search"]))
@@ -131,6 +134,22 @@ class BaseAdapter:
                             )
         return {"adapter": self.name, "splits": reports, "modules": list(self.modules)}
 
+    def training_proof_errors(self, exp: Any) -> list[str]:
+        settings = json.loads(exp.execution_env.get("SURE_TASK_SETTINGS", "{}"))
+        required = exp.execution_env.get("SURE_REQUIRE_MODEL_ARTIFACT") == "1" or bool(settings.get("training", {}).get("recipe"))
+        if not required:
+            return []
+        try:
+            from ..core.training import require_completion
+            payload = json.loads((Path(exp.workspace_path) / "artifacts/model_resources.json").read_text())
+            evidence = Path(payload["resources"]["training_evidence"])
+            report = require_completion(evidence / "training_completion.json")
+            if report["contract"]["adapter"] != self.name:
+                raise ValueError("Training evidence belongs to another task")
+        except (ValueError, OSError, KeyError) as exc:
+            return [f"Full training proof rejected: {exc}"]
+        return []
+
     def collect_model(self, workspace: str, env: dict[str, str]) -> dict:
         root = Path(workspace)
         resource_file = root / "artifacts/model_resources.json"
@@ -139,6 +158,9 @@ class BaseAdapter:
                 raise FileNotFoundError(f"Missing replay resources: {resource_file}")
             return {}
         payload = json.loads(resource_file.read_text())
+        if self.task in {"tts", "sd"}:
+            from ..core.training import require_completion
+            require_completion(Path(payload["resources"]["training_evidence"]) / "training_completion.json")
         return publish_bundle(
             root,
             self.name,
@@ -353,6 +375,17 @@ class TtsAdapter(BaseAdapter):
     modules = ("torch", "torchaudio", "f5_tts", "vocos", "accelerate")
     required_resources = ("source", "checkpoint", "vocab", "vocoder")
 
+    def baseline_candidate_type(self, sure: dict, remote: bool = False) -> str:
+        return "fine_tune"
+
+    def preflight(self, sure: dict) -> dict:
+        from ..core.training import validate_training_config
+        from .training_resources import validate_task_resources
+        validate_training_config(self.name, sure.get("task", {}).get("training", {}), sure.get("runtime", {}))
+        report = super().preflight(sure)
+        validate_task_resources(self.name, sure)
+        return report
+
     def execute_candidate(
         self, action, parameters, settings, manifest, resources, parent, frozen
     ):
@@ -368,6 +401,7 @@ class TtsAdapter(BaseAdapter):
 
         return {
             **super().context(),
+            "initialization": "Baseline and architecture candidates fine-tune the same official F5 checkpoint for the full official budget; fresh optimizer per candidate.",
             "candidate_parameters": {
                 "inference": sorted(INFERENCE_KEYS),
                 "training": sorted(TRAIN_KEYS),
@@ -390,13 +424,24 @@ class TtsAdapter(BaseAdapter):
     def validate_outputs(self, exp: Any, roles: dict) -> list[str]:
         from .guards import TtsGuards
 
-        return TtsGuards(exp).validate(roles)
+        return self.training_proof_errors(exp) + TtsGuards(exp).validate(roles)
 
 
 class SdAdapter(BaseAdapter):
     name, task = "sd.diarizen", "sd"
     modules = ("torch", "torchaudio", "diarizen", "pyannote.audio", "toml")
-    required_resources = ("source", "model", "embedding")
+    required_resources = ("source", "wavlm", "embedding")
+
+    def baseline_candidate_type(self, sure: dict, remote: bool = False) -> str:
+        return "fine_tune"
+
+    def preflight(self, sure: dict) -> dict:
+        from ..core.training import validate_training_config
+        from .training_resources import validate_task_resources
+        validate_training_config(self.name, sure.get("task", {}).get("training", {}), sure.get("runtime", {}))
+        report = super().preflight(sure)
+        validate_task_resources(self.name, sure)
+        return report
 
     def execute_candidate(
         self, action, parameters, settings, manifest, resources, parent, frozen
@@ -413,6 +458,7 @@ class SdAdapter(BaseAdapter):
 
         return {
             **super().context(),
+            "initialization": "Official WavLM-Base+ SSL backbone plus a fresh DiariZen network; never initialize from a trained DiariZen checkpoint.",
             "candidate_parameters": {
                 "inference": sorted(INFER_KEYS),
                 "training": sorted(TRAIN_KEYS),
@@ -442,7 +488,7 @@ class SdAdapter(BaseAdapter):
     def validate_outputs(self, exp: Any, roles: dict) -> list[str]:
         from .diarization import validate_rttm_outputs
 
-        errors = exp._candidate_changes_guard_errors()
+        errors = self.training_proof_errors(exp) + exp._candidate_changes_guard_errors()
         manifest = exp.execution_env.get("SURE_EVAL_MANIFEST", "")
         try:
             validate_rttm_outputs(

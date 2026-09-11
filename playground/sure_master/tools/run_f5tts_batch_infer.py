@@ -984,7 +984,7 @@ def write_candidate_changes(args: argparse.Namespace, rows: list[dict[str, Any]]
     arch_config = existing_arch_config if preserve_arch and existing_arch_config else {"action": args.arch_action}
     training_config = (
         existing_training_config
-        if preserve_arch and existing_training_config
+        if existing_training_config and (preserve_arch or infer_candidate_type(args) == "fine_tune")
         else {"action": args.training_action}
     )
     defaults_payload: dict[str, Any] = {"inference_config": defaults}

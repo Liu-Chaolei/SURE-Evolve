@@ -23,7 +23,8 @@ XLab 失败不切回内置 research。selection/holdout 由可信 wrapper 恢复
 `playground/sure_master/runtime/environments/README.md`。
 
 TTS 中文训练数据使用 WenetSpeech4TTS-Premium。数据未下载解压完成时，工具会明确报错。
-必须提供可信的 utterance→speaker/source-recording JSON 映射（`--groups`），避免按句随机切分：
+标准样本 ID 自动按原始录音分组；特殊命名提供可信的 utterance→speaker/source-recording
+JSON 映射（`--groups`）。首次准备需保留完整压缩包以完成校验：
 
 ```bash
 python playground/sure_master/tools/prepare_task_data.py tts \
@@ -36,7 +37,7 @@ python playground/sure_master/tools/prepare_task_data.py tts \
 参考音频和目标来自不同片段。完整 Seed-zh 是 holdout；英文 Seed/WER 接口保留。
 转换保留基础模型词表。训练预算由运行配置控制，候选只能改允许的参数。
 
-SD 使用本地 DiariZen v2、AMI Array1-01 和模型配套会话清单：
+SD 使用官方 WavLM-updated 训练 recipe、AMI Array1-01 和模型配套会话清单：
 
 ```bash
 python playground/sure_master/tools/prepare_task_data.py sd \
@@ -120,8 +121,9 @@ python run.py --agent sure_master \
 正式 ASR 配置使用 `training_mode: full_during_search`，数据是完整 TEDLIUM train，
 `SURE_MAX_TRAIN_EPOCHS` 和基线 epoch 都为 30。`ordinary-asr-*` 的数据路径由
 `SURE_FULL_DATA_DIR` 指定，不能指向 1h 或 `search_100h` 准备结果。
-TTS/SD 也直接完成 `task.training` 声明的预算后评分，没有控制器后置重训阶段；
-它们的具体训练步数由各自任务配置设置。
+TTS 使用官方微调 CLI 的 100 epoch；SD 使用 WavLM-updated 的最多 100 epoch 和
+验证损失 patience=10。两者都训练原结构基线，不再使用 1000 步上限。
+完整预算、资源准备和续训约束见 [官方训练指南](sure_master_official_training.md)。
 
 旧配置中的 `full_training.enabled=true` 会在模型和工作区初始化之前，把最终数据和 epoch
 迁移到搜索预算，避免仅删除后置阶段却仍然短训。旧运行与新预算的契约不同，必须新建运行目录。

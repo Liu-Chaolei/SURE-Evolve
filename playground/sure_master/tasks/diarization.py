@@ -14,6 +14,9 @@ from pathlib import Path
 from ..runtime.model_source import snapshot_source, prepare_audio_io
 
 INFER_KEYS = {
+    "seg_duration",
+    "clustering_method",
+    "min_cluster_size",
     "segmentation_step",
     "batch_size",
     "apply_median_filtering",
@@ -86,24 +89,27 @@ def clip_rttm(source: Path, manifest: Path, destination: Path) -> None:
     destination.write_text("\n".join(result) + ("\n" if result else ""))
 
 
-def _dataset(root: Path, manifest: Path, model, work: Path):
-    data = rows(manifest)
-    work.mkdir(parents=True, exist_ok=True)
-    (work / "wav.scp").write_text(
-        "".join(f"{r['session_id']} {r['audio']}\n" for r in data)
-    )
-    (work / "rttm").write_text(
-        "".join(r["reference_rttm"].rstrip() + "\n" for r in data)
-    )
-    uem = []
-    for row in data:
-        bounds = row.get("uem", [[0, row["duration"]]])
-        if len(bounds) != 1:
-            raise ValueError(
-                "DiariZen training requires one contiguous UEM per recording"
-            )
-        uem.append(f"{row['session_id']} 1 {bounds[0][0]} {bounds[0][1]}\n")
-    (work / "all.uem").write_text("".join(uem))
+def _dataset(
+    root: Path, manifest: Path, model, work: Path, *, chunk_shift=None, materialize=True
+):
+    if materialize:
+        data = rows(manifest)
+        work.mkdir(parents=True, exist_ok=True)
+        (work / "wav.scp").write_text(
+            "".join(f"{r['session_id']} {r['audio']}\n" for r in data)
+        )
+        (work / "rttm").write_text(
+            "".join(r["reference_rttm"].rstrip() + "\n" for r in data)
+        )
+        uem = []
+        for row in data:
+            bounds = row.get("uem", [[0, row["duration"]]])
+            if len(bounds) != 1:
+                raise ValueError(
+                    "DiariZen training requires one contiguous UEM per recording"
+                )
+            uem.append(f"{row['session_id']} 1 {bounds[0][0]} {bounds[0][1]}\n")
+        (work / "all.uem").write_text("".join(uem))
     spec = importlib.util.spec_from_file_location(
         "sure_diarizen_dataset", root / "recipes/diar_ssl/dataset.py"
     )
@@ -118,7 +124,7 @@ def _dataset(root: Path, manifest: Path, model, work: Path):
         duration,
         step,
         chunk_size=model.chunk_size,
-        chunk_shift=model.chunk_size,
+        chunk_shift=chunk_shift or model.chunk_size,
     )
     if not len(dataset):
         raise ValueError("No usable SD training chunks")
@@ -140,198 +146,144 @@ def _loss(model, batch, device):
 
 
 def execute(action, parameters, settings, manifest, saved, backend, parent):
-    import torch
     import toml
-    from functools import partial
-    from torch.utils.data import DataLoader
+    from ..core.training import validate_training_config, require_completion
+    from ..runtime.official_trainers import checkpoint_identity
+    from ..runtime.training_state import atomic_json
+    from .training_jobs import run_training
 
     if set(parameters) - {"inference", "training", "architecture"}:
         raise ValueError("Expected inference/training/architecture parameter sections")
-    for key, allowed in (
-        ("inference", INFER_KEYS),
-        ("training", TRAIN_KEYS),
-        ("architecture", set(ARCH_VALUES)),
-    ):
-        if (
-            not isinstance(parameters.get(key, {}), dict)
-            or set(parameters.get(key, {})) - allowed
-        ):
-            raise ValueError(f"Unsupported SD {key} parameters")
-    if action in {"baseline", "infer"} and (
-        parameters.get("training") or parameters.get("architecture")
-    ):
-        raise ValueError("Inference cannot train or change structure")
-    if action == "fine_tune" and parameters.get("architecture"):
-        raise ValueError("Structural changes require arch")
-    resources = {k: Path(v).resolve() for k, v in settings["resources"].items()}
+    if parameters.get("training"):
+        raise ValueError("Official DiariZen training settings are fixed")
+    arch = parameters.get("architecture", {})
+    if not isinstance(arch, dict) or set(arch) - set(ARCH_VALUES):
+        raise ValueError("Unsupported SD architecture parameters")
+    if action in {"baseline", "infer", "fine_tune"} and arch:
+        raise ValueError("Structural changes require arch action")
+    resources = {
+        key: Path(value).resolve() for key, value in settings["resources"].items()
+    }
     resources.update(saved)
     root = snapshot_source(resources["source"], Path("working/diarizen_source"))
-    # Explicit device injection into the workspace copy; external source stays untouched.
     pipeline_file = root / "diarizen/pipelines/inference.py"
     text = pipeline_file.read_text()
-    old = 'torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")'
-    text = text.replace(old, 'torch.device(os.environ.get("SURE_MODEL_DEVICE", "cpu"))')
+    text = text.replace(
+        'torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")',
+        'torch.device(os.environ.get("SURE_MODEL_DEVICE", "cpu"))',
+    )
     pipeline_file.write_text(text)
     prepare_audio_io(pipeline_file)
     os.environ["SURE_MODEL_DEVICE"] = str(backend.device)
     sys.path[:0] = [str(root), str(root / "pyannote-audio")]
-    config = toml.load(resources["model"] / "config.toml")
-    baseline_config = json.loads(json.dumps(config))
-    overrides = {
+    defaults = {
+        "seg_duration": 8,
+        "segmentation_step": 0.1,
+        "batch_size": 32,
+        "apply_median_filtering": True,
+        "clustering_method": "AgglomerativeClustering",
+        "min_speakers": 1,
+        "max_speakers": 20,
+        "min_cluster_size": 30,
+        "ahc_threshold": 0.70,
+    }
+    inference = {
+        **defaults,
         **settings.get("inference", {}),
         **manifest.get("inference_config", {}),
         **parameters.get("inference", {}),
     }
-    for key, value in overrides.items():
-        if key not in INFER_KEYS:
-            raise ValueError(f"Unsupported SD inference setting: {key}")
-        section = "inference" if key in config["inference"]["args"] else "clustering"
-        config[section]["args"][key] = value
-    train = {**settings.get("training", {}), **parameters.get("training", {})}
-    model_dir = Path("models/diarizen").resolve()
-    model_dir.mkdir(parents=True, exist_ok=True)
-    initial = resources["model"] / "pytorch_model.bin"
-    training_report = {}
-    if action in {"fine_tune", "arch"}:
-        arch = parameters.get("architecture", {})
+    if set(inference) - INFER_KEYS:
+        raise ValueError("Unsupported SD inference parameters")
+    if action in {"baseline", "fine_tune", "arch"}:
+        validate_training_config("sd.diarizen", settings["training"])
+        config = toml.load(root / "recipes/diar_ssl/conf/wavlm_updated_conformer.toml")
+        architecture = dict(config["model"]["args"])
+        architecture.pop("wavlm_src", None)
         if action == "arch" and (
             not arch
-            or all(config["model"]["args"].get(k) == v for k, v in arch.items())
+            or all(
+                architecture.get(k, 31 if k == "kernel_size" else None) == v
+                for k, v in arch.items()
+            )
         ):
             raise ValueError("SD arch action requires an actual structure change")
         for key, value in arch.items():
             if value not in ARCH_VALUES[key]:
                 raise ValueError(f"Unsupported {key}: {value}")
-        config["model"]["args"].update(arch)
-        module, cls = config["model"]["path"].rsplit(".", 1)
-        model = getattr(importlib.import_module(module), cls)(**config["model"]["args"])
-        state = torch.load(initial, map_location="cpu", weights_only=True)
-        state = state.get("state_dict", state)
-        own = model.state_dict()
-        matched = {
-            k: v for k, v in state.items() if k in own and v.shape == own[k].shape
-        }
-        ratio = sum(v.numel() for v in matched.values()) / sum(
-            v.numel() for v in own.values()
-        )
-        if action == "fine_tune":
-            model.load_state_dict(state, strict=True)
-        else:
-            if ratio < 0.70:
-                raise ValueError(
-                    f"SD checkpoint parameter match {ratio:.3f} is below 0.70"
-                )
-            model.load_state_dict(matched, strict=False)
-        if train.get("freeze_wavlm", False):
-            for parameter in model.wavlm_model.parameters():
-                parameter.requires_grad_(False)
-        model.to(backend.device).train()
-        backend.verify_model(model)
-        dataset, collate = _dataset(
+        architecture.update(arch)
+        completion, evidence = run_training(
+            "sd.diarizen",
+            settings,
+            architecture,
             root,
-            Path(os.environ["SURE_TRAIN_MANIFEST"]),
-            model,
-            Path("working/train_data"),
+            backend,
+            Path("models/diarizen_training"),
+            structural=action == "arch",
         )
-        batch_size = int(train.get("batch_size", 1))
-        steps = int(settings.get("training", {}).get("max_steps", 1000))
-        lr = float(train.get("learning_rate", 2e-5))
-        if (
-            not 1 <= batch_size <= 16
-            or not 0 < steps <= 100000
-            or not 1e-7 <= lr <= 1e-3
-        ):
-            raise ValueError("Invalid SD training budget or optimizer settings")
-        loader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=0,
-            collate_fn=partial(
-                collate,
-                max_speakers_per_chunk=config["model"]["args"][
-                    "max_speakers_per_chunk"
-                ],
-            ),
-        )
-        optimizer = torch.optim.AdamW(
-            [p for p in model.parameters() if p.requires_grad], lr=lr, fused=False
-        )
-        iterator = iter(loader)
-        for step in range(steps):
-            try:
-                batch = next(iterator)
-            except StopIteration:
-                iterator = iter(loader)
-                batch = next(iterator)
-            optimizer.zero_grad(set_to_none=True)
-            loss = _loss(model, batch, backend.device)
-            if not torch.isfinite(loss):
-                raise ValueError("Nonfinite SD training loss")
-            loss.backward()
-            backend.verify_model(model, gradients=True)
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), 5.0, error_if_nonfinite=True
-            )
-            optimizer.step()
-        model.eval()
-        validation, collate = _dataset(
-            root,
-            Path(os.environ["SURE_TRAIN_VALIDATION_MANIFEST"]),
-            model,
-            Path("working/train_validation"),
-        )
-        validation_batch = next(
-            iter(
-                DataLoader(
-                    validation,
-                    batch_size=1,
-                    collate_fn=partial(
-                        collate,
-                        max_speakers_per_chunk=config["model"]["args"][
-                            "max_speakers_per_chunk"
-                        ],
-                    ),
-                )
-            )
-        )
-        with torch.no_grad():
-            validation_loss = float(_loss(model, validation_batch, backend.device))
-        if not math.isfinite(validation_loss):
-            raise ValueError("Nonfinite SD validation loss")
-        torch.save(
-            {k: v.cpu() for k, v in model.state_dict().items()},
-            model_dir / "pytorch_model.bin",
-        )
-        training_report = {
-            "steps": steps,
-            "learning_rate": lr,
-            "batch_size": batch_size,
-            "matched_parameters": ratio,
-            "train_validation_loss": validation_loss,
-            "train_validation_batches": 1,
-            "initial_checkpoint": str(initial),
-            "seed": train.get("seed", 42),
+        model_dir = evidence / "model"
+        config = {
+            "model": {
+                "path": config["model"]["path"],
+                "args": {**architecture, "wavlm_src": str(resources["wavlm"])},
+            },
+            "inference": {
+                "args": {
+                    key: inference[key]
+                    for key in (
+                        "seg_duration",
+                        "segmentation_step",
+                        "batch_size",
+                        "apply_median_filtering",
+                    )
+                }
+            },
+            "clustering": {
+                "args": {
+                    "method": inference["clustering_method"],
+                    **{
+                        key: inference[key]
+                        for key in (
+                            "min_speakers",
+                            "max_speakers",
+                            "min_cluster_size",
+                            "ahc_threshold",
+                        )
+                    },
+                }
+            },
         }
-        del model, optimizer
-        backend.empty_cache()
+        (model_dir / "config.toml").write_text(toml.dumps(config))
+        completion["checkpoints"]["model_config"] = checkpoint_identity(
+            evidence, model_dir / "config.toml"
+        )
+        atomic_json(evidence / "training_completion.json", completion)
+        resources.update(model=model_dir, training_evidence=evidence,
+                         wavlm_provenance=resources["wavlm"].with_suffix(resources["wavlm"].suffix + ".provenance.json"))
     else:
-        shutil.copy2(initial, model_dir / "pytorch_model.bin")
-    if (resources["model"] / "plda").is_dir():
-        shutil.copytree(
-            resources["model"] / "plda", model_dir / "plda", dirs_exist_ok=True
+        if not saved or "training_evidence" not in resources:
+            raise ValueError(
+                "DiariZen inference requires a completed official-training artifact"
+            )
+        completion = require_completion(
+            resources["training_evidence"] / "training_completion.json"
         )
-    with (model_dir / "config.toml").open("w") as stream:
-        toml.dump(config, stream)
+        config = toml.load(resources["model"] / "config.toml")
+    # Keep the immutable bundle untouched; only the local inference copy gets relocated paths.
+    local = Path("working/diarizen_inference").resolve()
+    local.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(resources["model"] / "pytorch_model.bin", local / "pytorch_model.bin")
+    config["model"]["args"]["wavlm_src"] = str(resources["wavlm"])
+    (local / "config.toml").write_text(toml.dumps(config))
     from diarizen.pipelines.inference import DiariZenPipeline
 
     embedding = Path("working/pyannote_embedding/pytorch_model.bin").resolve()
     embedding.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(resources["embedding"], embedding)
-    pipeline = DiariZenPipeline(model_dir, str(embedding), rttm_out_dir=None)
+    pipeline = DiariZenPipeline(local, str(embedding), rttm_out_dir=None)
+    backend.verify_model(pipeline._segmentation.model)
     if hasattr(pipeline._embedding, "model_"):
         backend.verify_model(pipeline._embedding.model_)
-    backend.verify_model(pipeline._segmentation.model)
     manifest_path = Path(os.environ["SURE_EVAL_MANIFEST"])
     output = Path("artifacts")
     output.mkdir(exist_ok=True)
@@ -344,41 +296,41 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
             processed.append(row["session_id"])
     (output / "processed_sessions.json").write_text(json.dumps(processed))
     validate_rttm_outputs(output / "hyp.rttm", manifest_path)
-    resources.update(source=root, model=model_dir)
-    changed = [
-        f"{section}.{key}" for section, values in parameters.items() for key in values
-    ]
-    candidate_type = {
-        "baseline": "inference",
-        "infer": "inference",
-        "fine_tune": "fine_tune",
-        "arch": "arch",
-    }[action]
-    changes = {
-        "candidate_type": candidate_type,
+    resources["source"] = root
+    kind = (
+        "arch"
+        if action == "arch"
+        else "inference"
+        if action == "infer"
+        else "fine_tune"
+    )
+    record = {
+        "candidate_type": kind,
         "idea_text": json.dumps(parameters),
-        "changed_fields": changed,
-        "inference_config": overrides,
+        "changed_fields": [f"arch_config.{k}" for k in arch],
+        "inference_config": inference,
         "arch_config": config["model"]["args"],
-        "training_config": training_report,
-        "defaults": baseline_config,
+        "training_config": completion,
+        "defaults": {},
         "diff_from_defaults": parameters,
         "produced_artifacts": {
             "hyp": "artifacts/hyp.rttm",
-            "checkpoint": str(model_dir / "pytorch_model.bin"),
+            "model": str(resources["model"]),
         },
     }
-    (output / "candidate_changes.json").write_text(json.dumps(changes, indent=2))
-    report = {
-        "resources": {k: str(v) for k, v in resources.items()},
-        "model_config": config["model"],
-        "inference_config": overrides,
-        "provenance": {
-            "action": action,
-            "parent": parent,
-            "training": training_report,
-            "accelerator": backend.name,
-            "cpu_operations": ["clustering", "speaker_assignment"],
+    atomic_json(output / "candidate_changes.json", record)
+    atomic_json(
+        output / "model_resources.json",
+        {
+            "resources": {k: str(v) for k, v in resources.items()},
+            "model_config": config["model"],
+            "inference_config": inference,
+            "provenance": {
+                "action": action,
+                "parent": parent,
+                "training": completion,
+                "accelerator": backend.name,
+                "cpu_operations": ["clustering", "speaker_assignment"],
+            },
         },
-    }
-    (output / "model_resources.json").write_text(json.dumps(report, indent=2))
+    )

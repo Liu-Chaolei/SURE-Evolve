@@ -1,4 +1,4 @@
-# Complete ordinary + XLab configuration. Full runs are opt-in; use probe_task.py for lightweight checks.
+# Full official-budget training during architecture-only search.
 sure:
   root: ${SURE_EVAL_ROOT}
   pythonpath: ${SURE_EVAL_ROOT}/src
@@ -30,9 +30,11 @@ sure:
     SURE_REQUIRE_CANDIDATE_CHANGES: '1'
     TOKENIZERS_PARALLELISM: 'false'
     WANDB_MODE: offline
+    SURE_RUN_TIMEOUT: '0'
+    ACCELERATE_MIXED_PRECISION: 'no'
   base_models:
     sd_der:
-      model_id: diarizen_v2
+      model_id: diarizen_wavlm_updated_ami
       framework: diarizen
       usage_policy: required
       required_paths:
@@ -45,10 +47,14 @@ sure:
   runtime:
     accelerator: npu
     devices:
-    - ${SURE_DEVICE}
+    - '0'
+    - '1'
+    - '2'
+    - '3'
     python: ${SURE_WORKER_PYTHON}
     precision: fp32
     cpu_threads: 4
+    world_size: 4
   metric_gpu:
     enabled: false
   preflight:
@@ -56,14 +62,17 @@ sure:
   require_training_candidate: true
   execution_contract:
     initialization: fixed baseline for training; round best for inference
-    training_seed: 42
+    training_seed: 3407
     precision: fp32
-    world_size: 1
+    world_size: 4
     candidate_entrypoint: SURE_TASK_WRAPPER
     constraints:
     - Only change registered wrapper parameters.
     - Train only on train; never access holdout during search.
     - Frozen evaluation never trains.
+    training_epochs: 100
+    training_recipe: diarizen.wavlm_updated.v1
+    completion: 100 epochs or validation-loss patience 10
   adapter: sd.diarizen
   require_model_artifact: true
   source_snapshot:
@@ -91,15 +100,46 @@ sure:
   task:
     resources:
       source: ${SURE_DIARIZEN_ROOT}
-      model: ${SURE_DIARIZEN_MODEL}
       embedding: ${SURE_SD_EMBEDDING}
+      wavlm: ${SURE_WAVLM_INIT}
     training:
-      max_steps: 1000
-      learning_rate: 2.0e-05
-      batch_size: 1
+      recipe: diarizen.wavlm_updated.v1
+      epochs: 100
+      learning_rate_wavlm: 2.0e-05
+      learning_rate_network: 0.001
+      batch_size: 16
+      validation_batch_size: 8
+      grad_accumulation_steps: 1
+      chunk_size: 8
+      chunk_shift: 6
+      validation_chunk_shift: 8
+      drop_last: true
+      seed: 3407
+      shuffle_seed: 3407
+      world_size: 4
       freeze_wavlm: false
-      seed: 42
-    inference: {}
+      gradient_percentile: 90
+      gradient_history_size: 1000
+      validation_interval: 1
+      early_stopping_patience: 10
+      lr_decay: false
+      use_one_cycle_lr: false
+      checkpoint_every_updates: 500
+      checkpoint_selection: best5_validation_loss
+      initialization: ssl_backbone_new_diarization_network
+    inference:
+      seg_duration: 8
+      segmentation_step: 0.1
+      batch_size: 32
+      apply_median_filtering: true
+      clustering_method: AgglomerativeClustering
+      min_speakers: 1
+      max_speakers: 20
+      min_cluster_size: 30
+      ahc_threshold: 0.7
+  training_mode: full_during_search
+  data_preparation: ${SURE_SD_DATA}/preparation.json
+  controller_timeout_seconds: 0
 max_research_rounds: 2
 llm:
   openai:

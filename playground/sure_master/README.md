@@ -3,6 +3,7 @@
 > 新运行入口：**ordinary + XLab**；staged_axes 执行引擎已退役。
 > 当前 `search_scope: architecture_only`：每轮四个结构候选，训练和推理设置固定。
 > 正式 ASR 搜索直接使用全量数据训练 30 epoch，选优后只复评，不再重训。
+> TTS/SD 也采用[各自官方完整训练预算](../../docs/zh/sure_master_official_training.md)，包括基线、完成证明和续训。
 > ASR、F5-TTS、DiariZen 的统一配置、数据准备与轻量验证见 [多任务指南](../../docs/zh/sure_master_multitask.md)。
 > CUDA/NPU 运行配置与真实硬件验证状态分开记录；本次不要求完整多轮验收。
 

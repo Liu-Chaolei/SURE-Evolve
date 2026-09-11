@@ -47,8 +47,8 @@ class RuntimeBackend:
             module = getattr(torch, self.name)
             if not module.is_available():
                 raise RuntimeError(f"Requested {self.name} is unavailable; CPU fallback is disabled")
-            module.set_device(0)
-        self.device = torch.device("cpu" if self.name == "cpu" else f"{self.name}:0")
+            module.set_device(int(os.environ.get("LOCAL_RANK", "0")))
+        self.device = torch.device("cpu" if self.name == "cpu" else f"{self.name}:{int(os.environ.get('LOCAL_RANK', '0'))}")
         torch.set_num_threads(int(os.environ.get("SURE_CPU_THREADS", "4")))
 
     def seed(self, seed: int) -> None:

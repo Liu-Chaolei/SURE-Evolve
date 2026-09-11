@@ -18,3 +18,8 @@ toml
 torchinfo
 tqdm
 thop
+
+# Original WavLM-Base+ conversion and strict SSL resource verification.
+transformers>=4.45,<5
+safetensors
+huggingface-hub<1

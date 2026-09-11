@@ -23,7 +23,7 @@ def run(action: str, parameters: dict, artifact: str = "") -> None:
     adapter = get_adapter(name)
     expected = os.environ.get("SURE_CANDIDATE_TYPE_HINT")
     actual = {
-        "baseline": "inference",
+        "baseline": "fine_tune" if name in {"tts.f5tts", "sd.diarizen"} else "inference",
         "infer": "inference",
         "fine_tune": "fine_tune",
         "arch": "arch",

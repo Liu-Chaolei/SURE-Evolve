@@ -5,7 +5,6 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
-import os
 import re
 import shlex
 import subprocess
@@ -73,21 +72,29 @@ def job_state(job: str) -> str:
     return "UNKNOWN"
 
 
-def resource_profile(settings: dict, candidate_type: str) -> dict:
+def resource_profile(settings: dict, candidate_type: str, *, adapter: str = "asr.zipformer", accelerator: str = "npu") -> dict:
     training = candidate_type != "inference"
-    defaults = (
-        dict(npu=8, cpu=160, memory="1000G", temporary="1T", shm="128g")
-        if training
-        else dict(npu=1, cpu=20, memory="128G", temporary="100G", shm="32g")
-    )
-    defaults.update(
-        settings.get("resource_profiles", {}).get(
-            "training" if training else "inference", {}
-        )
-    )
-    if training and int(defaults["npu"]) != 8:
-        raise ValueError("Production TEDLIUM training requires eight allocated NPUs")
+    counts = {"asr.zipformer": 8, "tts.f5tts": 1, "sd.diarizen": 4}
+    if adapter not in counts:
+        raise ValueError(f"No training allocation for {adapter}")
+    count = counts[adapter] if training else 1
+    defaults = (dict(npu=count, cpu=20*count, memory="1000G" if adapter == "asr.zipformer" else "256G", temporary="1T", shm="128g")
+                if training else dict(npu=1, cpu=20, memory="128G", temporary="100G", shm="32g"))
+    defaults.update(settings.get("resource_profiles", {}).get("training" if training else "inference", {}))
+    if int(defaults["npu"]) != count:
+        raise ValueError(f"{adapter} {'training' if training else 'inference'} requires {count} allocated devices")
+    defaults["accelerator"] = accelerator
     return defaults
+
+
+def device_gres(settings: dict, profile: dict) -> str:
+    backend = profile.get("accelerator", "npu")
+    if backend == "npu":
+        return f"gpu:ascend910b3:{profile['npu']}"
+    if backend == "cuda":
+        kind = settings.get("cuda_gpu_type")
+        return f"gpu:{kind}:{profile['npu']}" if kind else f"gpu:{profile['npu']}"
+    raise ValueError("Slurm model jobs require CUDA or NPU")
 
 
 def batch_script(settings: dict, request: Path, workspace: Path, profile: dict) -> str:
@@ -97,7 +104,7 @@ def batch_script(settings: dict, request: Path, workspace: Path, profile: dict) 
     argv = [
         "srun",
         "--ntasks=1",
-        f"--gres=gpu:ascend910b3:{profile['npu']}",
+        f"--gres={device_gres(settings, profile)}",
         "sudo",
         "-n",
         "slurm-docker-run",
@@ -132,7 +139,10 @@ def run_candidate(exp) -> dict:
     sure = config["sure"]
     settings = sure["slurm"]
     workspace = Path(exp.workspace_path).resolve()
-    profile = resource_profile(settings, exp.candidate_type_hint)
+    task = sure.get("task_id", "asr_en_wer").split("_", 1)[0]
+    adapter = sure.get("adapter") or {"asr":"asr.zipformer", "tts":"tts.f5tts", "sd":"sd.diarizen"}[task]
+    profile = resource_profile(settings, exp.candidate_type_hint, adapter=adapter,
+                               accelerator=sure.get("runtime", {}).get("accelerator", "npu"))
     context = json.loads(
         (workspace / "metric/remote_candidate_context.json").read_text()
     )
@@ -149,16 +159,13 @@ def run_candidate(exp) -> dict:
     env.update(
         SURE_FRAMEWORK_DIGEST=source_digest(), SURE_RUNTIME_IMAGE=settings["image"]
     )
-    env.update(
-        ASR_WORLD_SIZE=str(profile["npu"]),
-        SURE_BASELINE_WORLD_SIZE=str(profile["npu"]),
-        SURE_WORKER_PYTHON="python",
-        SURE_ICEFALL_PYTHON="python",
-        SURE_CANDIDATE_PYTHON="python",
-        SURE_CPU_THREADS="8",
-        OMP_NUM_THREADS="8",
-        MKL_NUM_THREADS="8",
-    )
+    env.update(SURE_ALLOCATED_DEVICES=str(profile["npu"]),
+               SURE_WORKER_PYTHON="python", SURE_CANDIDATE_PYTHON="python",
+               SURE_CPU_THREADS="8", OMP_NUM_THREADS="8", MKL_NUM_THREADS="8")
+    if adapter == "asr.zipformer":
+        env.update(ASR_WORLD_SIZE=str(profile["npu"]), SURE_BASELINE_WORLD_SIZE=str(profile["npu"]), SURE_ICEFALL_PYTHON="python")
+    elif adapter == "tts.f5tts":
+        env["SURE_TTS_PYTHON"] = "python"
     # No controller LLM settings or credentials in the worker request.
     worker_sure = {
         k: v
@@ -219,7 +226,7 @@ def run_candidate(exp) -> dict:
                     f"--cpus-per-task={profile['cpu']}",
                     f"--mem={profile['memory']}",
                     f"--tmp={profile['temporary']}",
-                    f"--gres=gpu:ascend910b3:{profile['npu']}",
+                    f"--gres={device_gres(settings, profile)}",
                     "--time",
                     settings.get("time_limit", "1-00:00:00"),
                     "--job-name",
@@ -267,7 +274,7 @@ def run_candidate(exp) -> dict:
                         f"--cpus-per-task={profile['cpu']}",
                         f"--mem={profile['memory']}",
                         f"--tmp={profile['temporary']}",
-                        f"--gres=gpu:ascend910b3:{profile['npu']}",
+                        f"--gres={device_gres(settings, profile)}",
                         "--time",
                         settings.get("time_limit", "1-00:00:00"),
                         "--job-name",

@@ -33,3 +33,9 @@ probe JSON and `pip freeze` alongside the exact container image digest.
 F5 and DiariZen workspace adapters use SoundFile for WAV loading and audio metadata,
 so the model path does not depend on torchaudio 2.10's TorchCodec/FFmpeg ABI. These
 are CPU I/O operations; neural tensors are explicitly moved to the selected device.
+
+Full-budget TTS uses one process; official DiariZen training uses four processes
+on both CUDA and NPU. The generic Slurm resource selector now distinguishes these
+from the existing eight-NPU ASR profile. DiariZen uses the WavLM-updated recipe
+and a converted original WavLM-Base+ SSL resource, not the pruned v2 task checkpoint.
+See `docs/zh/sure_master_official_training.md` for completion and resume checks.

@@ -72,87 +72,99 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
         raise ValueError(
             f"Unsupported F5 inference configuration: {sorted(set(inference) - INFERENCE_KEYS)}"
         )
-    train = {**settings.get("training", {}), **parameters.get("training", {})}
+    train = dict(settings.get("training", {}))
+    if parameters.get("training"):
+        raise ValueError("Official full-training settings are fixed across candidates")
     env = os.environ.copy()
     env.update(
-        SURE_TTS_ROOT=str(root),
-        SURE_TTS_PYTHON=sys.executable,
-        SURE_TTS_BASE_CKPT_FILE=str(resources["checkpoint"]),
-        SURE_TTS_VOCAB_FILE=str(resources["vocab"]),
-        SURE_TTS_ACCELERATE_MIXED_PRECISION="no",
-        ACCELERATE_MIXED_PRECISION="no",
-        ACCELERATE_TORCH_DEVICE=str(backend.device),
-        SURE_TTS_TRAIN_SEED=str(train.get("seed", 42)),
+        SURE_TTS_TRAIN_SEED=str(train.get("seed", 42)), SURE_TTS_PYTHON=sys.executable
     )
-    # Training always starts from configured fixed resources, never from the parent.
-    if action in {"fine_tune", "arch"}:
-        cap = int(settings.get("training", {}).get("max_steps", 1000))
-        train_manifest = Path(train["manifest"]).resolve()
-        env["SURE_TRAIN_MANIFESTS_JSON"] = json.dumps(
-            {train_manifest.parent.name: str(train_manifest)}
-        )
-        env["SURE_TRAIN_MAX_STEPS"] = str(cap)
-        script = (
-            "run_f5tts_finetune.py"
-            if action == "fine_tune"
-            else "run_f5tts_arch_finetune.py"
-        )
-        out = Path(
-            "models/f5tts_finetune" if action == "fine_tune" else "models/f5tts_arch"
-        )
-        command = [
-            sys.executable,
-            str(TOOLS / script),
-            "--action",
-            "finetune_short" if action == "fine_tune" else "arch_finetune_short",
-            "--f5-root",
-            str(root),
-            "--base-ckpt",
-            str(resources["checkpoint"]),
-            "--vocab-file",
-            str(resources["vocab"]),
-            "--train-data-root",
-            str(train_manifest.parent.parent),
-            "--train-manifest",
-            train_manifest.parent.name,
-            "--max-steps",
-            str(cap),
-            "--seed",
-            str(train.get("seed", 42)),
-            "--reuse-existing",
-            "0",
-            "--output-dir",
-            str(out),
-        ]
-        for key in TRAIN_KEYS:
-            if key in train and (key != "freeze_policy" or action == "fine_tune"):
-                command.extend(["--" + key.replace("_", "-"), str(train[key])])
-        if action == "arch":
-            command.extend(
-                [
-                    "--init-mode",
-                    "partial_load",
-                    "--match-threshold",
-                    "0.70",
-                    "--early-stop",
-                    "0",
-                ]
+    completion = None
+    if action in {"baseline", "fine_tune", "arch"}:
+        from ..core.training import validate_training_config
+        from ..runtime.training_sources import prepare_f5_training_source
+        from .training_jobs import run_training
+
+        validate_training_config("tts.f5tts", train)
+        defaults = yaml.safe_load(model_cfg.read_text())
+        model_config = yaml.safe_load(model_cfg.read_text())
+        changes = parameters.get("architecture", {})
+        if action == "arch" and (
+            not changes
+            or all(
+                model_config["model"]["arch"].get(k) == v for k, v in changes.items()
             )
-            if not parameters.get("architecture"):
-                raise ValueError(
-                    "Architecture candidate must declare structural changes"
-                )
-            for key, value in parameters["architecture"].items():
-                command.extend(
-                    [
-                        "--" + key.replace("_", "-"),
-                        str(int(value)) if isinstance(value, bool) else str(value),
-                    ]
-                )
-        subprocess.run(command, env=env, check=True)
-        resources["checkpoint"] = (out / "final_checkpoint.pt").resolve()
-        if action == "arch":
-            model_cfg = (out / "model_cfg.yaml").resolve()
+        ):
+            raise ValueError("Architecture candidate must change model structure")
+        if set(changes) - ARCH_KEYS:
+            raise ValueError("Unsupported F5 architecture parameter")
+        from ..core.search_scope import execution_contract
+        from .adapters import TtsAdapter
+
+        allowed = execution_contract(TtsAdapter().context(), {})[
+            "candidate_parameters"
+        ]["architecture"]
+        for key, value in changes.items():
+            if key not in allowed or value not in allowed[key]:
+                raise ValueError(f"Unsupported F5 structure setting: {key}={value}")
+            model_config["model"]["arch"][key] = (
+                None if key == "qk_norm" and value == "none" else value
+            )
+        prepare_f5_training_source(root)
+        completion, evidence = run_training(
+            "tts.f5tts",
+            settings,
+            model_config["model"]["arch"],
+            root,
+            backend,
+            Path("models/f5tts_training"),
+            structural=action == "arch",
+        )
+        resources["checkpoint"] = evidence / "final_checkpoint.pt"
+        model_cfg = evidence / "model_cfg.yaml"
+        model_cfg.write_text(yaml.safe_dump(model_config, sort_keys=False))
+        resources["training_evidence"] = evidence
+        from ..runtime.official_trainers import checkpoint_identity
+        from ..runtime.training_state import atomic_json
+
+        completion["checkpoints"]["model_cfg"] = checkpoint_identity(
+            evidence, model_cfg
+        )
+        atomic_json(evidence / "training_completion.json", completion)
+        Path("artifacts").mkdir(exist_ok=True)
+        record = {
+            "candidate_type": "arch" if action == "arch" else "fine_tune",
+            "idea_text": json.dumps(parameters),
+            "changed_fields": [f"arch_config.{key}" for key in changes],
+            "arch_config": model_config["model"]["arch"],
+            "training_config": {
+                **train,
+                "epochs_completed": completion["epochs_completed"],
+                "action": "finetune_full",
+            },
+            "inference_config": inference,
+            "defaults": {"arch_config": defaults["model"]["arch"]},
+            "diff_from_defaults": {
+                "arch_config": {
+                    key: {"default": defaults["model"]["arch"].get(key), "value": value}
+                    for key, value in changes.items()
+                }
+            },
+            "produced_artifacts": {"final_checkpoint": str(resources["checkpoint"])},
+        }
+        atomic_json(Path("artifacts/candidate_changes.json"), record)
+    elif saved:
+        from ..core.training import require_completion
+
+        if "training_evidence" not in resources:
+            raise ValueError(
+                "Legacy short-trained F5 artifact has no full-training proof"
+            )
+        completion = require_completion(
+            resources["training_evidence"] / "training_completion.json"
+        )
+    elif os.environ.get("SURE_COMPONENT_TEST") != "1":
+        raise ValueError("F5 inference requires a completed training artifact")
     eval_manifest = os.environ["SURE_EVAL_MANIFEST"]
     language = settings.get("language", "zh")
     command = [
@@ -184,15 +196,15 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
         str(resources["vocoder"]),
         "--candidate-type",
         {
-            "baseline": "inference",
+            "baseline": "fine_tune",
             "infer": "inference",
             "fine_tune": "fine_tune",
             "arch": "arch",
         }[action],
         "--training-action",
-        "finetune_short" if action == "fine_tune" else "no_train",
+        "finetune_full" if action in {"baseline", "fine_tune"} else "no_train",
         "--arch-action",
-        "arch_finetune_short" if action == "arch" else "no_arch",
+        "arch_finetune_full" if action == "arch" else "no_arch",
     ]
     for key, value in inference.items():
         command.extend(
@@ -210,7 +222,7 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
         "provenance": {
             "action": action,
             "parent": parent,
-            "training": train if action in {"fine_tune", "arch"} else {},
+            "training": completion or {},
             "accelerator": backend.name,
             "cpu_operations": ["vocoder", "mel_spectrogram"]
             if backend.name == "npu"
