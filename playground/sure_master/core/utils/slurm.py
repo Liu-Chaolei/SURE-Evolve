@@ -110,6 +110,8 @@ def batch_script(settings: dict, request: Path, workspace: Path, profile: dict) 
         "slurm-docker-run",
         "--pull",
         "missing",
+        "--network",
+        "host",
         "--shm-size",
         profile["shm"],
         "--mount",
@@ -133,12 +135,21 @@ def batch_script(settings: dict, request: Path, workspace: Path, profile: dict) 
 
 
 def run_candidate(exp) -> dict:
+    from ...runtime.training_budget import check_run_pause, TrainingBudgetPaused
     config = (
         exp.config.model_dump() if hasattr(exp.config, "model_dump") else exp.config
     )
     sure = config["sure"]
     settings = sure["slurm"]
     workspace = Path(exp.workspace_path).resolve()
+    check_run_pause(workspace)
+
+    def read_result(path):
+        payload = json.loads(path.read_text())
+        if payload.get("reason_code") == "budget_paused":
+            atomic_json(workspace.parent / "metric/budget_pause.json", payload)
+            raise TrainingBudgetPaused(f"Training budget paused; see {path}")
+        return payload
     task = sure.get("task_id", "asr_en_wer").split("_", 1)[0]
     adapter = sure.get("adapter") or {"asr":"asr.zipformer", "tts":"tts.f5tts", "sd":"sd.diarizen"}[task]
     profile = resource_profile(settings, exp.candidate_type_hint, adapter=adapter,
@@ -198,7 +209,7 @@ def run_candidate(exp) -> dict:
     with (root / "lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if result.is_file():
-            return json.loads(result.read_text())
+            return read_result(result)
         if receipt.exists():
             record = json.loads(receipt.read_text())
             if not record.get("job_id") or record.get("next_submission_pending"):
@@ -243,7 +254,7 @@ def run_candidate(exp) -> dict:
     job = record["job_id"]
     while True:
         if result.exists():
-            return json.loads(result.read_text())
+            return read_result(result)
         state = job_state(job)
         record.update(status=state or "accounting_pending", checked_at=time.time())
         atomic_json(receipt, record)

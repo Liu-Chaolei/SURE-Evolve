@@ -68,6 +68,7 @@ from ..tasks import get_adapter
 from .datasets import split_specs
 from .artifacts import load_bundle
 from .search_scope import execution_contract as scoped_execution_contract
+from ..runtime.training_budget import TrainingBudgetPaused, check_run_pause
 
 
 _NO_GPU_SENTINELS = {"", "none", "null", "false", "cpu", "-1"}
@@ -1849,6 +1850,10 @@ class SureMasterPlayground(BasePlayground):
                 "timeout_seconds": RUN_TIMEOUT_SECONDS,
                 "wisdom_promotion_result": wisdom_result,
             }
+        except TrainingBudgetPaused as e:
+            self.logger.warning("Training paused: %s", e)
+            return {"status": "paused_budget", "error": str(e),
+                    "best_score": self.best_score}
         except XlabIdeaClientError as e:
             self.logger.error("XLab operation is incomplete: %s", e, exc_info=True)
             return {"status": "incomplete", "steps": 0, "error": str(e),
@@ -1932,6 +1937,7 @@ class SureMasterPlayground(BasePlayground):
                                 for name in ("artifacts", "models", "metric", "working"):
                                     os.makedirs(os.path.join(exp_workspace, name), exist_ok=True)
                                 self.session.set_workspace_path(exp_workspace)
+                                check_run_pause(Path(exp_workspace))
                                 self.logger.info(
                                     "Exp %s using workspace: %s; resource_index=%s",
                                     parallel_index,
@@ -1966,6 +1972,8 @@ class SureMasterPlayground(BasePlayground):
                     index = future_to_index[future]
                     try:
                         results[index] = future.result()
+                    except TrainingBudgetPaused:
+                        raise
                     except Exception as exc:
                         self.logger.error("Task %s generated an exception: %s", index, exc)
                         results[index] = exc

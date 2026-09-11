@@ -100,7 +100,8 @@ def main():
             card,
             base_model_profile=profile,
             metric_runner=SureMetricRunner(
-                sure["root"], sure.get("pythonpath"), device="cpu"
+                sure["root"], sure.get("pythonpath"), device="cpu",
+                python=(sure.get("metric_runtime") or {}).get("python"),
             ),
             execution_env=env,
         )
@@ -113,22 +114,29 @@ def main():
         # Restarting the same candidate must not apply its source edits twice.
         import shutil
 
-        recipe = workspace / "base_model/recipe"
-        pristine = args.request.parent / "pristine_recipe"
-        if not pristine.exists():
-            shutil.copytree(
-                recipe,
-                pristine,
-                symlinks=False,
-                ignore=shutil.ignore_patterns("data", "exp", "__pycache__"),
-            )
-        if recipe.is_symlink():
-            recipe.unlink()
-        elif recipe.exists():
-            shutil.rmtree(recipe)
-        shutil.copytree(pristine, recipe, symlinks=False)
+        if card.canonical_task == "asr":
+            recipe = workspace / "base_model/recipe"
+            pristine = args.request.parent / "pristine_recipe"
+            if not pristine.exists():
+                shutil.copytree(
+                    recipe,
+                    pristine,
+                    symlinks=False,
+                    ignore=shutil.ignore_patterns("data", "exp", "__pycache__"),
+                )
+            if recipe.is_symlink():
+                recipe.unlink()
+            elif recipe.exists():
+                shutil.rmtree(recipe)
+            shutil.copytree(pristine, recipe, symlinks=False)
         exp._prepare_workspace_inputs(roles)
         success, score, details = exp._execute_and_score(request["code"], roles)
+        pause = workspace / "models/diarizen_training/budget_pause.json"
+        if pause.exists():
+            atomic_json(result_path, {"success": False, "score": None,
+                        "reason_code": "budget_paused", "pause": json.loads(pause.read_text()),
+                        "job_id": os.environ.get("SLURM_JOB_ID")})
+            return
         atomic_json(
             result_path,
             {

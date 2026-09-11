@@ -10,6 +10,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from functools import partial
 
 from ..runtime.model_source import snapshot_source, prepare_audio_io
 
@@ -33,6 +34,17 @@ ARCH_VALUES = {
     "ffn_hidden": {512, 768, 1024, 1536},
     "kernel_size": {15, 31, 63},
 }
+
+
+def mono_collate(batch, *, native_collate, max_speakers_per_chunk=4):
+    """Match inference's first-channel SDM policy before stacking mixed audio."""
+    result = native_collate(
+        [(audio[:1], labels, name) for audio, labels, name in batch],
+        max_speakers_per_chunk=max_speakers_per_chunk,
+    )
+    # Ascend MSE does not promote uint8 targets; binary labels are exact in FP32.
+    result["ts"] = result["ts"].float()
+    return result
 
 
 def rows(path: Path) -> list[dict]:
@@ -128,7 +140,7 @@ def _dataset(
     )
     if not len(dataset):
         raise ValueError("No usable SD training chunks")
-    return dataset, module._collate_fn
+    return dataset, partial(mono_collate, native_collate=module._collate_fn)
 
 
 def _loss(model, batch, device):
@@ -280,7 +292,15 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
     embedding = Path("working/pyannote_embedding/pytorch_model.bin").resolve()
     embedding.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(resources["embedding"], embedding)
-    pipeline = DiariZenPipeline(local, str(embedding), rttm_out_dir=None)
+    # This official embedding checkpoint contains these pyannote metadata types.
+    # Keep weights-only loading enabled on modern Torch instead of unpickling arbitrary globals.
+    import torch
+    from pyannote.audio.core.task import Specifications, Problem, Resolution
+
+    with torch.serialization.safe_globals([
+        torch.torch_version.TorchVersion, Specifications, Problem, Resolution,
+    ]):
+        pipeline = DiariZenPipeline(local, str(embedding), rttm_out_dir=None)
     backend.verify_model(pipeline._segmentation.model)
     if hasattr(pipeline._embedding, "model_"):
         backend.verify_model(pipeline._embedding.model_)

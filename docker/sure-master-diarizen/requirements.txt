@@ -1,0 +1,46 @@
+# Install the repository's custom pyannote-audio, not the unrelated latest wheel.
+accelerate==1.6.0
+einops
+flit
+h5py
+joblib
+tensorboard
+librosa>=0.10,<1
+matplotlib
+numpy==1.26.4
+onnxruntime
+pandas
+PyYAML
+scipy
+soundfile
+tabulate
+toml
+torchinfo
+tqdm
+thop
+
+# Original WavLM-Base+ conversion and strict SSL resource verification.
+transformers>=4.45,<5
+safetensors
+huggingface-hub<1
+asteroid-filterbanks >=0.4
+einops >=0.6.0
+huggingface_hub >= 0.13.0
+lightning >= 2.0.1
+omegaconf >=2.1,<3.0
+pyannote.core == 5.0.0
+pyannote.database == 5.1.3
+pyannote.metrics == 3.2.1
+pyannote.pipeline == 3.0.1
+pytorch_metric_learning >= 2.1.0
+rich >= 12.0.0
+semver >= 3.0.0
+soundfile >= 0.12.1
+speechbrain >= 0.5.14
+tensorboardX >= 2.6
+torch >= 2.0.0
+torch_audiomentations >= 0.11.0
+torchaudio >= 2.1.1
+torchmetrics >= 0.11.0
+
+setuptools<82

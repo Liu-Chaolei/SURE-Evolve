@@ -56,9 +56,9 @@ def freeze(config_path: Path, output: Path) -> tuple[Path, Path]:
         return value
 
     config = relocate(config)
-    config["sure"]["execution_env"]["PYTHONPATH"] = (
-        str(snapshot) + ":/shared/chaolei.liu/ASR/icefall"
-    )
+    config["sure"]["execution_env"]["PYTHONPATH"] = str(snapshot)
+    if config["sure"].get("task_id", "").startswith("asr_"):
+        config["sure"]["execution_env"]["PYTHONPATH"] += ":/shared/chaolei.liu/ASR/icefall"
     config["sure"]["slurm"]["shared_root"] = "/shared/chaolei.liu"
     target = output / "deployment.yaml"
     if target.exists() and yaml.safe_load(target.read_text()) != config:

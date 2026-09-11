@@ -297,7 +297,9 @@ def sd_train(job):
     trainer = cls(
         accelerator=accelerator,
         config=config,
-        resume=True,
+        # Native resume asserts pre-existing native checkpoint directories. Our
+        # transactional TrainingStateStore owns restoration, including first launch.
+        resume=False,
         model=model,
         optimizer_small=optimizer_small,
         optimizer_big=optimizer_big,
@@ -311,8 +313,10 @@ def main():
     args = parser.parse_args()
     job = json.loads(args.job.read_text())
     validate_training_config(job["adapter"], job["contract"]["training"])
-    if job["contract"]["component_test"]:
-        raise ValueError("This worker only runs official full training")
+    if job["contract"]["component_test"] and job["adapter"] != "sd.diarizen":
+        raise ValueError("Component training probes are only implemented for DiariZen")
+    if job["contract"]["component_test"] and not 1 <= int(os.environ.get("SURE_SD_PROBE_UPDATES", "0")) <= 1000:
+        raise ValueError("SD component probes require a bounded update count")
     source = Path(job["source"])
     if job["contract"]["backend"] == "npu":
         import torch_npu  # noqa: F401

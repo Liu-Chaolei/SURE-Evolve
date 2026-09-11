@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import os
+import time
 from pathlib import Path
 
 from ..core.artifacts import file_digest
@@ -265,6 +267,40 @@ def sd_trainer_class(native):
                     extra={"grad_history": self.grad_history},
                 )
 
+            from .training_budget import estimate_training_seconds, TrainingBudgetPaused
+            limit = float(os.environ.get("SURE_TRAIN_BUDGET_SECONDS", "0"))
+            component = bool(contract.get("component_test")) and "SURE_SD_PROBE_UPDATES" in os.environ
+            probe_updates = int(os.environ.get("SURE_SD_PROBE_UPDATES", "120"))
+            timing = progress.setdefault("timing", {}) if limit > 0 or component else {}
+            session_update = progress["updates"]
+            measured_start = None
+            measured_updates = session_update
+            session_start = time.monotonic()
+            prior_elapsed = float(timing.get("elapsed_seconds", 0))
+
+            def timing_report():
+                timing["elapsed_seconds"] = prior_elapsed + time.monotonic() - session_start
+                per_update = timing.get("seconds_per_update")
+                if per_update is None:
+                    return None
+                report = {**timing, "status": "measured", "world_size": self.accelerator.num_processes,
+                          "epochs": self.max_epochs, "batches_per_epoch": batches,
+                          "updates": progress["updates"], "limit_seconds": limit}
+                estimate = estimate_training_seconds(per_update, batches, self.max_epochs,
+                                                     timing.get("validation_seconds", 0))
+                report["estimated_seconds"] = estimate
+                if self.accelerator.is_main_process:
+                    atomic_json(output / "timing.json", report)
+                paused = bool(limit > 0 and (estimate > limit or timing["elapsed_seconds"] > limit))
+                paused = broadcast_value(paused, self.accelerator)
+                if paused and not component:
+                    save()
+                    if self.accelerator.is_main_process:
+                        atomic_json(output / "budget_pause.json", {**report, "status": "paused_budget"})
+                    self.accelerator.wait_for_everyone()
+                    raise TrainingBudgetPaused("Estimated full training exceeds the operational budget")
+                return report
+
             if restored is None:
                 save()
             for epoch in range(progress["epoch"], self.max_epochs):
@@ -299,6 +335,37 @@ def sd_trainer_class(native):
                         epoch=epoch, batch=index + 1, updates=progress["updates"] + 1
                     )
                     self.state.steps_trained = progress["updates"]
+                    if progress["updates"] == session_update + 20:
+                        self.accelerator.wait_for_everyone()
+                        measured_start, measured_updates = time.monotonic(), progress["updates"]
+                    if measured_start is not None and progress["updates"] - measured_updates >= 100:
+                        self.accelerator.wait_for_everyone()
+                        timing["seconds_per_update"] = (time.monotonic() - measured_start) / (progress["updates"] - measured_updates)
+                        measured_start, measured_updates = time.monotonic(), progress["updates"]
+                        timing_report()
+                    if component and progress["updates"] >= probe_updates:
+                        validation_start = time.monotonic()
+                        score = broadcast_value(self.validate(validation_loader), self.accelerator)
+                        if not math.isfinite(score):
+                            raise FloatingPointError("Nonfinite probe validation")
+                        timing["validation_seconds"] = time.monotonic() - validation_start
+                        if hasattr(self.unwrap_model, "validation_metric"):
+                            self.unwrap_model.validation_metric.reset()
+                        report = timing_report() or dict(timing)
+                        # DDP synchronizes parameters: check a common parameter on every rank.
+                        param = next(self.accelerator.unwrap_model(self.model).parameters()).detach()
+                        signature = self.accelerator.gather(param.float().sum().reshape(1))
+                        if not torch.allclose(signature, signature[0].expand_as(signature)):
+                            raise RuntimeError("Probe parameters differ across ranks")
+                        save()
+                        if self.accelerator.is_main_process:
+                            atomic_json(output / "probe_result.json", {
+                                **report, "status": "passed", "component_test": True,
+                                "restored": restored is not None, "updates": progress["updates"],
+                                "validation_loss": score, "rank_parameter_sums": signature.cpu().tolist(),
+                                "world_size": self.accelerator.num_processes})
+                        self.accelerator.wait_for_everyone()
+                        return
                     if (
                         progress["updates"]
                         % contract["training"]["checkpoint_every_updates"]
@@ -320,8 +387,10 @@ def sd_trainer_class(native):
                     )
                 self.accelerator.wait_for_everyone()
                 validation_loader.set_epoch(epoch)
+                validation_start = time.monotonic()
                 score = self.validate(validation_loader)
                 score = broadcast_value(score, self.accelerator)
+                timing["validation_seconds"] = time.monotonic() - validation_start
                 if hasattr(self.unwrap_model, "validation_metric"):
                     self.unwrap_model.validation_metric.reset()
                 if not math.isfinite(score):
@@ -336,6 +405,8 @@ def sd_trainer_class(native):
                     }
                 )
                 progress.update(epoch=epoch + 1, batch=0)
+                timing_report()
+                measured_start, measured_updates = time.monotonic(), progress["updates"]
                 save()
             if self.accelerator.is_main_process:
                 self.finish_full(progress, output, contract)
