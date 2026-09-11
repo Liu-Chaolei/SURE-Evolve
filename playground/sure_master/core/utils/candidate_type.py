@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import re
 from typing import Any
@@ -108,7 +109,23 @@ def candidate_type_from_idea(idea: Any, default: str = INFERENCE) -> str:
 
 
 def candidate_type_from_code(code: str, default: str = INFERENCE) -> str:
-    """Force candidates that call known training or architecture entrypoints."""
+    """Classify explicit wrapper actions before inherited architecture arguments."""
+    if "SURE_TASK_WRAPPER" in code or "SURE_ASR_ZIPFORMER_WRAPPER" in code:
+        try:
+            tree = ast.parse(code)
+            actions = set()
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.List, ast.Tuple)):
+                    values = [item.value if isinstance(item, ast.Constant) else None for item in node.elts]
+                    actions.update(values[i + 1] for i, value in enumerate(values[:-1]) if value == "--action" and isinstance(values[i + 1], str))
+            if actions and actions <= {"infer", "decode_only"}:
+                return INFERENCE
+            if "arch" in actions:
+                return ARCH
+            if actions & {"fine_tune", "train_decode"}:
+                return ARCH if any(marker in code for marker in _ARCH_CODE_MARKERS) else FINE_TUNE
+        except SyntaxError:
+            pass
     if any(marker in code for marker in _ARCH_CODE_MARKERS):
         return ARCH
     if any(marker in code for marker in _FINE_TUNE_CODE_MARKERS):

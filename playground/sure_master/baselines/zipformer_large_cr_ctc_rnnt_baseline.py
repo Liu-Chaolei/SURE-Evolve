@@ -33,6 +33,7 @@ from playground.sure_master.baselines.asr_profiles import (
 
 WORKSPACE = Path.cwd()
 RECIPE_DIR = Path("base_model/recipe")
+SOURCE_RECIPE_DIR = RECIPE_DIR
 ICEFALL_ROOT = Path("base_model/root")
 DATA_DIR = Path("base_model/data")
 ARTIFACTS_DIR = Path("artifacts")
@@ -252,6 +253,8 @@ def bounded_train_max_duration() -> int:
 
 
 def ensure_workspace() -> None:
+    global RECIPE_DIR, SOURCE_RECIPE_DIR
+    SOURCE_RECIPE_DIR = RECIPE_DIR
     for path in (ARTIFACTS_DIR, MODELS_DIR, WORKING_DIR):
         path.mkdir(parents=True, exist_ok=True)
     if not RECIPE_DIR.exists():
@@ -261,8 +264,30 @@ def ensure_workspace() -> None:
     if not DATA_DIR.exists():
         raise FileNotFoundError(f"Missing required icefall data symlink: {DATA_DIR}")
     data_link = Path("data")
+    if data_link.is_symlink():
+        # A previous Slurm allocation's /local/job has already been removed.
+        data_link.unlink()
     if not data_link.exists():
         data_link.symlink_to(DATA_DIR, target_is_directory=True)
+    if truthy(os.environ.get("SURE_ASR_EVAL_REF_ONLY")):
+        from playground.sure_master.runtime.data_view import evaluation_data_view
+        view = evaluation_data_view(DATA_DIR, WORKING_DIR / "eval_data", Path("input/ref.txt"), parse_eval_splits(),
+                                    include_train=os.environ.get("SURE_ASR_EXECUTION_ACTION") != "decode_only")
+        if not data_link.is_symlink():
+            raise ValueError("Evaluation filtering requires a workspace-local data symlink")
+        data_link.unlink()
+        data_link.symlink_to(view.resolve(), target_is_directory=True)
+    if truthy(os.environ.get("SURE_STAGE_DATA")):
+        from playground.sure_master.runtime.staging import stage_view
+        staged = stage_view(data_link.resolve())
+        data_link.unlink()
+        data_link.symlink_to(staged, target_is_directory=True)
+    if os.environ.get("SURE_ACCELERATOR") == "npu":
+        from playground.sure_master.runtime.accelerator import prepare_npu_recipe
+        RECIPE_DIR = prepare_npu_recipe(RECIPE_DIR, WORKING_DIR / "npu_recipe")
+    elif os.environ.get("SURE_ACCELERATOR") == "cpu":
+        from playground.sure_master.runtime.accelerator import prepare_cpu_recipe
+        RECIPE_DIR = prepare_cpu_recipe(RECIPE_DIR, WORKING_DIR / "cpu_recipe")
 
 
 def command_env(extra_env: dict[str, str] | None = None) -> dict[str, str]:
@@ -299,7 +324,7 @@ def run_command(
             start_new_session=True,
         )
         try:
-            return_code = process.wait(timeout=timeout)
+            return_code = process.wait(timeout=timeout if timeout and timeout > 0 else None)
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGTERM)
             try:
@@ -314,6 +339,8 @@ def run_command(
 
 
 OOM_LOG_PATTERNS = (
+    "npu out of memory",
+    "acl error: 207001",
     "cuda out of memory",
     "torch.cuda.outofmemoryerror",
     "cuda error: out of memory",
@@ -445,6 +472,21 @@ def _file_fingerprint(path: Path) -> dict[str, object]:
 
 
 def _gpu_signature() -> dict[str, object]:
+    if os.environ.get("SURE_ACCELERATOR") == "npu":
+        with tempfile.TemporaryFile(mode="w+") as output:
+            query = subprocess.run(
+                [os.environ.get("SURE_ICEFALL_PYTHON", sys.executable), "-c",
+                 "import torch,torch_npu,json; p=torch.npu.get_device_properties(0); "
+                 "print(json.dumps([torch.npu.get_device_name(0),p.total_memory//(1024*1024)]))"],
+                stdout=output, stderr=subprocess.STDOUT, text=True, check=False, timeout=60,
+            )
+            output.seek(0)
+            text = output.read()
+        if query.returncode:
+            raise RuntimeError("NPU memory query failed: " + text[-2000:])
+        name, total = json.loads(text.strip().splitlines()[-1])
+        return {"accelerator": "npu", "gpus": [f"{name}, {total}"],
+                "visible_devices": os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")}
     try:
         with tempfile.TemporaryFile(mode="w+") as output:
             subprocess.run(
@@ -609,6 +651,7 @@ def write_resource_profile(
         "timestamp": time.time(),
         "recipe": "zipformer_large_cr_ctc_rnnt",
         "architecture_signature": architecture_signature(),
+        "runtime": {"recipe_source": str(SOURCE_RECIPE_DIR), "accelerator": os.environ.get("SURE_ACCELERATOR", "cuda")},
         "world_size": world_size(),
         "use_fp16": fp16 == "1",
         "train_epochs": train_epochs,
@@ -837,7 +880,7 @@ def write_official_baseline_record(epoch: int, elapsed_seconds: float) -> None:
         "avg": decode_avg(epoch),
         "use_averaged_model": decode_uses_averaged_model(epoch),
         "bpe_model": str(decode_bpe_model_path()),
-        "decoding_method": "modified_beam_search",
+        "decoding_method": os.environ.get("SURE_DECODE_METHOD", "modified_beam_search"),
         "eval_splits": parse_eval_splits(),
         "train_args": large_cr_ctc_rnnt_train_args(),
         "elapsed_seconds": elapsed_seconds,
@@ -1048,6 +1091,8 @@ def build_train_command(
         str(train_epochs),
         "--start-epoch",
         "1",
+        "--seed",
+        str(int_env("SURE_ASR_FIXED_SEED", 42)),
         "--use-fp16",
         fp16,
         "--exp-dir",
@@ -1333,7 +1378,7 @@ def build_decode_command(epoch: int, decode_script: Path, decode_max_duration: i
         "--max-duration",
         str(decode_max_duration),
         "--decoding-method",
-        "modified_beam_search",
+        os.environ.get("SURE_DECODE_METHOD", "modified_beam_search"),
         *large_cr_ctc_rnnt_decode_args(),
     ]
 
@@ -1349,7 +1394,7 @@ def decode(epoch: int) -> None:
     run_decode_with_selector(
         command=command,
         epoch=epoch,
-        decode_method="modified_beam_search",
+        decode_method=os.environ.get("SURE_DECODE_METHOD", "modified_beam_search"),
         decode_args=large_cr_ctc_rnnt_decode_args(),
         bpe_model=decode_bpe_model_path(),
         exp_dir=MODELS_DIR,

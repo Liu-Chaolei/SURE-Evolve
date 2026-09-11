@@ -1,0 +1,4 @@
+# Controller + ASR text metric. Install root requirements.txt separately.
+regex>=2024.0.0
+pydantic-settings>=2.0.0
+# The accelerator runtime has its own Torch/k2 environment or image.

@@ -10,7 +10,7 @@ dependencies = [
     "openai",
     "anthropic",
     "google-genai",
-    "mcp",
+    "mcp==1.26.0",
     "flask",
     "python-dotenv",
     # Calculation path adaptor (mat_master) needs OSS upload for local file -> URL

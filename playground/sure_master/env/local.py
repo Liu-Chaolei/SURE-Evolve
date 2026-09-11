@@ -8,6 +8,7 @@ absolute paths configured by the user.
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 
 from evomaster.env.local import LocalEnv, LocalEnvConfig
 
@@ -46,11 +47,12 @@ class SureMasterLocalEnv(LocalEnv):
         if not recipe_dir.exists() or not data_dir.exists():
             return
 
-        self._ensure_link(
-            recipe_dir / "data",
-            Path("../data"),
-            "base model recipe data",
-        )
+        if recipe_dir.is_symlink():
+            source = recipe_dir.resolve()
+            recipe_dir.unlink()
+            shutil.copytree(source, recipe_dir, symlinks=False,
+                            ignore=shutil.ignore_patterns("data", "exp", "__pycache__"))
+        self._ensure_link(recipe_dir / "data", Path("../data"), "workspace recipe data")
         self._ensure_link(
             workspace / "data",
             Path("base_model/data"),

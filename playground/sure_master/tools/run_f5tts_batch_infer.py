@@ -159,6 +159,8 @@ def file_identity(value: Any) -> dict[str, Any] | str:
 def synthesis_fingerprint(row: dict[str, Any], config: dict[str, Any]) -> str:
     reference_audio = Path(str(row.get("reference_audio") or ""))
     identity = {
+        "device": config.get("device"),
+        "seed": config.get("seed", 42),
         "gen_text": row.get("gen_text", ""),
         "reference_audio": file_identity(reference_audio),
         "reference_text": row.get("reference_text", ""),
@@ -501,6 +503,9 @@ def add_f5_to_path(f5_root: Path) -> None:
 
 
 def load_f5_runtime(config: dict[str, Any]) -> dict[str, Any]:
+    from playground.sure_master.runtime.accelerator import RuntimeBackend
+    backend = RuntimeBackend(str(config.get("device", "cpu")).split(":")[0])
+    backend.seed(int(os.environ.get("SURE_TTS_TRAIN_SEED", "42")))
     f5_root = Path(config["f5_root"])
     add_f5_to_path(f5_root)
 
@@ -545,9 +550,12 @@ def load_f5_runtime(config: dict[str, Any]) -> dict[str, Any]:
     vocoder = load_vocoder(
         vocoder_name=vocoder_name,
         is_local=parse_bool(config.get("load_vocoder_from_local"), False),
-        local_path=vocoder_local_path,
-        device=device,
+        local_path=str(config.get("vocoder_local_path") or vocoder_local_path),
+        device="cpu" if backend.name == "npu" else device,
     )
+    if backend.name == "npu":
+        original_decode = vocoder.decode
+        vocoder.decode = lambda mel: original_decode(mel.to("cpu"))
 
     repo_name, ckpt_step, ckpt_type = "F5-TTS", 1250000, "safetensors"
     if model_name == "F5TTS_Base":
@@ -579,6 +587,7 @@ def load_f5_runtime(config: dict[str, Any]) -> dict[str, Any]:
         device=device,
     )
 
+    backend.verify_model(model)
     return {
         "infer_process": infer_process,
         "preprocess_ref_audio_text": preprocess_ref_audio_text,
@@ -817,6 +826,7 @@ def launch_workers(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--vocoder-local-path", default="")
     parser.add_argument("--f5-root", default=env_str("SURE_TTS_ROOT", str(DEFAULTS["root"])))
     parser.add_argument("--eval-data", default=env_str("SURE_TTS_EVAL_DATA", str(DEFAULTS["eval_data"])))
     parser.add_argument("--language", default=env_str("SURE_TTS_LANGUAGE", str(DEFAULTS["language"])))
@@ -1043,7 +1053,9 @@ def run_main(args: argparse.Namespace) -> int:
         "model_cfg": args.model_cfg,
         "vocoder_name": args.vocoder_name,
         "load_vocoder_from_local": args.load_vocoder_from_local,
+        "vocoder_local_path": args.vocoder_local_path,
         "device": args.device,
+        "seed": int(os.environ.get("SURE_TTS_TRAIN_SEED", "42")),
         "nfe_step": args.nfe_step,
         "cfg_strength": args.cfg_strength,
         "sway_sampling_coef": args.sway_sampling_coef,

@@ -37,6 +37,9 @@ ALLOWED_MANIFESTS = {
 ALLOWED_MAX_STEPS = {500, 1000, 2000, 5000}
 ALLOWED_LEARNING_RATES = {1e-6, 3e-6, 5e-6, 1e-5}
 ALLOWED_EFFECTIVE_BATCHES = {
+    1: {"batch_size_per_gpu": 1, "grad_accumulation_steps": 1},
+    2: {"batch_size_per_gpu": 1, "grad_accumulation_steps": 2},
+    4: {"batch_size_per_gpu": 1, "grad_accumulation_steps": 4},
     8: {"batch_size_per_gpu": 1, "grad_accumulation_steps": 8},
     16: {"batch_size_per_gpu": 1, "grad_accumulation_steps": 16},
     32: {"batch_size_per_gpu": 2, "grad_accumulation_steps": 16},
@@ -203,15 +206,20 @@ def validate_args(args: argparse.Namespace) -> float:
     if args.action == "no_arch":
         return parse_float_choice(args.learning_rate)
 
-    if args.train_manifest not in ALLOWED_MANIFESTS:
+    if args.train_manifest not in (ALLOWED_MANIFESTS | set(json.loads(os.environ.get("SURE_TRAIN_MANIFESTS_JSON", "{}")))):
         raise UserError(f"train_manifest must be one of {sorted(ALLOWED_MANIFESTS)}, got {args.train_manifest}")
-    if args.max_steps not in ALLOWED_MAX_STEPS:
+    if not (0 < args.max_steps <= int(os.environ.get("SURE_TRAIN_MAX_STEPS", "5000"))):
         raise UserError(f"max_steps must be one of {sorted(ALLOWED_MAX_STEPS)}, got {args.max_steps}")
     if args.effective_batch_size not in ALLOWED_EFFECTIVE_BATCHES:
         raise UserError(
             f"effective_batch_size must be one of {sorted(ALLOWED_EFFECTIVE_BATCHES)}, got {args.effective_batch_size}"
         )
 
+    registry = json.loads(os.environ.get("SURE_TRAIN_MANIFESTS_JSON", "{}"))
+    if args.train_manifest in registry:
+        requested = (resolve_in_workspace(args.train_data_root) / args.train_manifest / "metadata.csv").resolve()
+        if requested != Path(registry[args.train_manifest]).resolve():
+            raise UserError("Training manifest differs from the registered source")
     f5_root = resolve_in_workspace(args.f5_root)
     train_data_root = resolve_in_workspace(args.train_data_root)
     manifest_csv = train_data_root / args.train_manifest / "metadata.csv"

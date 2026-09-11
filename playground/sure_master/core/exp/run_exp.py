@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -39,11 +40,11 @@ from ..utils.code import (
     validate_sure_candidate_boundary,
 )
 from ..utils.metric import SureMetricResult, SureMetricRunner, format_metric_feedback
+from ...tasks import get_adapter
 from ..utils.task_cards import BaseModelProfile, SureTaskCard
 from ..utils.vc_remote import (
     VcRemoteTrainingExecutor,
     candidate_runs_remotely,
-    mixed_execution_enabled,
     sure_config_from,
 )
 from ..utils.workspace_cleanup import (
@@ -61,6 +62,8 @@ ASR_ARCH_CODE_MARKERS = (
 )
 ASR_TRAINING_CANDIDATE_TYPES = {ARCH, FINE_TUNE}
 ASR_FATAL_TRAIN_PATTERNS = (
+    "npu out of memory",
+    "acl error: 207001",
     "cuda out of memory",
     "torch.cuda.outofmemoryerror",
     "cuda error: out of memory",
@@ -146,6 +149,9 @@ class SureRunExp(BaseExp):
 
         response = self._initial_solution_response()
         used_initial_solution = response is not None
+        saved_response = Path(self.workspace_path) / "metric/generated_response.json"
+        if response is None and sure_config_from(self.config).get("execution_mode") == "slurm" and saved_response.exists():
+            response = json.loads(saved_response.read_text())["response"]
         if response is None:
             response = self._run_main_agent(
                 task_description,
@@ -158,12 +164,21 @@ class SureRunExp(BaseExp):
                 task_id,
             )
 
+        if sure_config_from(self.config).get("execution_mode") == "slurm":
+            from ..utils.slurm import atomic_json
+            saved_response = Path(self.workspace_path) / "metric/generated_response.json"
+            if saved_response.exists():
+                response = json.loads(saved_response.read_text())["response"]
+            else:
+                atomic_json(saved_response, {"response": response})
         self._current_response_is_initial_solution = used_initial_solution
         try:
             result = self._execute_and_score(response, role_paths)
         finally:
             self._current_response_is_initial_solution = False
         if result[0]:
+            return result[0], result[1], self.uid, self.code, result[2]
+        if result[2].get("reason_code") == "worker_failed":
             return result[0], result[1], self.uid, self.code, result[2]
         if used_initial_solution and not self._debug_initial_solution_enabled():
             return result[0], result[1], self.uid, self.code, result[2]
@@ -175,6 +190,9 @@ class SureRunExp(BaseExp):
                 role_paths,
                 task_id,
             )
+            if sure_config_from(self.config).get("execution_mode") == "slurm":
+                from ..utils.slurm import atomic_json
+                atomic_json(saved_response, {"response": response})
             result = self._execute_and_score(response, role_paths)
             if result[0]:
                 break
@@ -190,8 +208,7 @@ class SureRunExp(BaseExp):
     ) -> tuple[bool, float | None, uuid.UUID, str, dict[str, Any]]:
         """Execute a previously generated candidate under this experiment context.
 
-        Staged searches use this for successive halving, combination reruns, and
-        selection/holdout checks. It intentionally does not call debug agents:
+        Frozen selection/holdout checks use this entry point. It intentionally does not call debug agents:
         a rerun should measure the same candidate under a different budget or
         dataset, not silently mutate it.
         """
@@ -345,7 +362,8 @@ class SureRunExp(BaseExp):
         role_paths: dict[str, str | None],
     ) -> tuple[bool, float | None, dict[str, Any]]:
         self._current_role_paths = dict(role_paths)
-        clear_candidate_outputs(self.workspace_path, role_paths)
+        if sure_config_from(self.config).get("execution_mode") != "slurm":
+            clear_candidate_outputs(self.workspace_path, role_paths)
         code_to_run, self.code = read_code(response)
         if not code_to_run:
             self.terminal_output = "No usable Python code was found in the agent response."
@@ -391,11 +409,11 @@ class SureRunExp(BaseExp):
         self.candidate_type_hint = candidate_type
         if self.enforce_candidate_type and candidate_type != expected_candidate_type:
             self.terminal_output = (
-                "Candidate code does not match the required staged candidate type: "
+                "Candidate code does not match the reviewed candidate type: "
                 f"required={expected_candidate_type}, detected={candidate_type}."
             )
             self.metric_feedback = (
-                "SURE metric not run because the staged candidate type contract was violated."
+                "SURE metric not run because the reviewed candidate type contract was violated."
             )
             details = {
                 "candidate_type_error": {
@@ -422,7 +440,9 @@ class SureRunExp(BaseExp):
 
         save_code_to_file(self.workspace_path, "run_sure.py", code_to_run)
 
-        self._candidate_started_at = time.time()
+        self.execution_env["SURE_CANDIDATE_TYPE_HINT"] = candidate_type
+        self.execution_env["SURE_CANDIDATE_PHASE"] = self.candidate_phase or self.stage
+        self._candidate_started_at = float(self.execution_env.get("SURE_CANDIDATE_ORIGIN_TIME") or time.time())
         if self._should_run_remote_candidate(candidate_type):
             self._write_remote_candidate_context()
             return self._execute_and_score_remote_candidate()
@@ -486,6 +506,9 @@ class SureRunExp(BaseExp):
             )
             return False, None, details
 
+        role_paths = get_adapter(self.task_card.canonical_task).scoring_roles(
+            self.workspace_path, self.execution_env, role_paths
+        )
         metric_result = self.metric_runner.run(
             task_card=self.task_card,
             workspace_path=self.workspace_path,
@@ -537,6 +560,8 @@ class SureRunExp(BaseExp):
         )
 
     def _should_run_remote_candidate(self, candidate_type: str) -> bool:
+        if sure_config_from(self.config).get("execution_mode") == "slurm":
+            return True
         return candidate_runs_remotely(
             self.config,
             candidate_type,
@@ -554,6 +579,12 @@ class SureRunExp(BaseExp):
         return candidate_type
 
     def _execute_and_score_remote_candidate(self) -> tuple[bool, float | None, dict[str, Any]]:
+        if sure_config_from(self.config).get("execution_mode") == "slurm":
+            from ..utils.slurm import run_candidate
+            payload = run_candidate(self)
+            self.terminal_output = payload.get("terminal_output", "")
+            self.metric_feedback = payload.get("metric_feedback") or payload.get("error", "")
+            return bool(payload["success"]), payload.get("score"), payload
         timeout = int(self._execution_timeout())
         executor = VcRemoteTrainingExecutor(
             self.config,
@@ -620,74 +651,17 @@ class SureRunExp(BaseExp):
         return missing
 
     def _artifact_guard_errors(self, role_paths: dict[str, str | None]) -> list[str]:
-        canonical_task = str(self.task_card.canonical_task or "").lower()
-        if canonical_task == "tts":
-            errors = self._tts_artifact_guard_errors(role_paths)
-            errors.extend(self._candidate_changes_guard_errors())
-            errors.extend(self._architecture_guard_errors())
-            return errors
-
-        if canonical_task != "asr":
-            return []
-
-        errors: list[str] = []
-        errors.extend(self._candidate_changes_guard_errors())
-        errors.extend(self._architecture_guard_errors())
-        errors.extend(self._asr_duration_guard_errors())
-        errors.extend(self._asr_checkpoint_guard_errors())
-        errors.extend(self._asr_hyp_format_guard_errors(role_paths))
-
-        ref_path = self._resolve_role_path("ref", role_paths)
-        hyp_path = self._resolve_role_path("hyp", role_paths)
-        if ref_path is None or hyp_path is None or not ref_path.exists() or not hyp_path.exists():
-            return errors
-
-        refs = self._read_key_text_file(ref_path)
-        hyps = self._read_key_text_file(hyp_path)
-        if len(refs) < 100 or not hyps:
-            return errors
-        shared_keys = [key for key in refs if key in hyps]
-        if len(shared_keys) < max(100, int(len(refs) * 0.5)):
-            return errors
-
-        exact_matches = 0
-        normalized_matches = 0
-        for key in shared_keys:
-            if hyps[key] == refs[key]:
-                exact_matches += 1
-            if self._normalize_text(hyps[key]) == self._normalize_text(refs[key]):
-                normalized_matches += 1
-
-        coverage = len(shared_keys) / len(refs)
-        normalized_ratio = normalized_matches / len(shared_keys)
-        if coverage >= 0.95 and normalized_ratio >= 0.95:
-            errors.append(
-                "ASR hypothesis appears to copy the reference transcript ("
-                f"{normalized_matches}/{len(shared_keys)} normalized matches, "
-                f"{exact_matches}/{len(shared_keys)} exact matches, "
-                f"{len(shared_keys)}/{len(refs)} keys covered). Generate hypotheses "
-                "from model decoding, not from ref files or supervision manifests."
-            )
-            return errors
-
-        normalized_hyp_counts: dict[str, int] = {}
-        for key in shared_keys:
-            normalized = self._normalize_text(hyps[key])
-            normalized_hyp_counts[normalized] = normalized_hyp_counts.get(normalized, 0) + 1
-
-        if len(shared_keys) >= 100 and coverage >= 0.95:
-            unique_ratio = len(normalized_hyp_counts) / len(shared_keys)
-            most_common = max(normalized_hyp_counts.values(), default=0)
-            most_common_ratio = most_common / len(shared_keys)
-            if unique_ratio < 0.01 or most_common_ratio > 0.5:
-                errors.append(
-                    "ASR hypothesis has implausibly low transcript diversity ("
-                    f"{len(normalized_hyp_counts)} unique normalized hypotheses over "
-                    f"{len(shared_keys)} matched keys; most common covers "
-                    f"{most_common}/{len(shared_keys)} keys). Generate hypotheses "
-                    "from real model decoding, not a constant placeholder or fallback token."
-                )
+        errors = get_adapter(self.task_card.canonical_task).validate_outputs(self, role_paths)
+        record = Path(self.workspace_path) / "artifacts/candidate_changes.json"
+        if self.enforce_candidate_type and record.is_file():
+            try:
+                actual = normalize_candidate_type(json.loads(record.read_text()).get("candidate_type"))
+                if actual != self.candidate_type_hint:
+                    errors.append(f"Executed candidate type {actual} differs from reviewed {self.candidate_type_hint}")
+            except (ValueError, AttributeError):
+                errors.append("Invalid candidate execution record")
         return errors
+
 
     def _candidate_changes_guard_errors(self) -> list[str]:
         if self._execution_env_truthy("SURE_REQUIRE_CANDIDATE_CHANGES", False):
@@ -695,191 +669,16 @@ class SureRunExp(BaseExp):
         return []
 
     def _architecture_guard_errors(self) -> list[str]:
-        if normalize_candidate_type(self.candidate_type_hint) != ARCH:
-            return []
-        canonical_task = str(self.task_card.canonical_task or "").lower()
-        if canonical_task == "tts":
-            return validate_arch_candidate_changes(self.workspace_path)
-        if canonical_task == "asr":
-            text = "\n".join([self.code or "", self.terminal_output or ""])
-            if not any(marker in text for marker in ASR_ARCH_CODE_MARKERS):
-                return [
-                    "ASR architecture candidate did not include any Zipformer structure parameter change. "
-                    "Pass at least one of --num-encoder-layers, --encoder-dim, --feedforward-dim, "
-                    "or --encoder-unmasked-dim to train.py."
-                ]
-        return []
+        # Kept as a compatibility hook; guards are task-specific now.
+        from ...tasks.guards import AsrGuards
+        if self.task_card.canonical_task == "asr":
+            return AsrGuards(self)._architecture_guard_errors()
+        return validate_arch_candidate_changes(self.workspace_path) if self.candidate_type_hint == ARCH else []
 
-    def _asr_checkpoint_guard_errors(self) -> list[str]:
-        if normalize_candidate_type(self.candidate_type_hint) not in ASR_TRAINING_CANDIDATE_TYPES:
-            return []
-        if self._is_official_asr_baseline_draft():
-            return []
 
-        allow_baseline = self._execution_env_truthy("SURE_ASR_ALLOW_BASELINE_CHECKPOINT", False)
-        require_local = (not allow_baseline) and self._execution_env_truthy(
-            "SURE_ASR_REQUIRE_LOCAL_CHECKPOINT",
-            True,
-        )
-        forbid_baseline = (not allow_baseline) and self._execution_env_truthy(
-            "SURE_ASR_FORBID_BASELINE_CHECKPOINT_FOR_TRAINING",
-            True,
-        )
-        fail_on_fatal = self._execution_env_truthy(
-            "SURE_ASR_FAIL_ON_TRAIN_FATAL_WITHOUT_CHECKPOINT",
-            True,
-        )
-        if not (require_local or forbid_baseline or fail_on_fatal):
-            return []
 
-        workspace = Path(self.workspace_path).resolve()
-        baseline_root = self._execution_env_path("SURE_BASELINE_CHECKPOINT_DIR")
-        if baseline_root and baseline_root.exists():
-            baseline_root = baseline_root.resolve(strict=False)
-        else:
-            baseline_root = None
 
-        model_root = workspace / "models"
-        checkpoints = [
-            path
-            for path in sorted(model_root.rglob("epoch-*.pt")) if path.name and not path.name.startswith("bad-model-")
-        ] if model_root.exists() else []
-        bad_checkpoints = [
-            path for path in sorted(model_root.rglob("bad-model-*.pt"))
-        ] if model_root.exists() else []
 
-        baseline_checkpoints: list[Path] = []
-        external_checkpoints: list[Path] = []
-        valid_local_checkpoints: list[Path] = []
-        for checkpoint in checkpoints:
-            resolved = checkpoint.resolve(strict=False)
-            is_baseline = bool(
-                baseline_root
-                and (
-                    self._path_is_relative_to(resolved, baseline_root)
-                    or self._checkpoint_matches_baseline_copy(checkpoint, baseline_root)
-                )
-            )
-            if is_baseline:
-                baseline_checkpoints.append(checkpoint)
-                continue
-            if self._path_is_relative_to(resolved, workspace):
-                if self._candidate_started_at <= 0 or self._path_mtime(checkpoint) >= self._candidate_started_at - 1:
-                    valid_local_checkpoints.append(checkpoint)
-                else:
-                    external_checkpoints.append(checkpoint)
-                continue
-            external_checkpoints.append(checkpoint)
-
-        errors: list[str] = []
-        fatal_sources = self._asr_fatal_train_log_paths(workspace)
-        if self._text_has_asr_train_fatal(self.terminal_output):
-            fatal_sources.append(Path("terminal output"))
-        if fail_on_fatal and fatal_sources:
-            latest_fatal = max(
-                (self._path_mtime(path) for path in fatal_sources if path.name != "terminal output"),
-                default=self._candidate_started_at or 0.0,
-            )
-            has_later_checkpoint = any(
-                self._path_mtime(path) >= latest_fatal
-                for path in valid_local_checkpoints
-            )
-            if not has_later_checkpoint:
-                source_text = ", ".join(
-                    self._workspace_relative(path, workspace)
-                    if path.name != "terminal output"
-                    else "terminal output"
-                    for path in fatal_sources[:3]
-                )
-                errors.append(
-                    "ASR training candidate observed a fatal CUDA/CUBLAS training failure "
-                    "without a later valid workspace-local checkpoint. Fatal source(s): "
-                    f"{source_text}."
-                )
-
-        details = self._asr_checkpoint_guard_details(
-            baseline_checkpoints=baseline_checkpoints,
-            external_checkpoints=external_checkpoints,
-            bad_checkpoints=bad_checkpoints,
-        )
-        if require_local and not valid_local_checkpoints:
-            errors.append(
-                "ASR training candidate did not produce a workspace-local epoch checkpoint. "
-                "Metric is skipped to avoid scoring a baseline fallback or failed training artifact."
-                + details
-            )
-        if forbid_baseline and baseline_checkpoints and not valid_local_checkpoints:
-            errors.append(
-                "ASR training candidate checkpoint resolves inside SURE_BASELINE_CHECKPOINT_DIR "
-                "and no workspace-local candidate checkpoint was found. Decode must use a checkpoint "
-                "produced by this candidate, not the official baseline."
-                + details
-            )
-        return errors
-
-    def _asr_duration_guard_errors(self) -> list[str]:
-        if normalize_candidate_type(self.candidate_type_hint) not in ASR_TRAINING_CANDIDATE_TYPES:
-            return []
-        if self._is_official_asr_baseline_draft():
-            return []
-        floor = self._asr_min_train_duration()
-        if floor <= 1:
-            return []
-        path = Path(self.workspace_path) / "artifacts" / "candidate_changes.json"
-        if not path.is_file():
-            return []
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return []
-        declared = self._asr_candidate_declared_durations(payload)
-        below = [value for value in declared if 0 < value < floor]
-        if not below:
-            return []
-        return [
-            "ASR training candidate used max-duration below the configured floor "
-            f"({min(below)} < {floor}). Do not recover SURE_MAX_DURATION from failed "
-            "runtime helper logs or tracebacks; only use a successful helper result "
-            "or an explicitly configured fixed value."
-        ]
-
-    def _asr_min_train_duration(self) -> int:
-        values: list[int] = []
-        for name in ("SURE_TRAIN_DURATION_MIN", "SURE_DURATION_AUTOTUNE_MIN"):
-            raw = self.execution_env.get(name, os.environ.get(name))
-            value = self._parse_positive_int(raw)
-            if value > 0:
-                values.append(value)
-        return max(values) if values else 100
-
-    def _asr_candidate_declared_durations(self, payload: Any) -> list[int]:
-        duration_keys = {
-            "max_duration",
-            "actual_train_max_duration",
-            "resolved_max_duration",
-            "selected_max_duration",
-            "selected_duration",
-            "selected_train_duration",
-            "max_duration_bound",
-            "resolved_max_duration_bound",
-            "resolved_or_fixed_max_duration_bound",
-        }
-        values: list[int] = []
-
-        def visit(node: Any) -> None:
-            if isinstance(node, dict):
-                for key, value in node.items():
-                    if str(key) in duration_keys:
-                        parsed = self._parse_positive_int(value)
-                        if parsed > 0:
-                            values.append(parsed)
-                    visit(value)
-            elif isinstance(node, list):
-                for item in node:
-                    visit(item)
-
-        visit(payload)
-        return values
 
     @staticmethod
     def _parse_positive_int(value: Any) -> int:
@@ -939,60 +738,9 @@ class SureRunExp(BaseExp):
             return False
         return False
 
-    @staticmethod
-    def _text_has_asr_train_fatal(text: str) -> bool:
-        lowered = str(text or "").lower()
-        return any(marker in lowered for marker in ASR_FATAL_TRAIN_PATTERNS)
 
-    def _asr_fatal_train_log_paths(self, workspace: Path) -> list[Path]:
-        log_root = workspace / "working"
-        if not log_root.exists():
-            return []
-        result: list[Path] = []
-        for path in sorted(log_root.rglob("*.log")):
-            try:
-                text = path.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            if self._text_has_asr_train_fatal(text):
-                result.append(path)
-        return result
 
-    def _asr_checkpoint_guard_details(
-        self,
-        *,
-        baseline_checkpoints: list[Path],
-        external_checkpoints: list[Path],
-        bad_checkpoints: list[Path],
-    ) -> str:
-        workspace = Path(self.workspace_path).resolve()
-        parts: list[str] = []
-        if baseline_checkpoints:
-            parts.append(
-                "baseline checkpoint(s): "
-                + ", ".join(self._workspace_relative(path, workspace) for path in baseline_checkpoints[:3])
-            )
-        if external_checkpoints:
-            parts.append(
-                "external/stale checkpoint(s): "
-                + ", ".join(self._workspace_relative(path, workspace) for path in external_checkpoints[:3])
-            )
-        if bad_checkpoints:
-            parts.append(
-                "bad checkpoint(s): "
-                + ", ".join(self._workspace_relative(path, workspace) for path in bad_checkpoints[:3])
-            )
-        return " " + "; ".join(parts) if parts else ""
 
-    def _is_official_asr_baseline_draft(self) -> bool:
-        if self.stage != "draft":
-            return False
-        path = Path(self.workspace_path) / "artifacts" / "official_baseline.json"
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return False
-        return str(payload.get("baseline_type") or "").strip().lower() == "official"
 
     @staticmethod
     def _workspace_relative(path: Path, workspace: Path) -> str:
@@ -1001,109 +749,7 @@ class SureRunExp(BaseExp):
         except ValueError:
             return str(path)
 
-    def _asr_hyp_format_guard_errors(self, role_paths: dict[str, str | None]) -> list[str]:
-        hyp_path = self._resolve_role_path("hyp", role_paths)
-        if hyp_path is None or not hyp_path.exists():
-            return []
-        errors: list[str] = []
-        try:
-            lines = hyp_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        except OSError as exc:
-            return [f"ASR hypothesis file could not be read: {exc}"]
-        checked = 0
-        for lineno, line in enumerate(lines, start=1):
-            if not line.strip():
-                continue
-            checked += 1
-            if "\t" not in line:
-                errors.append(
-                    f"ASR hypothesis line {lineno} is not key-tab-text format; "
-                    "write artifacts/hyp.txt as utterance_id<TAB>hypothesis."
-                )
-                break
-            key, text = line.split("\t", 1)
-            if not key.strip():
-                errors.append(f"ASR hypothesis line {lineno} has an empty utterance id.")
-                break
-            # A real ASR decoder can emit a blank hypothesis for short or difficult
-            # utterances. Treat that as all-token deletion during WER scoring rather
-            # than as an artifact-format failure; low-diversity guards below still
-            # reject constant blank/placeholder outputs.
-        if lines and checked == 0:
-            errors.append("ASR hypothesis file contains no non-empty key-tab-text rows.")
-        return errors
 
-    def _tts_artifact_guard_errors(self, role_paths: dict[str, str | None]) -> list[str]:
-        if "samples_jsonl" not in self.task_card.required_roles:
-            return []
-        samples_path = self._resolve_role_path("samples_jsonl", role_paths)
-        if samples_path is None or not samples_path.exists():
-            return []
-
-        rows: list[dict[str, Any]] = []
-        errors: list[str] = []
-        try:
-            with samples_path.open("r", encoding="utf-8") as f:
-                for lineno, line in enumerate(f, start=1):
-                    if not line.strip():
-                        continue
-                    try:
-                        row = json.loads(line)
-                    except json.JSONDecodeError as exc:
-                        errors.append(
-                            f"TTS samples_jsonl is invalid JSON on line {lineno}: {exc.msg}."
-                        )
-                        continue
-                    if not isinstance(row, dict):
-                        errors.append(f"TTS samples_jsonl line {lineno} is not a JSON object.")
-                        continue
-                    row["_line_no"] = lineno
-                    rows.append(row)
-        except OSError as exc:
-            return [f"TTS samples_jsonl could not be read: {exc}"]
-
-        if not rows:
-            errors.append("TTS samples_jsonl contains no rows.")
-            return errors
-
-        prediction_paths: list[Path] = []
-        for row in rows:
-            lineno = row.get("_line_no", "?")
-            prediction_value = str(row.get("prediction_audio") or "")
-            prediction_path = self._resolve_samples_jsonl_path(samples_path, prediction_value)
-            prediction_paths.append(prediction_path)
-            try:
-                if not prediction_path.is_file() or prediction_path.stat().st_size < 1024:
-                    errors.append(
-                        f"TTS prediction_audio on line {lineno} is empty or implausibly small: {prediction_path}"
-                    )
-            except OSError:
-                errors.append(
-                    f"TTS prediction_audio on line {lineno} is empty or implausibly small: {prediction_path}"
-                )
-            reference_value = str(row.get("reference_audio") or "")
-            if reference_value:
-                reference_path = self._resolve_samples_jsonl_path(samples_path, reference_value)
-                try:
-                    if prediction_path.samefile(reference_path):
-                        errors.append(
-                            f"TTS prediction_audio on line {lineno} points to the reference_audio path: {prediction_path}"
-                        )
-                        continue
-                except OSError:
-                    pass
-                if self._same_file_content(prediction_path, reference_path):
-                    errors.append(
-                        f"TTS prediction_audio on line {lineno} is byte-identical to reference_audio: {reference_path}"
-                    )
-
-        resolved_prediction_paths = {str(path.resolve(strict=False)) for path in prediction_paths}
-        if len(rows) > 1 and len(resolved_prediction_paths) == 1:
-            errors.append(
-                "TTS samples_jsonl reuses the same prediction_audio for every sample; "
-                "generate a distinct audio file for each target text."
-            )
-        return errors
 
     @staticmethod
     def _resolve_samples_jsonl_path(samples_path: Path, value: str) -> Path:
@@ -1212,6 +858,9 @@ class SureRunExp(BaseExp):
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.is_symlink():
                 target.unlink()
+            elif target.is_dir() and name == "recipe" and self.task_card.canonical_task == "asr":
+                target.resolve().relative_to(workspace.resolve())
+                shutil.rmtree(target)
             elif target.is_dir():
                 entries = list(target.iterdir())
                 if any(not entry.is_symlink() for entry in entries):
@@ -1279,13 +928,16 @@ class SureRunExp(BaseExp):
                 'if [ -z "${SURE_RUNTIME_ENV_HELPER:-}" ]; then',
                 f"  export SURE_RUNTIME_ENV_HELPER={shlex.quote(str(self._runtime_env_helper_path()))}",
                 "fi",
-                "exec python run_sure.py",
+                f"exec {shlex.quote(env.get('SURE_CANDIDATE_PYTHON', sys.executable))} run_sure.py",
             ]
         )
         return "bash -lc " + shlex.quote("\n".join(lines))
 
     def _candidate_command_env(self) -> dict[str, str]:
         env = dict(self.execution_env)
+        if self.task_card.canonical_task != "asr":
+            self._ensure_candidate_pythonpath(env)
+            return env
         local_icefall_python = env.get("SURE_LOCAL_ICEFALL_PYTHON") or os.environ.get(
             "SURE_LOCAL_ICEFALL_PYTHON"
         )
@@ -1410,52 +1062,15 @@ class SureRunExp(BaseExp):
         return json.dumps(self.execution_env, ensure_ascii=False, indent=2)
 
     def _candidate_type_guidance_text(self) -> str:
-        if not mixed_execution_enabled(self.config, task_id=self.task_card.task_id):
-            return "No candidate type labels are required for this task."
-        sure_config = sure_config_from(self.config)
-        staged = sure_config.get("staged_axes") or {}
-        strategy = str(sure_config.get("search_strategy", "")).strip().lower()
-        staged_enabled = (
-            isinstance(staged, dict)
-            and bool(staged.get("enabled", False))
-        ) or strategy in {"staged_axes", "axis_staged", "three_axis"}
-        canonical_task = str(self.task_card.canonical_task or self.task_card.task_id).lower()
-        if staged_enabled and canonical_task == "asr":
-            return (
-                "Staged axes search is enabled for this ASR task. `[inference]` ideas "
-                "reuse an existing checkpoint and only change decoding or hypothesis "
-                "post-processing. `[fine_tune]` ideas change training without changing "
-                "Zipformer structure. `[arch]` ideas must pass at least one Zipformer "
-                "structure argument such as --num-encoder-layers, --encoder-dim, "
-                "--feedforward-dim, or --encoder-unmasked-dim. Training-like candidates "
-                "run in VC child jobs when configured."
-            )
-        if canonical_task == "asr":
-            return (
-                "Mixed execution is enabled for this ASR task. Produce exactly 4 "
-                "`[inference]` ideas, 2 `[fine_tune]` ideas, and 2 `[arch]` ideas. "
-                "`[inference]` ideas reuse an existing checkpoint and change decoding, "
-                "normalization, hypothesis formatting, or post-processing. `[fine_tune]` "
-                "ideas may change Zipformer training, loss, optimizer, data sampling, "
-                "augmentation, or checkpoint creation without changing model structure. "
-                "`[arch]` ideas must change Zipformer structure/parameter count by "
-                "passing at least one of --num-encoder-layers, --encoder-dim, "
-                "--feedforward-dim, or --encoder-unmasked-dim to the icefall train.py "
-                "command. Fine-tune and arch ideas are submitted as VC child jobs "
-                "according to `sure.remote_training`."
-            )
-        if canonical_task == "tts":
-            return (
-                "Mixed execution is enabled for this F5-TTS task. Produce exactly 4 "
-                "`[inference]` ideas, 2 `[fine_tune]` ideas, and 2 `[arch]` ideas. "
-                "`[fine_tune]` ideas must use SURE_TTS_FINETUNE_WRAPPER. `[arch]` "
-                "ideas must use SURE_TTS_ARCH_WRAPPER and change whitelisted model "
-                "structure fields."
-            )
         return (
-            "Mixed execution is enabled for this task. Produce exactly 4 `[inference]` "
-            "ideas, 2 `[fine_tune]` ideas, and 2 `[arch]` ideas."
+            "Implement this reviewed XLab idea using the task wrapper and declared parameters. "
+            "There are no per-type quotas. inference never trains; fine_tune changes training; "
+            "arch changes model structure and trains. Training uses the fixed baseline initialization "
+            "and configured budget. Inference inherits the round's best model. "
+            "All replay-relevant settings must be recorded by the wrapper. "
+            + json.dumps(get_adapter(self.task_card.canonical_task).context())
         )
+
 
     def _write_status(
         self,
@@ -1473,6 +1088,19 @@ class SureRunExp(BaseExp):
         metric_feedback: str | None = None,
         terminal_output: str | None = None,
     ) -> None:
+        if details is not None:
+            details["reason_code"] = reason_code
+            started = getattr(self, "_candidate_started_at", 0.0)
+            if started:
+                details["runtime_seconds"] = max(0.0, time.time() - started)
+        if success:
+            retained = get_adapter(self.task_card.canonical_task).collect_model(
+                self.workspace_path, self.execution_env
+            )
+            if retained:
+                if details is None:
+                    details = {}
+                details["produced_artifacts"] = retained
         write_candidate_status(
             self.workspace_path,
             success=success,

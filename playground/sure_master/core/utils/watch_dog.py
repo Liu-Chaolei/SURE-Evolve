@@ -34,6 +34,8 @@ class TimeoutWatchdog:
         self._thread = None
 
     def start(self) -> None:
+        if self.timeout_seconds <= 0:
+            return
         self._thread = threading.Thread(
             target=self._watch,
             daemon=True,

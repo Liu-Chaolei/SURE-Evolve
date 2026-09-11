@@ -115,6 +115,8 @@ def _references_known_artifact_producer(code_content: str) -> bool:
     return any(
         marker in code_content
         for marker in (
+            "SURE_TASK_WRAPPER",
+            "run_task_candidate.py",
             "SURE_ASR_ZIPFORMER_WRAPPER",
             "run_icefall_zipformer_candidate.py",
             "SURE_TTS_BATCH_INFER_WRAPPER",
@@ -421,7 +423,7 @@ def _validate_asr_zipformer_wrapper_boundary(
             "so duration probing, environment setup, checkpoint validation, decode "
             "split handling, and hyp formatting stay inside the SURE Master contract"
         ]
-    if "SURE_ASR_ZIPFORMER_WRAPPER" in code_content or "run_icefall_zipformer_candidate.py" in code_content:
+    if any(marker in code_content for marker in ("SURE_ASR_ZIPFORMER_WRAPPER", "run_icefall_zipformer_candidate.py", "SURE_TASK_WRAPPER", "run_task_candidate.py")):
         return []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.List, ast.Tuple)):
@@ -503,7 +505,7 @@ def _validate_base_model_boundary(
         for path in profile.required_paths.values()
         if str(path).strip()
     ]
-    if profile.is_required and target_paths:
+    if profile.is_required and target_paths and not any(m in code_content for m in ("SURE_TASK_WRAPPER", "run_task_candidate.py")):
         if not any(
             _references_workspace_path(path, code_content, string_literals)
             for path in target_paths

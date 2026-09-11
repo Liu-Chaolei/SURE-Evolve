@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import math
 import json
 import os
 import re
@@ -509,7 +510,9 @@ class SureMetricRunner:
         cache_dir: str | None = None,
         validate_env: bool = False,
         metric_gpu: dict[str, Any] | None = None,
+        python: str | None = None,
     ):
+        self.worker_python = python
         self.sure_root = Path(sure_root)
         self.pythonpath = Path(pythonpath) if pythonpath else self.sure_root / "src"
         self.device = device
@@ -529,6 +532,8 @@ class SureMetricRunner:
         This method only imports/calls SURE. It never writes into the SURE source
         tree; all generated specs/reports are written under output_dir.
         """
+        if self.worker_python:
+            return self._run_isolated(task_card, workspace_path, output_dir, role_paths)
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         workspace = Path(workspace_path)
@@ -589,6 +594,8 @@ class SureMetricRunner:
                     if score is None:
                         raise ValueError(f"SURE returned no score: {summary}")
                     score = float(score)
+                    if not math.isfinite(score):
+                        raise ValueError("SURE returned a nonfinite score")
                     summary_path = output_path / "score_summary.json"
                     payload = {
                         **summary,
@@ -664,6 +671,28 @@ class SureMetricRunner:
             )
         finally:
             sys.dont_write_bytecode = old_dont_write_bytecode
+
+    def _run_isolated(self, task_card, workspace_path, output_dir, role_paths):
+        import json
+        output = Path(output_dir).resolve()
+        output.mkdir(parents=True, exist_ok=True)
+        request = {"sure_root": str(self.sure_root.resolve()), "pythonpath": str(self.pythonpath.resolve()),
+                   "device": self.device, "cache_dir": self.cache_dir, "validate_env": self.validate_env,
+                   "task_card": task_card.to_dict(), "workspace": str(Path(workspace_path).resolve()),
+                   "output": str(output), "roles": role_paths}
+        request_path, response_path = output / "score_request.json", output / "score_result.json"
+        request_path.write_text(json.dumps(request))
+        response_path.unlink(missing_ok=True)
+        # Use the package root, not the model runtime.
+        tool = Path(__file__).resolve().parents[2] / "tools" / "score_task.py"
+        try:
+            with (output / "score_worker.log").open("w") as log:
+                from ...runtime.process import run_bounded
+                run_bounded([self.worker_python, str(tool), str(request_path), str(response_path)],
+                            output=log, timeout=21600)
+            return SureMetricResult(**json.loads(response_path.read_text()))
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            return SureMetricResult(False, None, task_card.primary_metric, error=f"Scoring worker failed: {exc}; see {output / 'score_worker.log'}")
 
     @contextlib.contextmanager
     def _metric_gpu_context(

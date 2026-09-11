@@ -1,10 +1,16 @@
 # SURE Master
 
+> 新运行入口：**ordinary + XLab**；staged_axes 执行引擎已退役。
+> ASR、F5-TTS、DiariZen 的统一配置、数据准备与轻量验证见 [多任务指南](../../docs/zh/sure_master_multitask.md)。
+> CUDA/NPU 运行配置与真实硬件验证状态分开记录；本次不要求完整多轮验收。
+
 `sure_master` is a multi-task speech self-evolution playground. It treats
 SURE as a read-only metric backend: candidate scripts generate standard
 artifacts in the experiment workspace, then EvoMaster calls SURE to score them.
 
 For a complete setup and operation guide, see [USAGE.md](USAGE.md).
+For TEDLIUM STM preparation and the CUDA/Ascend compatibility profiles, see
+[the dual-backend guide](../../docs/zh/sure_master_tedlium_dual_backend.md).
 For the internal architecture, self-evolution loop, runtime lifecycle, and data
 flow, see [TECHNICAL_MANUAL.md](TECHNICAL_MANUAL.md).
 
@@ -98,3 +104,11 @@ Inference uses 1 GPU / 8 CPU / 32G; draft training, training, and architecture
 candidates use 8 GPU / 64 CPU / 256G. Each resource profile uses `num_task: 1`.
 Do not apply a global remote GPU override, because it would replace these
 candidate-specific profiles. Remote Icefall uses `/opt/conda/envs/icefall/bin/python`.
+
+## TEDLIUM3 production evolution on Slurm
+
+The eight-NPU-per-candidate, six-to-ten-round ordinary XLab workflow is documented
+in [the Slurm evolution guide](../../docs/zh/tedlium3_evolution_slurm.md).
+Use `configs/sure_master/xlab-tedlium3-npu-evolution.yaml`: one 100-hour/10-epoch
+search baseline, followed by an independent full-data/30-epoch baseline and
+selected candidate recipes. Device validation and calibration gate model search.

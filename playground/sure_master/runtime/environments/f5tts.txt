@@ -1,0 +1,26 @@
+# Install into a dedicated backend environment; Torch/torchaudio are pinned by its image.
+accelerate>=1.6,<2
+cached_path
+click
+datasets>=3,<4
+ema_pytorch>=0.5.2,<1
+hydra-core>=1.3,<2
+huggingface-hub<1
+librosa>=0.10,<1
+matplotlib
+numpy==1.26.4
+pydub
+pypinyin
+rjieba
+safetensors
+soundfile>=0.12
+tomli
+torchdiffeq
+tqdm
+transformers>=4.45,<5
+transformers_stream_generator
+unidecode
+vocos==0.1.0
+wandb
+x_transformers>=1.31.14,<2
+PyYAML

@@ -23,6 +23,7 @@ TIER_SIZES_PER_SPLIT = {
     "early": 150,
     "regular": 500,
 }
+TEDLIUM_TIER_SIZES = {"smoke": 10, "early": 50, "regular": 200}
 
 
 @dataclass(frozen=True)
@@ -170,7 +171,10 @@ def validate_refs(
     for tier, filename in output_files_for_profile(profile).items():
         path = output_dir / filename
         keys = read_ref_keys(path)
-        line_count = sum(1 for _ in path.open("r", encoding="utf-8"))
+        with path.open("r", encoding="utf-8") as handle:
+            line_count = sum(1 for _ in handle)
+        if not keys:
+            raise ValueError(f"{path} contains no reference utterances")
         if len(keys) != line_count:
             raise ValueError(f"{path} contains duplicate or malformed keys")
         overlap = sorted(key for key in keys if key in seen)
@@ -199,7 +203,7 @@ def build_refs(
     tier_sizes: dict[str, int] | None = None,
 ) -> dict[str, int]:
     profile = get_asr_dataset_profile(dataset)
-    sizes = tier_sizes or TIER_SIZES_PER_SPLIT
+    sizes = tier_sizes or (TEDLIUM_TIER_SIZES if profile.name == "tedlium3" else TIER_SIZES_PER_SPLIT)
     combined: dict[str, list[RefRow]] = {
         tier: [] for tier in [*sizes.keys(), "selection"]
     }

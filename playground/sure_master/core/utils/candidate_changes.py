@@ -28,6 +28,9 @@ METRIC_OUTPUT_FILES = (
 )
 ARTIFACT_OUTPUT_FILES = (
     "hyp.txt",
+    "hyp.rttm",
+    "model_resources.json",
+    "processed_sessions.json",
     "samples.jsonl",
     "sample_output.jsonl",
     "candidate_status.json",

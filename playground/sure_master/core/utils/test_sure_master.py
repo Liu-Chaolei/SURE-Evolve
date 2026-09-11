@@ -1305,151 +1305,16 @@ class SureTaskCardsTest(unittest.TestCase):
             {INFERENCE: 4, FINE_TUNE: 2, ARCH: 2},
         )
 
-    def test_staged_axes_config_merges_selection_inputs_and_env(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        playground.sure_config = {
-            "search_strategy": "staged_axes",
-            "inputs": {"ref": "/search/ref.txt"},
-            "execution_env": {"SURE_RUN_TIMEOUT": "10"},
-            "staged_axes": {
-                "selection": {
-                    "inputs": {"ref": "/selection/ref.txt"},
-                    "execution_env": {"SURE_ASR_EVAL_SPLITS": "dev-clean"},
-                    "base_model_source_paths": {"eval_data": "/selection/prompts"},
-                }
-            },
-        }
-        playground.task_card = SureTaskCard(
-            task_id="asr_en_wer",
-            canonical_task="asr",
-            task_alias="asr",
-            primary_metric="WER",
-            artifact_contract={"ref": "input/ref.txt", "hyp": "artifacts/hyp.txt"},
-        )
 
-        self.assertTrue(playground._staged_axes_enabled())
-        self.assertEqual(playground._staged_role_paths("selection")["ref"], "/selection/ref.txt")
-        env = playground._staged_execution_env(phase="selection", stage_name="stage_selection")
-        self.assertEqual(env["SURE_RUN_TIMEOUT"], "10")
-        self.assertEqual(env["SURE_ASR_EVAL_SPLITS"], "dev-clean")
-        self.assertEqual(env["SURE_STAGED_PHASE"], "selection")
-        self.assertEqual(env["SURE_STAGED_STAGE"], "stage_selection")
-        self.assertEqual(
-            playground._staged_base_model_overrides("selection"),
-            {"eval_data": "/selection/prompts"},
-        )
 
-    def test_staged_start_phase_defaults_to_draft_and_validates_values(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        playground.sure_config = {"staged_axes": {}}
-        self.assertEqual(playground._staged_start_phase(), "draft")
 
-        playground.sure_config["staged_axes"]["start_phase"] = " ARCH "
-        self.assertEqual(playground._staged_start_phase(), "arch")
-
-        playground.sure_config["staged_axes"]["start_phase"] = "selection"
-        with self.assertRaisesRegex(ValueError, "start_phase.*draft.*arch"):
-            playground._staged_start_phase()
-
-    def test_staged_arch_initial_source_requires_readable_nonempty_file(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = root / "baseline.py"
-            source.write_text("print('baseline')\n", encoding="utf-8")
-            playground.sure_config = {"initial_solution_path": str(source)}
-            configured, code, resolved = playground._staged_initial_source()
-            self.assertEqual(configured, str(source))
-            self.assertEqual(code, "print('baseline')")
-            self.assertEqual(resolved, source.resolve())
-
-            source.write_text(" \n", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "empty"):
-                playground._staged_initial_source()
-
-            playground.sure_config["initial_solution_path"] = str(root)
-            with self.assertRaisesRegex(FileNotFoundError, "readable file"):
-                playground._staged_initial_source()
-
-            playground.sure_config = {}
-            with self.assertRaisesRegex(ValueError, "initial_solution_path is required"):
-                playground._staged_initial_source()
-
-    def test_staged_arch_entry_skips_draft_and_excludes_unscored_baseline(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = root / "baseline.py"
-            source.write_text("# candidate_type: arch\nprint('baseline')\n", encoding="utf-8")
-            playground = SureMasterPlayground.__new__(SureMasterPlayground)
-            playground.sure_config = {
-                "initial_solution_path": str(source),
-                "staged_axes": {"start_phase": "arch", "runner_up_count": 0},
-            }
-            playground.config = {"sure": playground.sure_config}
-            playground.session = SimpleNamespace(
-                config=SimpleNamespace(workspace_path=str(root / "workspace"))
-            )
-            playground.task_card = SureTaskCard(
-                task_id="asr_en_wer",
-                canonical_task="asr",
-                task_alias="asr",
-                primary_metric="WER",
-                metric_direction="lower",
-            )
-            playground.base_model_profile = None
-            playground.agents = SimpleNamespace(prefetch_agent=Mock())
-            playground.exp_index = 1
-            playground.prefetch_descriptor = None
-            playground.logger = Mock()
-            playground._create_run_exp = Mock(side_effect=AssertionError("draft created"))
-            playground.execute_parallel_tasks = Mock(
-                return_value=[("data knowledge", "model knowledge", {"prefetched": True})]
-            )
-            candidate = {"idea_id": "candidate", "code": "print('candidate')", "score": 0.2}
-            playground._run_axis_screening = Mock(return_value=[candidate])
-            playground._run_staged_combinations = Mock(return_value=[candidate])
-            rerank_inputs = []
-
-            def rerank(**kwargs):
-                rerank_inputs.append(kwargs["records"])
-                return kwargs["records"]
-
-            playground._run_staged_rerank = Mock(side_effect=rerank)
-            playground._holdout_enabled = Mock(return_value=True)
-
-            with patch.object(
-                sure_playground_module,
-                "PrefetchExp",
-                return_value=SimpleNamespace(exp_name="exp_1_prefetch", run=Mock()),
-            ):
-                summary = playground._run_staged_axes(
-                    task_description="task",
-                    data_preview="preview",
-                    role_paths={},
-                )
-
-            playground._create_run_exp.assert_not_called()
-            self.assertEqual(playground.execute_parallel_tasks.call_count, 1)
-            self.assertEqual(playground.prefetch_descriptor, {"prefetched": True})
-            self.assertEqual(playground.initial_code, source.read_text(encoding="utf-8").strip())
-            self.assertIsNone(summary["baseline_score"])
-            self.assertEqual(summary["start_phase"], "arch")
-            self.assertEqual([[item["idea_id"] for item in records] for records in rerank_inputs], [["candidate"], ["candidate"]])
-            provenance = json.loads(
-                (root / "workspace" / "staged_axes" / "baseline_draft.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-            self.assertEqual(provenance["execution_status"], "not_executed")
-            self.assertIsNone(provenance["score"])
-            self.assertIsNone(provenance["workspace"])
 
     def test_tedlium3_smoke_starts_at_real_arch_training_probe(self):
         config_path = (
             Path(__file__).resolve().parents[4]
             / "configs"
             / "sure_master"
-            / "gpt-5-icefall-tedlium3-smoke-staged-axes-mixed.yaml"
+            / "archive/staged_axes/gpt-5-icefall-tedlium3-smoke-staged-axes-mixed.yaml"
         )
         sure_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))["sure"]
         self.assertEqual(sure_config["staged_axes"]["start_phase"], "arch")
@@ -1467,62 +1332,7 @@ class SureTaskCardsTest(unittest.TestCase):
         self.assertEqual(sure_config["execution_env"]["SURE_BASELINE_CHECKPOINT_DIR"], "")
         self.assertEqual(sure_config["execution_env"]["SURE_BASELINE_USE_PRETRAINED"], "0")
 
-    def test_staged_pretrained_draft_disables_duration_autotune(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        playground.sure_config = {
-            "execution_env": {
-                "SURE_MAX_DURATION": "auto",
-                "SURE_DURATION_AUTOTUNE": "1",
-                "SURE_BASELINE_USE_PRETRAINED": "1",
-                "SURE_BASELINE_DECODE_MAX_DURATION": "300",
-            },
-            "staged_axes": {
-                "draft": {
-                    "execution_env": {
-                        "SURE_ASR_EVAL_SPLITS": "dev-clean,dev-other",
-                    }
-                }
-            },
-        }
 
-        with patch.dict(os.environ, {}, clear=True):
-            env = playground._staged_draft_execution_env()
-
-        self.assertEqual(env["SURE_STAGED_PHASE"], "draft")
-        self.assertEqual(env["SURE_STAGED_STAGE"], "stage0_draft")
-        self.assertEqual(env["SURE_MAX_DURATION"], "300")
-        self.assertEqual(env["SURE_DURATION_AUTOTUNE"], "0")
-        self.assertEqual(env["SURE_ASR_EVAL_SPLITS"], "dev-clean,dev-other")
-
-    def test_tedlium3_staged_config_removes_only_draft_in_job_deadlines(self):
-        config_path = (
-            Path(__file__).resolve().parents[4]
-            / "configs"
-            / "sure_master"
-            / "gpt-5-icefall-tedlium3-staged-axes-mixed.yaml"
-        )
-        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        sure_config = config["sure"]
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        playground.sure_config = sure_config
-
-        with patch.dict(os.environ, {}, clear=True):
-            draft_env = playground._staged_draft_execution_env()
-
-        self.assertEqual(draft_env["SURE_BASELINE_TRAIN_TIMEOUT"], "0")
-        self.assertEqual(draft_env["SURE_RUN_TIMEOUT"], "0")
-        self.assertEqual(sure_config["execution_env"]["SURE_RUN_TIMEOUT"], "259200")
-        self.assertEqual(
-            sure_config["execution_env"]["SURE_BASELINE_TRAIN_TIMEOUT"],
-            "259200",
-        )
-        self.assertEqual(
-            sure_config["staged_axes"]["axes"]["arch"]["rungs"][0][
-                "execution_env"
-            ]["SURE_RUN_TIMEOUT"],
-            "259200",
-        )
-        self.assertEqual(sure_config["remote_training"]["submit_timeout"], 0)
 
     def test_mixed_local_icefall_python_does_not_override_remote_config(self):
         playground = SureMasterPlayground.__new__(SureMasterPlayground)
@@ -1566,368 +1376,18 @@ class SureTaskCardsTest(unittest.TestCase):
 
         self.assertEqual(env["SURE_ICEFALL_PYTHON"], "/custom/container/icefall/bin/python")
 
-    def test_staged_axis_request_and_idea_extraction(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        playground.sure_config = {"staged_axes": {"ideas_per_round": 4}}
 
-        request = playground._axis_research_request("arch")
-        self.assertIn("exactly 4 arch ideas", request)
-        self.assertIn('"arch"', request)
-        self.assertIn("[arch]", request)
 
-        train_plan = {
-            "fine_tune": {
-                "1": "[fine_tune] use a shorter warmup",
-                "2": "[fine_tune] use a smaller learning rate",
-            }
-        }
-        ideas = playground._extract_axis_ideas(train_plan, "train", round_index=2)
-        self.assertEqual(len(ideas), 2)
-        self.assertEqual(ideas[0]["idea_id"], "train_r2_1")
-        self.assertEqual(ideas[0]["candidate_type"], FINE_TUNE)
-        self.assertIn("warmup", ideas[0]["idea"])
 
-    def test_staged_records_max_workers_respects_candidate_location(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        playground.sure_config = {
-            "execution_mode": "mixed_local_vc",
-            "remote_training": {
-                "enabled": True,
-                "candidate_types": ["training"],
-                "max_parallel": 4,
-            },
-        }
-        playground.config = {
-            "sure": playground.sure_config,
-            "session": {"local": {"parallel": {"max_parallel": 2}}},
-        }
-        playground.task_card = SureTaskCard(
-            task_id="tts_en_wer",
-            canonical_task="tts",
-            task_alias="tts",
-            primary_metric="tts_wer",
-        )
 
-        arch_records = [{"candidate_type": ARCH} for _ in range(8)]
-        inference_records = [{"candidate_type": INFERENCE} for _ in range(8)]
-        mixed_records = [{"candidate_type": ARCH} for _ in range(5)] + [
-            {"candidate_type": INFERENCE} for _ in range(5)
-        ]
 
-        self.assertEqual(playground._staged_records_max_workers(arch_records), 4)
-        self.assertEqual(playground._staged_records_max_workers(inference_records), 2)
-        self.assertEqual(playground._staged_records_max_workers(mixed_records), 6)
 
-    def test_staged_record_ranking_respects_metric_direction(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        playground.task_card = SureTaskCard(
-            task_id="asr_en_wer",
-            canonical_task="asr",
-            task_alias="asr",
-            primary_metric="WER",
-            metric_direction="lower",
-        )
-        records = [
-            {"success": True, "score": 2.0, "idea_id": "bad"},
-            {"success": True, "score": 1.0, "idea_id": "good"},
-            {"success": False, "score": 0.1, "idea_id": "failed"},
-        ]
-        self.assertEqual(playground._rank_staged_records(records)[0]["idea_id"], "good")
 
-        playground.task_card = SureTaskCard(
-            task_id="kws_accuracy",
-            canonical_task="kws",
-            task_alias="kws",
-            primary_metric="accuracy",
-            metric_direction="higher",
-        )
-        self.assertEqual(playground._rank_staged_records(records)[0]["idea_id"], "bad")
 
-    def test_staged_system_failure_can_fallback_to_previous_rung(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        playground.sure_config = {
-            "staged_axes": {
-                "failure_policy": "fallback_previous_rung_on_system_failure",
-            }
-        }
-        previous = [{"success": True, "score": 0.1, "idea_id": "short_best"}]
-        evaluated = [
-            {
-                "success": False,
-                "reason_code": "remote_result_missing",
-                "failure_category": "system_failure",
-            }
-        ]
-        self.assertTrue(
-            playground._should_fallback_to_previous_rung(
-                evaluated=evaluated,
-                previous_ranked=previous,
-            )
-        )
-        evaluated[0]["failure_category"] = "candidate_failure"
-        self.assertFalse(
-            playground._should_fallback_to_previous_rung(
-                evaluated=evaluated,
-                previous_ranked=previous,
-            )
-        )
 
-    def test_staged_continue_policy_falls_back_to_previous_rung_on_system_failures(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        playground.sure_config = {
-            "staged_axes": {
-                "failure_policy": "continue_on_system_failure",
-            }
-        }
-        previous = [{"success": True, "score": 0.1, "idea_id": "short_best"}]
-        evaluated = [
-            {
-                "success": False,
-                "reason_code": "remote_submit_timeout",
-                "failure_category": "system_failure",
-            }
-        ]
-        self.assertTrue(
-            playground._should_fallback_to_previous_rung(
-                evaluated=evaluated,
-                previous_ranked=previous,
-            )
-        )
 
-    def test_staged_final_candidate_failure_can_fallback_when_configured(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        playground.sure_config = {
-            "staged_axes": {
-                "final_rung_candidate_failure_fallback": "previous_rung",
-            }
-        }
-        previous = [{"success": True, "score": 0.1, "idea_id": "medium_best"}]
-        evaluated = [
-            {
-                "success": False,
-                "reason_code": "duration_autotune_failed",
-                "failure_category": "candidate_failure",
-            }
-        ]
-        self.assertTrue(
-            playground._should_fallback_final_candidate_failure(
-                rung={"name": "final"},
-                previous_ranked=previous,
-                evaluated=evaluated,
-            )
-        )
-        self.assertFalse(
-            playground._should_fallback_final_candidate_failure(
-                rung={"name": "medium"},
-                previous_ranked=previous,
-                evaluated=evaluated,
-            )
-        )
 
-    def test_staged_axis_recovers_late_remote_records_before_ranking(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        playground.sure_config = {
-            "staged_axes": {
-                "late_result_recovery": {"enabled": True},
-            }
-        }
-        playground.logger = SimpleNamespace(debug=lambda *args, **kwargs: None)
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp) / "exp"
-            result_path = workspace / "metric" / "remote_training_result.json"
-            result_path.parent.mkdir(parents=True)
-            result_path.write_text(
-                json.dumps(
-                    {
-                        "success": True,
-                        "score": 0.789,
-                        "code": "print('recovered')",
-                        "details": {"reason_code": "success"},
-                    }
-                ),
-                encoding="utf-8",
-            )
-            records = [
-                {
-                    "success": False,
-                    "reason_code": "remote_submit_timeout",
-                    "failure_category": "system_failure",
-                    "workspace": str(workspace),
-                    "code": "print('old')",
-                }
-            ]
-            recovered = playground._recover_late_remote_records(records)
 
-        self.assertTrue(recovered[0]["success"])
-        self.assertEqual(recovered[0]["score"], 0.789)
-        self.assertEqual(recovered[0]["code"], "print('recovered')")
-        self.assertTrue(recovered[0]["recovered_late_remote_result"])
-        self.assertEqual(recovered[0]["original_reason_code"], "remote_submit_timeout")
-
-    def test_staged_checkpoint_extraction_and_promotion(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        playground.logger = SimpleNamespace(warning=lambda *args, **kwargs: None, debug=lambda *args, **kwargs: None)
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            staged_dir = root / "staged_axes"
-            source = root / "exp" / "models" / "epoch-1.pt"
-            source.parent.mkdir(parents=True)
-            source.write_text("checkpoint", encoding="utf-8")
-            playground._staged_output_dir = lambda: staged_dir
-            record = {
-                "success": True,
-                "idea_id": "arch/r1:1",
-                "candidate_type": ARCH,
-                "workspace": str(root / "exp"),
-                "details": {
-                    "nested": {
-                        "produced_artifacts": {
-                            "candidate_checkpoint": str(source),
-                            "checkpoint_dir": str(source.parent),
-                        }
-                    }
-                },
-            }
-
-            promoted = playground._staged_promote_checkpoints(
-                [record],
-                axis="arch",
-                rung={"name": "short"},
-            )
-
-            metadata = promoted[0]["staged_checkpoint"]
-            retained = Path(metadata["path"])
-            self.assertEqual(metadata["epoch"], 1)
-            self.assertEqual(metadata["rung"], "short")
-            self.assertTrue(retained.is_file())
-            self.assertEqual(retained.read_text(encoding="utf-8"), "checkpoint")
-            self.assertIn("checkpoints/arch/arch_r1_1/short/epoch-1.pt", str(retained))
-
-    def test_staged_checkpoint_extraction_falls_back_to_candidate_changes(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        playground.logger = SimpleNamespace(debug=lambda *args, **kwargs: None)
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp) / "exp"
-            checkpoint = workspace / "models" / "epoch-2.pt"
-            checkpoint.parent.mkdir(parents=True)
-            checkpoint.write_text("checkpoint", encoding="utf-8")
-            changes_path = workspace / "artifacts" / "candidate_changes.json"
-            changes_path.parent.mkdir(parents=True)
-            changes_path.write_text(
-                json.dumps(
-                    {
-                        "produced_artifacts": {
-                            "candidate_checkpoint": str(checkpoint),
-                            "checkpoint_dir": str(checkpoint.parent),
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            extracted = playground._staged_extract_checkpoint({"workspace": str(workspace)})
-
-        self.assertIsNotNone(extracted)
-        self.assertEqual(extracted["path"], str(checkpoint))
-        self.assertEqual(extracted["epoch"], 2)
-
-    def test_staged_resume_env_uses_previous_rung_checkpoint_for_training_axes(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        playground.logger = SimpleNamespace(warning=lambda *args, **kwargs: None)
-        with tempfile.TemporaryDirectory() as tmp:
-            checkpoint = Path(tmp) / "staged_axes" / "checkpoints" / "arch" / "idea" / "short" / "epoch-1.pt"
-            checkpoint.parent.mkdir(parents=True)
-            checkpoint.write_text("checkpoint", encoding="utf-8")
-            previous = {
-                "idea_id": "arch_r1_1",
-                "candidate_type": ARCH,
-                "staged_checkpoint": {
-                    "path": str(checkpoint),
-                    "epoch": 1,
-                    "rung": "short",
-                },
-            }
-
-            env = playground._staged_resume_env(
-                previous,
-                axis="arch",
-                current_rung={
-                    "name": "medium",
-                    "execution_env": {"SURE_STAGED_TARGET_EPOCH": "2"},
-                },
-            )
-
-        self.assertEqual(env["SURE_STAGED_RESUME_ENABLED"], "1")
-        self.assertEqual(env["SURE_STAGED_RESUME_CHECKPOINT"], str(checkpoint))
-        self.assertEqual(env["SURE_STAGED_RESUME_EPOCH"], "1")
-        self.assertEqual(env["SURE_STAGED_RESUME_SOURCE_RUNG"], "short")
-        self.assertEqual(env["SURE_STAGED_TARGET_EPOCH"], "2")
-
-    def test_staged_resume_env_uses_medium_checkpoint_for_final_rung(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        playground.logger = SimpleNamespace(warning=lambda *args, **kwargs: None)
-        with tempfile.TemporaryDirectory() as tmp:
-            checkpoint = Path(tmp) / "epoch-2.pt"
-            checkpoint.write_text("checkpoint", encoding="utf-8")
-            previous = {
-                "idea_id": "train_r2_1",
-                "candidate_type": FINE_TUNE,
-                "staged_checkpoint": {"path": str(checkpoint), "epoch": 2, "rung": "medium"},
-            }
-            env = playground._staged_resume_env(
-                previous,
-                axis="train",
-                current_rung={
-                    "name": "final",
-                    "execution_env": {"SURE_STAGED_TARGET_EPOCH": "3"},
-                },
-            )
-
-        self.assertEqual(env["SURE_STAGED_RESUME_EPOCH"], "2")
-        self.assertEqual(env["SURE_STAGED_RESUME_SOURCE_RUNG"], "medium")
-        self.assertEqual(env["SURE_STAGED_TARGET_EPOCH"], "3")
-
-    def test_staged_resume_env_skips_inference_axis(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        record = {
-            "candidate_type": INFERENCE,
-            "staged_checkpoint": {"path": "/tmp/epoch-1.pt", "epoch": 1, "rung": "short"},
-        }
-        self.assertEqual(
-            playground._staged_resume_env(
-                record,
-                axis="inference",
-                current_rung={"name": "medium", "execution_env": {"SURE_STAGED_TARGET_EPOCH": "2"}},
-            ),
-            {},
-        )
-
-    def test_combination_candidate_type_respects_neutral_fallback_axes(self):
-        playground = SureMasterPlayground.__new__(SureMasterPlayground)
-        baseline_code = "print('baseline')"
-        neutral_arch = {"is_axis_fallback": True}
-        neutral_train = {"is_axis_fallback": True}
-        real_train = {"is_axis_fallback": False}
-        real_inference = {"is_axis_fallback": False}
-
-        self.assertEqual(
-            playground._combination_candidate_type(
-                neutral_arch,
-                real_train,
-                real_inference,
-                baseline_code,
-            ),
-            FINE_TUNE,
-        )
-        self.assertEqual(
-            playground._combination_candidate_type(
-                neutral_arch,
-                neutral_train,
-                real_inference,
-                baseline_code,
-            ),
-            INFERENCE,
-        )
 
     def test_parse_vc_info_partitions_extracts_free_gpu(self):
         output = """
@@ -2523,7 +1983,7 @@ pdgpu-a10          | 184/184              | 1152/1748            | 3648Gi/11385.
 
     def test_remote_training_source_snapshot_uses_snapshot_for_runner_not_workspace(self):
         project_root = Path(__file__).resolve().parents[4]
-        workdir = Path("/hpc_stor03") / project_root.relative_to("/mnt/cloudstorfs")
+        workdir = Path("/hpc_stor03/sure-test-project")
         snapshot = workdir / "runs/demo/source_snapshot"
         config = {
             "sure": {
@@ -2606,7 +2066,7 @@ pdgpu-a10          | 184/184              | 1152/1748            | 3648Gi/11385.
             rows = [
                 {
                     "id": f"talk-{index}",
-                    "recording": {"id": f"talk-{index // 4}"},
+                    "recording": {"id": f"talk-{index // 2}"},
                     "supervisions": [
                         {
                             "id": f"speaker-{index}-segment-{index}",
@@ -5890,7 +5350,7 @@ def run_pipeline_spec(pipeline, output_dir, **kwargs):
     def test_remote_f5_configs_reuse_child_metric_gpu(self):
         root = Path(__file__).resolve().parents[4]
         for relative_path in (
-            "configs/sure_master/gpt-5-f5tts-staged-axes-mixed.yaml",
+            "configs/sure_master/archive/staged_axes/gpt-5-f5tts-staged-axes-mixed.yaml",
             "configs/sure_master/gpt-5-f5tts-smoke.yaml",
         ):
             config = yaml.safe_load((root / relative_path).read_text(encoding="utf-8"))

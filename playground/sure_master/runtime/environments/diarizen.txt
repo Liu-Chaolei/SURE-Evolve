@@ -1,0 +1,20 @@
+# Install the repository's custom pyannote-audio, not the unrelated latest wheel.
+accelerate==1.6.0
+einops
+flit
+h5py
+joblib
+tensorboard
+librosa>=0.10,<1
+matplotlib
+numpy==1.26.4
+onnxruntime
+pandas
+PyYAML
+scipy
+soundfile
+tabulate
+toml
+torchinfo
+tqdm
+thop

@@ -68,6 +68,7 @@ def parse_args() -> argparse.Namespace:
         required=True,
     )
     parser.add_argument("--idea-text", default="")
+    parser.add_argument("--model-artifact", default="", help="Replay a retained model without training")
     parser.add_argument("--train-args-json", default="[]")
     parser.add_argument("--decode-args-json", default="[]")
     parser.add_argument("--changed-fields-json", default="[]")
@@ -79,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--decode-epoch", default="")
     parser.add_argument("--decode-avg", default="1")
     parser.add_argument("--use-averaged-model", default="0")
-    parser.add_argument("--decode-method", default="modified_beam_search")
+    parser.add_argument("--decode-method", default=os.environ.get("SURE_DECODE_METHOD", "modified_beam_search"))
     parser.add_argument("--decode-max-duration", default=os.environ.get("SURE_BASELINE_DECODE_MAX_DURATION", "300"))
     return parser.parse_args()
 
@@ -328,11 +329,24 @@ def validate_candidate_args(
 ) -> None:
     train_names = arg_names(train_extra_args)
     decode_names = arg_names(decode_extra_args)
+    reserved_train = train_names & {"--exp-dir", "--world-size", "--num-epochs", "--start-epoch", "--master-port", "--use-fp16"}
+    reserved_decode = decode_names & {"--exp-dir", "--epoch", "--avg", "--use-averaged-model", "--decoding-method"}
+    if reserved_train or reserved_decode:
+        raise ValueError("Use wrapper options or execution configuration for controlled arguments: "
+                         + ", ".join(sorted(reserved_train | reserved_decode)))
+    if os.environ.get("SURE_ASR_FIXED_BUDGET") == "1":
+        forbidden = (train_names | decode_names) & {"--bpe-model", "--manifest-dir", "--max-duration", "--start-batch"}
+        if forbidden:
+            raise ValueError("Fixed search data/tokenizer/batch contract: " + ", ".join(sorted(forbidden)))
+    fixed_seed = os.environ.get("SURE_ASR_FIXED_SEED")
+    if fixed_seed and "--seed" in train_names and last_arg_value(train_extra_args, "--seed") != fixed_seed:
+        raise ValueError("Candidate seed must match SURE_ASR_FIXED_SEED")
     if candidate_type == INFERENCE and action != "decode_only":
         raise ValueError("inference candidates must use --action decode_only")
     if candidate_type == FINE_TUNE and train_names.intersection(STRUCTURE_ARGS):
         raise ValueError("fine_tune candidates must not change Zipformer structure args")
-    if candidate_type == ARCH and not train_names.intersection(STRUCTURE_ARGS):
+    from playground.sure_master.runtime.icefall import recipe_changes
+    if candidate_type == ARCH and not train_names.intersection(STRUCTURE_ARGS) and not recipe_changes():
         raise ValueError(
             "arch candidates must change at least one Zipformer structure arg: "
             + ", ".join(sorted(STRUCTURE_ARGS))
@@ -376,6 +390,12 @@ def selected_train_duration(final_train_args: list[str]) -> int:
         baseline.BASELINE_TRAIN_MAX_DURATION,
         final_train_args,
     )
+    requested = last_arg_value(final_train_args, "--max-duration")
+    if requested is not None:
+        requested_duration = parse_int(requested, -1)
+        if requested_duration <= 0 or requested_duration > duration:
+            raise ValueError("Candidate max-duration must be positive and within the configured duration limit")
+        duration = requested_duration
     floor = max(
         1,
         parse_int(os.environ.get("SURE_TRAIN_DURATION_MIN"), 100),
@@ -494,6 +514,8 @@ def train_command(
         str(train_epochs),
         "--start-epoch",
         str(start_epoch),
+        "--seed",
+        str(baseline.int_env("SURE_ASR_FIXED_SEED", 42)),
         "--use-fp16",
         fp16,
         "--exp-dir",
@@ -504,11 +526,12 @@ def train_command(
         str(15000 + ((os.getpid() + train_duration + attempt_index) % 20000)),
         "--max-duration",
         str(train_duration),
-        *final_train_args,
+        *remove_cli_arg(final_train_args, "--max-duration"),
     ]
     if os.environ.get("SURE_ENABLE_MUSAN", "0").strip() == "0" and "--enable-musan" not in arg_names(final_train_args):
         command.extend(["--enable-musan", "0"])
-    return command
+    from playground.sure_master.runtime.resume import resume_command
+    return resume_command(command, exp_dir)
 
 
 def run_training(
@@ -621,12 +644,21 @@ def write_candidate_record(
     decode_bpe_model: Path,
     elapsed_seconds: float,
     staged_resume: dict[str, Any] | None = None,
+    decode_epoch: int | None = None,
+    decode_method: str = "modified_beam_search",
+    decode_avg: int = 1,
+    use_averaged_model: bool = False,
 ) -> None:
+    from playground.sure_master.runtime.icefall import recipe_changes
     train_config = args_to_config(final_train_args)
     decode_config = args_to_config(final_decode_args)
     train_bpe_sha256 = bpe_sha256_if_available(train_bpe_model)
     decode_bpe_sha256 = bpe_sha256_if_available(decode_bpe_model)
     inferred_changed = []
+    if decode_avg != baseline.int_env("SURE_BASELINE_AVG", 1):
+        inferred_changed.append("inference_config.decode_avg")
+    if baseline.truthy(str(use_averaged_model)) != baseline.truthy(os.environ.get("SURE_BASELINE_USE_AVERAGED_MODEL", "0")):
+        inferred_changed.append("inference_config.use_averaged_model")
     for option in arg_names(train_extra_args):
         prefix = "arch_config" if option in STRUCTURE_ARGS else "training_config"
         inferred_changed.append(f"{prefix}.{option[2:].replace('-', '_')}")
@@ -635,6 +667,11 @@ def write_candidate_record(
     payload = {
         "candidate_type": candidate_type,
         "idea_text": idea_text,
+        "runtime": {"recipe_source": str(baseline.SOURCE_RECIPE_DIR), "accelerator": os.environ.get("SURE_ACCELERATOR", "cuda"),
+                    "framework_sha256": os.environ.get("SURE_FRAMEWORK_DIGEST"),
+                    "image": os.environ.get("SURE_RUNTIME_IMAGE"),
+                    "world_size": current_world_size(),
+                    "training_seed": baseline.int_env("SURE_ASR_FIXED_SEED", 42)},
         "changed_fields": changed_fields or sorted(set(inferred_changed)),
         "arch_config": {
             key: value
@@ -653,10 +690,15 @@ def write_candidate_record(
         },
         "inference_config": {
             **decode_config,
+            "decoding_method": decode_method,
+            "decode_avg": decode_avg,
+            "use_averaged_model": use_averaged_model,
             "eval_splits": baseline.parse_eval_splits(),
             "actual_bpe_model": str(decode_bpe_model),
             "actual_bpe_sha256": decode_bpe_sha256,
         },
+        "parent_model_artifact": os.environ.get("SURE_ASR_REPLAY_PARENT", ""),
+        "recipe_changes": recipe_changes(baseline.SOURCE_RECIPE_DIR),
         "defaults": {
             "dataset_profile": baseline.dataset_profile().name,
             "recipe_profile": baseline.recipe_profile().name,
@@ -671,7 +713,7 @@ def write_candidate_record(
         "produced_artifacts": {
             "hyp": "artifacts/hyp.txt",
             "checkpoint_dir": str(exp_dir),
-            "candidate_checkpoint": str(exp_dir / f"epoch-{trained_epoch}.pt") if trained_epoch else "",
+            "candidate_checkpoint": str(exp_dir / f"epoch-{decode_epoch or trained_epoch}.pt") if (decode_epoch or trained_epoch) else "",
         },
         "elapsed_seconds": elapsed_seconds,
         "timestamp": time.time(),
@@ -681,6 +723,57 @@ def write_candidate_record(
 
 def main() -> int:
     args = parse_args()
+    if os.environ.get("SURE_ASR_FIXED_BUDGET") == "1":
+        if args.action == "train_decode" and int(os.environ.get("SURE_REQUIRED_TRAIN_WORLD_SIZE", "8")) != current_world_size():
+            raise ValueError("Training action does not match the allocated eight-card resource profile")
+        if args.action == "train_decode" and int(args.train_epochs) != int(os.environ["SURE_MAX_TRAIN_EPOCHS"]):
+            raise ValueError("Training candidate must use exactly the common epoch budget")
+        if os.environ.get("SURE_ACCELERATOR") == "npu" and args.decode_method != "greedy_search":
+            raise ValueError("This NPU execution contract supports greedy_search decoding")
+    workspace = Path.cwd().resolve()
+    for value, directory in ((args.exp_dir, "models"), (args.working_dir, "working")):
+        try:
+            relative = Path(value).resolve().relative_to(workspace)
+        except ValueError as exc:
+            raise ValueError(f"Candidate output must stay in the experiment workspace: {value}") from exc
+        if not relative.parts or relative.parts[0] != directory:
+            raise ValueError(f"Candidate output must be under {directory}/: {value}")
+    model_artifact = args.model_artifact or (os.environ.get("SURE_ASR_INITIAL_MODEL_ARTIFACT", "") if args.action == "decode_only" else "")
+    if model_artifact:
+        os.environ["SURE_ASR_REPLAY_PARENT"] = str(Path(model_artifact).resolve())
+        from playground.sure_master.core.utils.model_artifact import restore_model_artifact
+        manifest = json.loads(Path(model_artifact).read_text())
+        recorded_dir = Path(manifest["checkpoint"]).parent
+        if recorded_dir.is_absolute() or ".." in recorded_dir.parts or not recorded_dir.parts or recorded_dir.parts[0] != "models":
+            raise ValueError("Retained model must use a workspace-relative models/ layout")
+        recorded_dir.resolve().relative_to(workspace)
+        args.exp_dir = str(recorded_dir)
+        epoch, bpe, metadata = restore_model_artifact(model_artifact, Path(args.exp_dir), workspace=workspace)
+        args.action = "decode_only"
+        args.candidate_type = INFERENCE
+        if args.model_artifact or not args.decode_epoch:
+            args.decode_epoch = str(epoch)
+        inference = metadata.get("inference_config", {})
+        if args.model_artifact:
+            args.decode_method = inference.get("decoding_method", os.environ.get("SURE_DECODE_METHOD", "modified_beam_search"))
+            args.decode_avg = str(inference.get("decode_avg", "1"))
+            args.use_averaged_model = str(inference.get("use_averaged_model", "0"))
+        extra = list(metadata.get("diff_from_defaults", {}).get("decode_extra_args", []))
+        for key, value in metadata.get("arch_config", {}).items():
+            extra = force_cli_arg(extra, "--" + key.replace("_", "-"), str(value))
+        if not args.model_artifact:
+            extra = merge_cli_args(extra, parse_list(args.decode_args_json))
+        validate_requested_decode_bpe_model(train_bpe_model=bpe, final_decode_args=extra)
+        extra = remove_cli_arg(extra, "--bpe-model")
+        args.decode_args_json = json.dumps(extra)
+        os.environ["SURE_BASELINE_BPE_MODEL"] = str(bpe)
+        os.environ["SURE_BASELINE_EPOCH"] = str(epoch)
+        os.environ["SURE_BASELINE_USE_AVERAGED_MODEL"] = args.use_averaged_model
+        os.environ["SURE_BASELINE_AVG"] = args.decode_avg
+        os.environ["SURE_BASELINE_USE_PRETRAINED"] = "0"
+        saved_recipe = Path(model_artifact).resolve().parent / "recipe"
+        if saved_recipe.is_dir():
+            baseline.RECIPE_DIR = saved_recipe
     started = time.time()
     candidate_type = normalize_candidate_type(args.candidate_type, default=INFERENCE)
     train_extra_args = parse_list(args.train_args_json)
@@ -698,7 +791,10 @@ def main() -> int:
     exp_dir = Path(args.exp_dir)
     working_dir = Path(args.working_dir)
     configure_baseline_paths(exp_dir, working_dir)
+    os.environ["SURE_ASR_EXECUTION_ACTION"] = args.action
     baseline.ensure_workspace()
+    if args.action == "decode_only" and not model_artifact:
+        baseline.copy_checkpoint_source()
     exp_dir.mkdir(parents=True, exist_ok=True)
     working_dir.mkdir(parents=True, exist_ok=True)
 
@@ -744,6 +840,9 @@ def main() -> int:
     staged_resume: dict[str, Any] = {"enabled": False, "start_epoch": 1}
     if args.action == "train_decode":
         requested_train_epochs = max(1, parse_int(args.train_epochs, 1))
+        cap = os.environ.get("SURE_STAGED_TARGET_EPOCH") or os.environ.get("SURE_MAX_TRAIN_EPOCHS")
+        if cap is not None and requested_train_epochs > parse_int(cap, 0):
+            raise ValueError("Requested training epochs exceed the configured epoch budget")
         staged_resume = staged_resume_config(exp_dir, requested_train_epochs)
         trained_epoch, selected_duration, attempts = run_training(
             exp_dir=exp_dir,
@@ -805,6 +904,10 @@ def main() -> int:
         decode_bpe_model=decode_bpe_model,
         elapsed_seconds=time.time() - started,
         staged_resume=staged_resume,
+        decode_epoch=epoch,
+        decode_method=args.decode_method,
+        decode_avg=avg,
+        use_averaged_model=baseline.truthy(str(args.use_averaged_model)),
     )
     return 0
 

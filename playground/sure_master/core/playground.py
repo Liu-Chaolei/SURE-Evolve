@@ -5,14 +5,13 @@ import logging
 import math
 import os
 import py_compile
-import re
 import shutil
 import subprocess
 import sys
 import threading
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import asdict
 from functools import partial
-from itertools import product
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,7 +25,6 @@ from evomaster.core import BasePlayground, register_playground
 from ..agent.session.local import SureMasterLocalSession
 from .exp.knowledge_promotion_exp import KnowledgePromotionExp
 from .exp.prefetch_exp import PrefetchExp
-from .exp.research_exp import ResearchExp
 from .exp.run_exp import SureRunExp
 from .exp.wisdom_promotion_exp import WisdomPromotionExp
 from .utils.code import save_code_to_file
@@ -35,9 +33,7 @@ from .utils.candidate_type import (
     FINE_TUNE,
     INFERENCE,
     TRAINING_TYPES,
-    candidate_type_from_code,
     candidate_type_from_idea,
-    normalize_candidate_type,
 )
 from .utils.metric import SureMetricRunner
 from .utils.task_cards import (
@@ -62,6 +58,15 @@ from .utils.watch_dog import (
     TimeoutWatchdog,
     _async_raise,
 )
+from .contracts import CandidateResult, IdeaRequest, MetricSpec, RoundResult, RungResult
+from .providers import XlabIdeaProvider
+from .xlab_client import XlabIdeaClient, XlabIdeaClientError
+from .history import XlabHistoryJournal
+from .utils.fingerprints import digest
+from ..runtime.accelerator import runtime_environment
+from ..tasks import get_adapter
+from .datasets import split_specs
+from .artifacts import load_bundle
 
 
 _NO_GPU_SENTINELS = {"", "none", "null", "false", "cpu", "-1"}
@@ -283,6 +288,8 @@ def _non_negative_int(value: Any, default: int) -> int:
 def _coordinator_local_gpu_required(config: Any) -> tuple[bool, str]:
     """Resolve the shared coordinator GPU policy before session discovery."""
     sure_config = sure_config_from(config)
+    if sure_config.get("execution_mode") == "slurm":
+        return False, "slurm"
     coordinator = sure_config.get("coordinator") or {}
     if not isinstance(coordinator, dict):
         coordinator = {}
@@ -498,7 +505,12 @@ def _use_all_gpus_for_serial_tasks(parallel_config: dict[str, Any], max_workers:
 class SureMasterPlayground(BasePlayground):
     """SURE-backed multi-task speech self-evolution playground."""
 
-    def __init__(self, config_dir: Path | None = None, config_path: Path | None = None):
+    def __init__(
+        self,
+        config_dir: Path | None = None,
+        config_path: Path | None = None,
+        xlab_provider: XlabIdeaProvider | None = None,
+    ):
         if config_path is None and config_dir is None:
             config_dir = Path(__file__).parent.parent.parent.parent / "configs" / "sure_master"
         super().__init__(config_dir=config_dir, config_path=config_path)
@@ -513,17 +525,29 @@ class SureMasterPlayground(BasePlayground):
             "wisdom_promotion_agent",
         )
         self.exp_index = 0
+        self.run_id: str | None = None
         self.initial_code: str | None = None
         self.best_score: float | None = None
         self.best_solution: str | None = None
         self.real_time_best_solution: str | None = None
         self.research_plan_and_result: list[str] = []
+        self.xlab_provider = xlab_provider
+        self._xlab_summary_artifacts: list[str] = []
+        self._xlab_history: list[dict[str, Any]] = []
+        self._xlab_history_journal: XlabHistoryJournal | None = None
+        self._xlab_client_owned = False
+        self._xlab_last_batch_digest: str | None = None
+        self._xlab_last_batch_artifacts: list[str] = []
+        self._xlab_idea_metadata: dict[Any, dict[str, Any]] = {}
         self.prefetch_descriptor: str | None = None
 
         self.sure_config = self.config_manager.get("sure", {}) or {}
         self._source_snapshot_path: Path | None = None
         self.task_card = self._load_task_card()
         self.base_model_profile = self._resolve_base_model_profile()
+        self.task_adapter = None
+        if self.task_card.canonical_task in {"asr", "tts", "sd"} or self.sure_config.get("adapter"):
+            self.task_adapter = get_adapter(self.task_card.canonical_task, self.sure_config.get("adapter"))
         self.max_research_rounds = _non_negative_int(
             os.environ.get(
                 "SURE_MAX_RESEARCH_ROUNDS",
@@ -550,8 +574,10 @@ class SureMasterPlayground(BasePlayground):
     def setup(self) -> None:
         self.logger.info("Setting up SURE Master playground...")
         self._setup_session()
+        self._ensure_run_id()
         self._setup_agents()
         self._setup_workspace()
+        self._setup_xlab_history()
         self._prepare_source_snapshot_if_enabled()
         self._run_non_disk_preflight_if_enabled()
         self.logger.info("SURE Master playground setup complete")
@@ -586,8 +612,49 @@ class SureMasterPlayground(BasePlayground):
             os.makedirs(os.path.join(self.session.config.workspace_path, name), exist_ok=True)
         self.logger.info("working_dir: %s", self.session.config.workspace_path)
 
+    def _ensure_run_id(self) -> str:
+        if self.run_id:
+            return self.run_id
+        run_dir = Path(getattr(self, "run_dir", "") or "").resolve()
+        task_id = str(getattr(self, "task_id", None) or self.task_card.task_id)
+        identity = f"{run_dir}:{task_id}"
+        self.run_id = "sure-" + digest(identity)[len("sha256:") : 24]
+        return self.run_id
+
+    def _create_prefetch_exp(self, exp_index: int) -> PrefetchExp:
+        return PrefetchExp(
+            self.agents.prefetch_agent,
+            self.config,
+            f"exp_{exp_index}_prefetch",
+            self.task_card,
+            self.base_model_profile,
+        )
+
+    def _setup_xlab_history(self) -> None:
+        if not self._xlab_enabled():
+            return
+        xlab_config = self.config_manager.get("xlab", {}) or {}
+        configured_path = str(xlab_config.get("history_path") or "artifacts/xlab_history.json")
+        history_path = Path(configured_path)
+        if history_path.is_absolute() or ".." in history_path.parts:
+            raise ValueError("xlab.history_path must be workspace-relative")
+        self._xlab_history_journal = XlabHistoryJournal(
+            Path(self.session.config.workspace_path) / history_path
+        )
+        self._xlab_history = self._xlab_history_journal.round_history()
+        self._xlab_summary_artifacts = self._xlab_history_journal.summary_references()
+
+    def _record_xlab_event(self, event: str, payload: dict[str, Any]) -> str | None:
+        if self._xlab_history_journal is None:
+            return None
+        return self._xlab_history_journal.append(event, payload)
+
     def _draft_candidate_type_hint(self) -> str:
-        return FINE_TUNE if draft_runs_remotely(self.config) else INFERENCE
+        remote = draft_runs_remotely(self.config)
+        adapter = getattr(self, "task_adapter", None)
+        if adapter is not None:
+            return adapter.baseline_candidate_type(self.sure_config, remote)
+        return FINE_TUNE if remote else INFERENCE
 
     def _run_root_dir(self) -> Path:
         workspace = Path(self.session.config.workspace_path).resolve()
@@ -658,9 +725,9 @@ class SureMasterPlayground(BasePlayground):
         errors = self._non_disk_preflight_errors(preflight)
         if errors:
             payload = {"success": False, "reason_code": "preflight_failed", "errors": errors}
-            self._write_staged_json("preflight_failure.json", payload)
+            self._write_run_json("preflight_failure.json", payload)
             raise RuntimeError("SURE preflight failed: " + "; ".join(errors))
-        self._write_staged_json("preflight_ok.json", {"success": True, "reason_code": "preflight_ok"})
+        self._write_run_json("preflight_ok.json", {"success": True, "reason_code": "preflight_ok"})
 
     def _non_disk_preflight_errors(self, preflight: dict[str, Any]) -> list[str]:
         root = self._source_snapshot_path or project_root
@@ -768,7 +835,8 @@ class SureMasterPlayground(BasePlayground):
         return SureMetricRunner(
             sure_root=sure_root,
             pythonpath=pythonpath,
-            device=self.sure_config.get("device", "cuda"),
+            device=(self.sure_config.get("metric_runtime") or {}).get("device", self.sure_config.get("device", "cpu")),
+            python=(self.sure_config.get("metric_runtime") or {}).get("python"),
             cache_dir=self.sure_config.get("cache_dir"),
             validate_env=bool(self.sure_config.get("validate_env", False)),
             metric_gpu=self.sure_config.get("metric_gpu"),
@@ -778,14 +846,18 @@ class SureMasterPlayground(BasePlayground):
         configured = self.sure_config.get("inputs", {}) or {}
         result = dict(self.task_card.artifact_contract)
         result.update(configured)
+        search = split_specs(self.sure_config).get("search")
+        if search:
+            result.update(search.roles)
         return result
 
     def _is_valid_score(self, score: Any) -> bool:
         if score is None:
             return False
-        if isinstance(score, float) and math.isnan(score):
+        try:
+            return math.isfinite(float(score))
+        except (TypeError, ValueError):
             return False
-        return True
 
     def compare_score(self, old_score: float | None, new_score: float | None) -> bool:
         if not self._is_valid_score(new_score):
@@ -834,12 +906,12 @@ class SureMasterPlayground(BasePlayground):
     ) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
         for idea in ideas:
+            metadata = getattr(self, "_xlab_idea_metadata", {}).get(self._idea_result_key(idea), {})
             candidate_type = (
-                candidate_type_from_idea(idea)
-                if mixed_enabled
-                else INFERENCE
+                metadata.get("candidate_type")
+                or (candidate_type_from_idea(idea) if mixed_enabled else INFERENCE)
             )
-            if mixed_enabled:
+            if mixed_enabled and not metadata:
                 limit = round_candidate_limits.get(candidate_type, 0)
                 if limit > 0 and round_candidate_counts.get(candidate_type, 0) >= limit:
                     self.logger.info(
@@ -895,23 +967,18 @@ class SureMasterPlayground(BasePlayground):
         )
 
     def _execution_env(self) -> dict[str, str]:
-        execution_env = {
-            str(key): str(value)
-            for key, value in (self.sure_config.get("execution_env", {}) or {}).items()
-        }
-        remote_icefall_python = os.environ.get("SURE_REMOTE_ICEFALL_PYTHON")
-        for key in list(execution_env):
-            if key == "SURE_ICEFALL_PYTHON":
-                if remote_icefall_python:
-                    execution_env[key] = remote_icefall_python
-                    execution_env["SURE_REMOTE_ICEFALL_PYTHON"] = remote_icefall_python
-                continue
-            if key in os.environ and self._is_runtime_env_override_key(key):
-                execution_env[key] = os.environ[key]
-        local_icefall_python = os.environ.get("SURE_LOCAL_ICEFALL_PYTHON")
-        if local_icefall_python:
-            execution_env["SURE_LOCAL_ICEFALL_PYTHON"] = local_icefall_python
-        return execution_env
+        env = {str(k): str(v) for k, v in (self.sure_config.get("execution_env") or {}).items()}
+        env.update(runtime_environment(self.sure_config.get("runtime") or {}))
+        adapter = getattr(self, "task_adapter", None)
+        if adapter is None:
+            card = getattr(self, "task_card", None)
+            task = getattr(card, "canonical_task", self.sure_config.get("task_id", "asr_en_wer").split("_", 1)[0])
+            adapter = get_adapter(task, self.sure_config.get("adapter"))
+        env.update(adapter.environment(self.sure_config))
+        if self.sure_config.get("require_model_artifact", False):
+            env["SURE_REQUIRE_MODEL_ARTIFACT"] = "1"
+        return env
+
 
     @staticmethod
     def _is_runtime_env_override_key(key: str) -> bool:
@@ -927,67 +994,6 @@ class SureMasterPlayground(BasePlayground):
             )
         ) or key == "PYTHONPATH"
 
-    def _staged_axes_config(self) -> dict[str, Any]:
-        raw = self.sure_config.get("staged_axes") or {}
-        return raw if isinstance(raw, dict) else {}
-
-    def _staged_axes_enabled(self) -> bool:
-        staged = self._staged_axes_config()
-        strategy = str(self.sure_config.get("search_strategy", "")).strip().lower()
-        return bool(staged.get("enabled", False)) or strategy in {
-            "staged_axes",
-            "axis_staged",
-            "three_axis",
-        }
-
-    def _staged_start_phase(self) -> str:
-        start_phase = str(
-            self._staged_axes_config().get("start_phase", "draft")
-        ).strip().lower()
-        if start_phase not in {"draft", "arch"}:
-            raise ValueError(
-                "sure.staged_axes.start_phase must be 'draft' or 'arch', "
-                f"got {start_phase!r}"
-            )
-        return start_phase
-
-    def _staged_initial_source(self) -> tuple[str, str, Path]:
-        raw_path = self.sure_config.get("initial_solution_path")
-        if not raw_path or not str(raw_path).strip():
-            raise ValueError(
-                "sure.initial_solution_path is required when "
-                "sure.staged_axes.start_phase is 'arch'"
-            )
-        configured_path = str(raw_path).strip()
-        source_path = Path(configured_path).expanduser()
-        if not source_path.is_absolute():
-            source_path = project_root / source_path
-        if not source_path.is_file():
-            raise FileNotFoundError(
-                "Configured initial solution for staged arch entry is not a "
-                f"readable file: {source_path}"
-            )
-        try:
-            source = source_path.read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            raise OSError(
-                "Cannot read configured initial solution for staged arch entry: "
-                f"{source_path}"
-            ) from exc
-        if not source:
-            raise ValueError(
-                "Configured initial solution for staged arch entry is empty: "
-                f"{source_path}"
-            )
-        return configured_path, source, source_path.resolve()
-
-    @staticmethod
-    def _staged_int(value: Any, default: int, minimum: int = 0) -> int:
-        try:
-            parsed = int(float(str(value).strip()))
-        except (TypeError, ValueError):
-            parsed = default
-        return max(minimum, parsed)
 
     @staticmethod
     def _string_dict(value: Any) -> dict[str, str]:
@@ -995,483 +1001,241 @@ class SureMasterPlayground(BasePlayground):
             return {}
         return {str(key): str(item) for key, item in value.items() if item is not None}
 
-    def _staged_axis_candidate_type(self, axis: str) -> str:
-        if axis == "arch":
-            return ARCH
-        if axis == "train":
-            return FINE_TUNE
-        if axis == "inference":
-            return INFERENCE
-        raise ValueError(f"Unknown staged axis: {axis}")
 
-    def _staged_axis_key(self, axis: str) -> str:
-        return "fine_tune" if axis == "train" else axis
 
-    def _staged_phase_config(self, phase: str) -> dict[str, Any]:
-        raw = self._staged_axes_config().get(phase) or {}
-        return raw if isinstance(raw, dict) else {}
 
-    def _staged_axis_config(self, axis: str) -> dict[str, Any]:
-        axes = self._staged_axes_config().get("axes") or {}
-        if isinstance(axes, dict) and isinstance(axes.get(axis), dict):
-            return axes[axis]
-        raw = self._staged_axes_config().get(axis) or {}
-        return raw if isinstance(raw, dict) else {}
 
-    def _staged_role_paths(self, phase: str = "search") -> dict[str, str | None]:
-        role_paths = self._role_paths()
-        phase_config = self._staged_phase_config(phase)
-        inputs = phase_config.get("inputs") or {}
-        if isinstance(inputs, dict):
-            role_paths.update({str(key): (None if value is None else str(value)) for key, value in inputs.items()})
-        return role_paths
 
-    def _staged_base_model_overrides(self, phase: str = "search") -> dict[str, str]:
-        phase_config = self._staged_phase_config(phase)
-        return self._string_dict(phase_config.get("base_model_source_paths"))
+    def _xlab_enabled(self) -> bool:
+        xlab_config = self.config_manager.get("xlab", {}) or {}
+        provider_config = xlab_config.get("idea_provider", {}) or {}
+        return bool(xlab_config.get("enabled", False) and provider_config.get("enabled", False))
 
-    def _staged_execution_env(
+    def _configure_xlab_provider(self) -> None:
+        if not self._xlab_enabled() or self.xlab_provider is not None:
+            return
+        xlab_config = self.config_manager.get("xlab", {}) or {}
+        provider_config = xlab_config.get("idea_provider", {}) or {}
+        command = provider_config.get("command")
+        if not isinstance(command, list) or not command or any(not isinstance(item, str) or not item.strip() for item in command):
+            raise RuntimeError("xlab.idea_provider.command must be a configured argv list")
+        timeout = int(provider_config.get("timeout_seconds", xlab_config.get("launcher_timeout_seconds", 3600)))
+        receipt_path = (
+            provider_config.get("receipt_path")
+            or xlab_config.get("receipt_path")
+            or "artifacts/xlab_operations.json"
+        )
+        self.xlab_provider = XlabIdeaClient(
+            command,
+            timeout_seconds=timeout,
+            receipt_path=receipt_path,
+            workspace_root=self.session.config.workspace_path,
+            environment={str(k): str(v) for k, v in (provider_config.get("environment") or {}).items()},
+        )
+        self._xlab_client_owned = True
+
+    def _close_xlab_provider(self) -> None:
+        if self._xlab_client_owned and self.xlab_provider is not None:
+            self.xlab_provider.close()
+            self.xlab_provider = None
+            self._xlab_client_owned = False
+
+    def _summarize_xlab_result(self, result: RoundResult):
+        directory = Path(self.session.config.workspace_path) / "artifacts/xlab_rounds"
+        directory.mkdir(parents=True, exist_ok=True)
+        key = digest(asdict(result)).removeprefix("sha256:")
+        (directory / f"{key}.request.json").write_text(json.dumps(asdict(result), indent=2) + "\n")
+        if (directory / f"{key}.summary.json").exists():
+            from .contracts import RoundSummary
+            return RoundSummary(**json.loads((directory / f"{key}.summary.json").read_text()))
+        summary = self.xlab_provider.summarize(result)
+        (directory / f"{key}.summary.json").write_text(json.dumps(asdict(summary), indent=2) + "\n")
+        return summary
+
+    def _xlab_request(
         self,
         *,
-        phase: str = "search",
-        stage_name: str = "",
-        rung: dict[str, Any] | None = None,
-        extra_env: dict[str, str] | None = None,
-    ) -> dict[str, str]:
-        execution_env = self._execution_env()
-        phase_config = self._staged_phase_config(phase)
-        execution_env.update(self._string_dict(phase_config.get("execution_env")))
-        if rung:
-            execution_env.update(self._string_dict(rung.get("execution_env")))
-            execution_env["SURE_STAGED_RUNG"] = str(rung.get("name") or "")
-        if stage_name:
-            execution_env["SURE_STAGED_STAGE"] = stage_name
-        execution_env["SURE_STAGED_PHASE"] = phase
-        if extra_env:
-            execution_env.update({str(key): str(value) for key, value in extra_env.items()})
-        return execution_env
-
-    def _staged_draft_execution_env(self) -> dict[str, str]:
-        execution_env = self._staged_execution_env(
-            phase="draft",
-            stage_name="stage0_draft",
-        )
-        use_pretrained = str(
-            execution_env.get("SURE_BASELINE_USE_PRETRAINED", "")
-        ).strip().lower() in {"1", "true", "yes", "y", "on"}
-        if use_pretrained:
-            execution_env["SURE_DURATION_AUTOTUNE"] = "0"
-            max_duration = str(execution_env.get("SURE_MAX_DURATION", "")).strip().lower()
-            if max_duration == "auto":
-                execution_env["SURE_MAX_DURATION"] = str(
-                    execution_env.get("SURE_BASELINE_DECODE_MAX_DURATION")
-                    or "300"
-                )
-        return execution_env
-
-    def _staged_axis_rungs(self, axis: str, final_keep: int) -> list[dict[str, Any]]:
-        axis_config = self._staged_axis_config(axis)
-        configured = axis_config.get("rungs")
-        if isinstance(configured, list) and configured:
-            rungs = [item for item in configured if isinstance(item, dict)]
-        else:
-            rungs = [
-                {"name": "short", "keep": 8},
-                {"name": "medium", "keep": final_keep},
-                {"name": "final", "keep": final_keep},
-            ]
-        normalized: list[dict[str, Any]] = []
-        for index, rung in enumerate(rungs):
-            name = str(rung.get("name") or f"rung_{index + 1}")
-            default_keep = final_keep if index == len(rungs) - 1 else 8
-            keep = self._staged_int(rung.get("keep"), default_keep, minimum=1)
-            normalized.append({**rung, "name": name, "keep": keep})
-        return normalized
-
-    def _staged_rounds_per_axis(self) -> int:
-        staged = self._staged_axes_config()
-        return self._staged_int(staged.get("rounds_per_axis"), 4, minimum=1)
-
-    def _staged_ideas_per_round(self) -> int:
-        staged = self._staged_axes_config()
-        return self._staged_int(staged.get("ideas_per_round"), 4, minimum=1)
-
-    def _staged_final_keep(self, axis: str) -> int:
-        staged = self._staged_axes_config()
-        key = "top_inference" if axis == "inference" else f"top_{axis}"
-        default = 3 if axis == "inference" else 2
-        return self._staged_int(staged.get(key), default, minimum=1)
-
-    def _staged_runner_up_count(self) -> int:
-        return self._staged_int(self._staged_axes_config().get("runner_up_count"), 5, minimum=0)
-
-    def _staged_records_max_workers(self, records: list[dict[str, Any]]) -> int:
-        task_count = len(records)
-        if task_count <= 0:
-            return 1
-        if isinstance(self.config, dict):
-            session_root = self.config.get("session", {}) or {}
-        else:
-            session_root = getattr(self.config, "session", {}) or {}
-        session_config = session_root.get("local", {}) if isinstance(session_root, dict) else {}
-        parallel_config = session_config.get("parallel", {}) or {}
-        try:
-            local_workers = max(1, int(parallel_config.get("max_parallel", 1) or 1))
-        except (TypeError, ValueError):
-            local_workers = 1
-        if not self._mixed_execution_enabled():
-            return min(local_workers, task_count)
-
-        remote_types = remote_candidate_types_from(self.config)
-        remote_workers = remote_training_max_parallel(self.config, default=1)
-        candidate_types = {
-            normalize_candidate_type(record.get("candidate_type"), default=INFERENCE)
-            for record in records
+        task_description: str,
+        search_mode: str,
+        round_index: int,
+        requested_idea_count: int,
+        axis: str | None = None,
+    ) -> IdeaRequest:
+        metric_name = str(getattr(self.task_card, "primary_metric", "metric"))
+        metric_direction = "lower" if bool(getattr(self.task_card, "is_lower_better", True)) else "higher"
+        run_id = self._ensure_run_id()
+        axis_index = {"arch": 0, "train": 1, "inference": 2}.get(axis)
+        request_id = f"{run_id}-{search_mode}-{axis or 'ordinary'}-r{round_index}"
+        task_card = self.task_card.to_dict() if hasattr(self.task_card, "to_dict") else {}
+        base_model = self.base_model_profile.to_dict() if self.base_model_profile else {}
+        parent_lineage = list(self._xlab_summary_artifacts) + list(self._xlab_last_batch_artifacts)
+        history_digest = digest(self._xlab_history)
+        current_best = {
+            "solution_digest": digest(self.best_solution or self.initial_code or ""),
+            "score": self.best_score,
+            "model_artifact": getattr(self, "best_model_artifact", {}),
+            "implementation": self.best_solution or self.initial_code or "",
+            "evaluation_scope": {"search": self._role_paths(), "manifest": self._execution_env().get("SURE_EVAL_MANIFEST")},
         }
-        has_remote = any(candidate_type in remote_types for candidate_type in candidate_types)
-        has_local = any(candidate_type not in remote_types for candidate_type in candidate_types)
-        if has_remote and not has_local:
-            return min(remote_workers, task_count)
-        if has_local and not has_remote:
-            return min(local_workers, task_count)
-        return min(local_workers + remote_workers, task_count)
-
-    def _staged_output_dir(self) -> Path:
-        path = Path(self.session.config.workspace_path) / "staged_axes"
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    def _write_staged_json(self, name: str, payload: Any) -> None:
-        path = self._staged_output_dir() / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n",
-            encoding="utf-8",
+        # Recover lineage from persisted history, including after controller restart.
+        for history in reversed(self._xlab_history):
+            for candidate in history.get("candidates", []):
+                native = candidate.get("idea", {}).get("native_artifact")
+                checkpoint = current_best["model_artifact"].get("model_artifact")
+                if checkpoint and not any(rung.get("checkpoint_artifact") == checkpoint for rung in candidate.get("rungs", [])):
+                    continue
+                if (candidate.get("code_digest") == current_best["solution_digest"]
+                        and candidate.get("status") == "success" and native):
+                    # Public materialization stores risks as a list; native search
+                    # consumes a text field. Preserve the original artifact separately.
+                    mature = dict(native)
+                    if isinstance(mature.get("risks"), list):
+                        mature["risks"] = "\n".join(str(risk) for risk in mature["risks"])
+                    mature.setdefault("tags", [])
+                    mature.setdefault("root_domains", [])
+                    current_best.update(native_idea=mature, native_idea_digest=digest(mature),
+                                        native_artifact_digest=digest(native),
+                                        idea_id=candidate["idea_id"])
+                    break
+            if "native_idea" in current_best:
+                break
+        artifact_path = current_best["model_artifact"].get("model_artifact")
+        if artifact_path and Path(artifact_path).is_file():
+            manifest_path = Path(artifact_path)
+            current_best["model_manifest"] = load_bundle(manifest_path)
+            for name in ("candidate_changes.json", "official_baseline.json"):
+                profile_path = manifest_path.parent / "artifacts" / name
+                if profile_path.is_file():
+                    current_best["actual_model_configuration"] = json.loads(profile_path.read_text())
+                    break
+        xlab_config = self.config_manager.get("xlab", {}) or {}
+        generation_policy = {"max_attempts": (xlab_config.get("idea_generation") or {}).get("max_attempts", 8)}
+        execution_contract = {**self.task_adapter.context(), **dict(self.sure_config.get("execution_contract") or {})}
+        payload = {
+            "request_id": request_id,
+            "sure_run_id": run_id,
+            "task_id": self.task_card.task_id,
+            "task_description": task_description,
+            "search_mode": search_mode,
+            "axis": axis,
+            "axis_index": axis_index,
+            "phase": "research",
+            "round_index": round_index,
+            "requested_idea_count": requested_idea_count,
+            "metric": {"name": metric_name, "direction": metric_direction},
+            "current_best": current_best,
+            "task_card": task_card,
+            "base_model_profile": base_model,
+            "execution_contract": execution_contract,
+            "generation_policy": generation_policy,
+            "history_artifacts": list(self._xlab_summary_artifacts),
+            "prior_rounds": list(self._xlab_history),
+            "history_digest": history_digest,
+            "parent_lineage": parent_lineage,
+        }
+        request = IdeaRequest(
+            request_id=request_id,
+            sure_run_id=run_id,
+            task_id=str(self.task_card.task_id),
+            task_description=task_description,
+            search_mode=search_mode,
+            axis=axis,
+            axis_index=axis_index,
+            phase="research",
+            round_index=round_index,
+            requested_idea_count=requested_idea_count,
+            metric=MetricSpec(name=metric_name, direction=metric_direction),
+            input_digest=digest(payload),
+            current_best=current_best,
+            task_card=task_card,
+            execution_contract=execution_contract,
+            generation_policy=generation_policy,
+            history_artifacts=list(self._xlab_summary_artifacts),
+            prior_rounds=list(self._xlab_history),
+            history_digest=history_digest,
+            parent_lineage=parent_lineage,
+            base_model_profile=base_model,
         )
+        self._record_xlab_event(
+            "request_accepted",
+            {
+                "request_id": request.request_id,
+                "search_mode": request.search_mode,
+                "axis": request.axis,
+                "research_round": request.round_index,
+                "input_digest": request.input_digest,
+                "history_digest": request.history_digest,
+                "parent_lineage": request.history_artifacts,
+            },
+        )
+        return request
 
-    def _staged_checkpoint_dir(self) -> Path:
-        path = self._staged_output_dir() / "checkpoints"
-        path.mkdir(parents=True, exist_ok=True)
-        return path
+    def _xlab_ordinary_plan(self, task_description: str, round_index: int) -> dict[str, Any]:
+        if self.xlab_provider is None:
+            raise RuntimeError("XLab provider is required when XLab idea provider is enabled")
+        request = self._xlab_request(
+            task_description=task_description,
+            search_mode="ordinary",
+            round_index=round_index,
+            requested_idea_count=4,
+        )
+        batch_path = Path(self.session.config.workspace_path) / "artifacts/xlab_batches" / f"{request.request_id}.json"
+        if batch_path.exists():
+            from .contracts import IdeaBatch, IdeaItem, IdeaSpec, validate_idea_batch
+            payload = json.loads(batch_path.read_text())
+            payload["ideas"] = [IdeaItem(**{**item, "spec": IdeaSpec(**item["spec"])}) for item in payload["ideas"]]
+            batch = IdeaBatch(**payload)
+            validate_idea_batch(batch, request)
+        else:
+            batch = self.xlab_provider.generate(request)
+        batch_path.parent.mkdir(parents=True, exist_ok=True)
+        batch_path.write_text(json.dumps(asdict(batch), ensure_ascii=False, indent=2) + "\n")
+        self._xlab_last_batch_digest = batch.batch_digest
+        self._xlab_last_batch_artifacts = [idea.artifact_id for idea in batch.ideas]
+        self._record_xlab_event(
+            "batch_published",
+            {
+                "request_id": request.request_id,
+                "request_digest": request.input_digest,
+                "batch_digest": batch.batch_digest,
+                "idea_artifacts": [idea.artifact_id for idea in batch.ideas],
+                "idea_ids": [idea.idea_id for idea in batch.ideas],
+            },
+        )
+        plan: dict[str, Any] = {"xlab": {}}
+        for idea in batch.ideas:
+            instructions = self._xlab_instructions(idea)
+            plan["xlab"][idea.idea_id] = instructions
+            self._xlab_idea_metadata[(idea.idea_id, instructions)] = {
+                "idea": {**json.loads(instructions), "native_artifact": idea.native_artifact,
+                         "novelty": idea.novelty, "evidence_refs": idea.evidence_refs},
+                "idea_id": idea.idea_id,
+                "artifact_id": idea.artifact_id,
+                "artifact_digest": idea.artifact_digest,
+                "axis": idea.axis,
+                "candidate_type": idea.candidate_type,
+            }
+        return plan
 
     @staticmethod
-    def _staged_training_candidate(record: dict[str, Any], axis: str) -> bool:
-        if axis not in {"arch", "train"}:
-            return False
-        candidate_type = normalize_candidate_type(record.get("candidate_type"), default=INFERENCE)
-        return candidate_type in {ARCH, FINE_TUNE}
+    def _xlab_instructions(idea) -> str:
+        return json.dumps({"title": idea.title, "hypothesis": idea.hypothesis,
+                           "mechanism": idea.mechanism, "candidate_type": idea.candidate_type,
+                           "spec": asdict(idea.spec)}, ensure_ascii=False, indent=2)
 
-    @staticmethod
-    def _epoch_from_checkpoint_path(path: str | Path) -> int | None:
-        match = re.search(r"epoch[-_](\d+)\.pt$", str(path))
-        if not match:
+
+    def _workspace_ref(self, value: Any) -> str | None:
+        if not value:
             return None
+        workspace = Path(self.session.config.workspace_path).resolve()
+        path = Path(str(value))
+        if not path.is_absolute():
+            return path.as_posix()
         try:
-            return int(match.group(1))
+            return path.resolve().relative_to(workspace).as_posix()
         except ValueError:
             return None
 
-    @classmethod
-    def _checkpoint_from_produced_artifacts(cls, payload: Any) -> dict[str, Any] | None:
-        if not isinstance(payload, dict):
-            return None
-        artifacts = payload.get("produced_artifacts")
-        if not isinstance(artifacts, dict):
-            return None
-        checkpoint = artifacts.get("candidate_checkpoint")
-        checkpoint_dir = artifacts.get("checkpoint_dir")
-        if not checkpoint:
-            return None
-        epoch = cls._epoch_from_checkpoint_path(str(checkpoint))
-        return {
-            "path": str(checkpoint),
-            "checkpoint_dir": str(checkpoint_dir or Path(str(checkpoint)).parent),
-            "epoch": epoch,
-        }
-
-    @classmethod
-    def _checkpoint_from_nested_details(cls, payload: Any) -> dict[str, Any] | None:
-        found = cls._checkpoint_from_produced_artifacts(payload)
-        if found:
-            return found
-        if isinstance(payload, dict):
-            for value in payload.values():
-                found = cls._checkpoint_from_nested_details(value)
-                if found:
-                    return found
-        elif isinstance(payload, list):
-            for value in payload:
-                found = cls._checkpoint_from_nested_details(value)
-                if found:
-                    return found
-        return None
-
-    def _staged_extract_checkpoint(self, record: dict[str, Any]) -> dict[str, Any] | None:
-        staged_checkpoint = record.get("staged_checkpoint")
-        if isinstance(staged_checkpoint, dict) and staged_checkpoint.get("path"):
-            return dict(staged_checkpoint)
-
-        found = self._checkpoint_from_nested_details(record.get("details"))
-        if found:
-            return found
-
-        workspace = record.get("workspace")
-        if not workspace:
-            return None
-        changes_path = Path(str(workspace)) / "artifacts" / "candidate_changes.json"
-        if not changes_path.is_file():
-            return None
-        try:
-            payload = json.loads(changes_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            self.logger.debug("Could not read staged checkpoint metadata from %s: %s", changes_path, exc)
-            return None
-        return self._checkpoint_from_produced_artifacts(payload)
-
-    def _staged_promote_checkpoint(
-        self,
-        record: dict[str, Any],
-        *,
-        axis: str,
-        rung: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        if not record.get("success") or not self._staged_training_candidate(record, axis):
-            return None
-        checkpoint = self._staged_extract_checkpoint(record)
-        if not checkpoint or not checkpoint.get("path"):
-            return None
-        source_path = Path(str(checkpoint["path"])).expanduser()
-        if not source_path.is_file():
-            self.logger.warning("Staged checkpoint source is missing for %s: %s", record.get("idea_id"), source_path)
-            return None
-        epoch = checkpoint.get("epoch") or self._epoch_from_checkpoint_path(source_path)
-        if epoch is None:
-            self.logger.warning("Could not infer checkpoint epoch for staged candidate %s: %s", record.get("idea_id"), source_path)
-            return None
-        idea_id = str(record.get("idea_id") or record.get("combo_id") or "candidate")
-        safe_idea_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", idea_id).strip("_") or "candidate"
-        rung_name = str(rung.get("name") or record.get("rung") or "rung")
-        target_dir = self._staged_checkpoint_dir() / axis / safe_idea_id / rung_name
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target_path = target_dir / f"epoch-{epoch}.pt"
-        if source_path.resolve() != target_path.resolve():
-            shutil.copy2(source_path, target_path)
-        metadata = {
-            "path": str(target_path),
-            "epoch": int(epoch),
-            "source_path": str(source_path),
-            "source_workspace": str(record.get("workspace") or ""),
-            "axis": axis,
-            "rung": rung_name,
-            "idea_id": idea_id,
-            "candidate_type": str(record.get("candidate_type") or ""),
-            "checkpoint_dir": str(target_dir),
-        }
-        record["staged_checkpoint"] = metadata
-        return metadata
-
-    def _staged_promote_checkpoints(
-        self,
-        records: list[dict[str, Any]],
-        *,
-        axis: str,
-        rung: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        promoted: list[dict[str, Any]] = []
-        for record in records:
-            updated = dict(record)
-            self._staged_promote_checkpoint(updated, axis=axis, rung=rung)
-            promoted.append(updated)
-        return promoted
-
-    def _staged_resume_env(
-        self,
-        previous_record: dict[str, Any],
-        *,
-        axis: str,
-        current_rung: dict[str, Any],
-    ) -> dict[str, str]:
-        if not self._staged_training_candidate(previous_record, axis):
-            return {}
-        checkpoint = previous_record.get("staged_checkpoint")
-        if not isinstance(checkpoint, dict):
-            checkpoint = self._staged_extract_checkpoint(previous_record)
-        if not checkpoint or not checkpoint.get("path") or checkpoint.get("epoch") is None:
-            return {}
-        path = Path(str(checkpoint["path"])).expanduser()
-        if not path.is_file():
-            self.logger.warning("Skipping staged resume for %s because checkpoint is missing: %s", previous_record.get("idea_id"), path)
-            return {}
-        target_epoch = self._string_dict(current_rung.get("execution_env")).get("SURE_STAGED_TARGET_EPOCH")
-        if not target_epoch:
-            target_epoch = self._string_dict(current_rung.get("execution_env")).get("SURE_MAX_TRAIN_EPOCHS")
-        env = {
-            "SURE_STAGED_RESUME_ENABLED": "1",
-            "SURE_STAGED_RESUME_CHECKPOINT": str(path),
-            "SURE_STAGED_RESUME_CHECKPOINT_DIR": str(path.parent),
-            "SURE_STAGED_RESUME_EPOCH": str(checkpoint["epoch"]),
-            "SURE_STAGED_RESUME_SOURCE_RUNG": str(checkpoint.get("rung") or previous_record.get("rung") or ""),
-        }
-        if target_epoch:
-            env["SURE_STAGED_TARGET_EPOCH"] = str(target_epoch)
-        return env
-
-    def _rank_staged_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        valid = [
-            record
-            for record in records
-            if record.get("success") and self._is_valid_score(record.get("score"))
-        ]
-        return sorted(
-            valid,
-            key=lambda record: float(record["score"]),
-            reverse=not self.task_card.is_lower_better,
-        )
-
-    def _axis_research_request(self, axis: str) -> str:
-        count = self._staged_ideas_per_round()
-        key = self._staged_axis_key(axis)
-        label = "fine_tune" if axis == "train" else axis
-        task_card = getattr(self, "task_card", None)
-        canonical_task = str(
-            getattr(task_card, "canonical_task", "")
-            or getattr(task_card, "task_id", "")
-        ).lower()
-        if canonical_task == "tts" and axis == "arch":
-            scope = (
-                "Every idea must be `[arch]`, must use `SURE_TTS_ARCH_WRAPPER`, "
-                "and must truly change model structure or parameter count through "
-                "the F5-TTS architecture whitelist, for example depth, ff_mult, "
-                "conv_layers, qk_norm, attn_mask_enabled, or checkpoint_activations. "
-                "Use the current `SURE_TTS_ARCH_INIT_MODE`; scratch is only for "
-                "fair architecture screening, while final combinations use partial_load. "
-                "Do not suggest training-only or inference-only changes."
-            )
-        elif canonical_task == "tts" and axis == "train":
-            scope = (
-                "Every idea must be `[fine_tune]`, must use "
-                "`SURE_TTS_FINETUNE_WRAPPER`, and must change training strategy "
-                "without changing model structure or parameter count."
-            )
-        elif canonical_task == "tts":
-            scope = (
-                "Every idea must be `[inference]` and must change only F5-TTS "
-                "batch inference, text cleanup, chunking, sampling, speed, silence "
-                "removal, or post-processing. It must not train."
-            )
-        elif axis == "arch":
-            scope = (
-                "Every idea must be `[arch]` and must truly change model structure or "
-                "parameter count. Do not suggest training-only or inference-only changes."
-            )
-        elif axis == "train":
-            scope = (
-                "Every idea must be `[fine_tune]` and must change training strategy "
-                "without changing model structure or parameter count."
-            )
-        else:
-            scope = (
-                "Every idea must be `[inference]` and must change only decoding, "
-                "inference, sampling, normalization, or post-processing. It must not train."
-            )
-        examples = ",\n".join(
-            f'    "{i}": "[{label}] specific {axis} idea {i}"'
-            for i in range(1, count + 1)
-        )
-        return (
-            f"Propose exactly {count} {axis} ideas for the staged SURE search.\n"
-            f"{scope}\n\n"
-            "Return JSON only in this shape:\n"
-            "{\n"
-            f'  "{key}": {{\n'
-            f"{examples}\n"
-            "  }\n"
-            "}"
-        )
-
-    def _extract_axis_ideas(
-        self,
-        plan: dict[str, Any],
-        axis: str,
-        *,
-        round_index: int,
-    ) -> list[dict[str, Any]]:
-        keys = [self._staged_axis_key(axis), axis]
-        if axis == "train":
-            keys.extend(["training", "train_strategy"])
-        raw_ideas: Any = None
-        for key in keys:
-            if key in plan:
-                raw_ideas = plan[key]
-                break
-        if raw_ideas is None:
-            raw_ideas = plan
-
-        pairs: list[tuple[str, Any]] = []
-        if isinstance(raw_ideas, dict):
-            pairs = [(str(key), value) for key, value in raw_ideas.items()]
-        elif isinstance(raw_ideas, list):
-            pairs = [(str(index + 1), value) for index, value in enumerate(raw_ideas)]
-        else:
-            pairs = [("1", raw_ideas)]
-
-        result = []
-        for idea_id, idea in pairs[: self._staged_ideas_per_round()]:
-            result.append(
-                {
-                    "idea_id": f"{axis}_r{round_index}_{idea_id}",
-                    "idea": idea,
-                    "axis": axis,
-                    "candidate_type": self._staged_axis_candidate_type(axis),
-                }
-            )
-        return result
-
-    def _generate_staged_axis_ideas(
-        self,
-        *,
-        axis: str,
-        task_description: str,
-        data_preview: str,
-    ) -> list[dict[str, Any]]:
-        generated: list[dict[str, Any]] = []
-        axis_history: list[str] = []
-        for round_index in range(1, self._staged_rounds_per_axis() + 1):
-            research_exp = ResearchExp(
-                self.agents.reseach_agent,
-                self.config,
-                self.initial_code or "",
-                f"exp_{self.exp_index}_research_{axis}_r{round_index}",
-                self.task_card,
-                self.base_model_profile,
-                research_request=self._axis_research_request(axis),
-            )
-            self.exp_index += 1
-            plan = self.execute_parallel_tasks(
-                [
-                    partial(
-                        research_exp.run,
-                        task_description=task_description,
-                        data_preview=data_preview,
-                        best_solution=self.best_solution or self.initial_code or "",
-                        research_plan_and_result=axis_history,
-                    )
-                ],
-                max_workers=1,
-                workspace_names=[research_exp.exp_name],
-            )[0]
-            if isinstance(plan, Exception):
-                raise plan
-            ideas = self._extract_axis_ideas(plan, axis, round_index=round_index)
-            generated.extend(ideas)
-            axis_history.extend(
-                [
-                    json.dumps(plan, ensure_ascii=False, indent=2),
-                    "Generated for staged axis screening; evaluation happens after all axis ideas are collected.",
-                ]
-            )
-        self._write_staged_json(f"ideas_{axis}.json", generated)
-        return generated
 
     def _record_from_result(
         self,
@@ -1530,6 +1294,7 @@ class SureMasterPlayground(BasePlayground):
     def _failure_category_from_reason(reason_code: str) -> str:
         system_reasons = {
             "exception",
+            "worker_failed",
             "preflight_failed",
             "remote_command_build_failed",
             "remote_result_missing",
@@ -1545,988 +1310,192 @@ class SureMasterPlayground(BasePlayground):
         }
         return "system_failure" if str(reason_code) in system_reasons else "candidate_failure"
 
-    def _staged_failure_policy(self) -> str:
-        policy = self._staged_axes_config().get("failure_policy", "fail_fast")
-        return str(policy or "fail_fast").strip().lower()
 
-    def _staged_rung_failure_summary(
-        self,
-        *,
-        axis: str,
-        rung: dict[str, Any],
-        evaluated: list[dict[str, Any]],
-        ranked: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        failures = [record for record in evaluated if not record.get("success")]
-        counts: dict[str, int] = {}
-        for record in failures:
-            category = str(record.get("failure_category") or "candidate_failure")
-            counts[category] = counts.get(category, 0) + 1
-        return {
-            "axis": axis,
-            "rung": rung.get("name"),
-            "success_count": len(ranked),
-            "failure_count": len(failures),
-            "failure_counts": counts,
-            "failure_policy": self._staged_failure_policy(),
-            "records": [
-                {
-                    "idea_id": record.get("idea_id"),
-                    "workspace": record.get("workspace"),
-                    "candidate_type": record.get("candidate_type"),
-                    "success": bool(record.get("success")),
-                    "score": record.get("score"),
-                    "reason_code": record.get("reason_code"),
-                    "failure_category": record.get("failure_category"),
-                    "metric_feedback": record.get("metric_feedback"),
-                }
-                for record in evaluated
-            ],
-        }
+    def _commit_best_state(self) -> None:
+        """The state manifest is the atomic source of truth; .py is a convenience copy."""
+        target = Path(self.session.config.workspace_path) / "best_solution"
+        target.mkdir(parents=True, exist_ok=True)
+        state = {"score": self.best_score, "code": self.best_solution,
+                 "model_artifact": self.best_model_artifact}
+        pending = target / ".best_state.pending"
+        pending.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+        os.replace(pending, target / "best_state.json")
 
-    def _should_fallback_to_previous_rung(
-        self,
-        *,
-        evaluated: list[dict[str, Any]],
-        previous_ranked: list[dict[str, Any]],
-    ) -> bool:
-        if not previous_ranked:
-            return False
-        if self._staged_failure_policy() not in {
-            "fallback_previous_rung_on_system_failure",
-            "continue_on_system_failure",
-        }:
-            return False
-        if not evaluated:
-            return False
-        return all(
-            not record.get("success")
-            and str(record.get("failure_category") or "") == "system_failure"
-            for record in evaluated
-        )
+    def _write_run_json(self, name: str, payload: Any) -> None:
+        target = Path(self.session.config.workspace_path) / "metric" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
-    def _should_fallback_final_candidate_failure(
-        self,
-        *,
-        rung: dict[str, Any],
-        previous_ranked: list[dict[str, Any]],
-        evaluated: list[dict[str, Any]],
-    ) -> bool:
-        if not previous_ranked or str(rung.get("name") or "") != "final":
-            return False
-        policy = str(
-            self._staged_axes_config().get("final_rung_candidate_failure_fallback") or ""
-        ).strip().lower()
-        if policy != "previous_rung":
-            return False
-        return bool(evaluated) and all(not record.get("success") for record in evaluated)
+    def _final_evaluation(self, baseline: dict, candidates: list[dict]) -> dict:
+        specs = split_specs(self.sure_config)
+        if "selection" not in specs:
+            return {}
+        eligible = [r for r in candidates if r.get("model_artifact") and self._is_valid_score(r.get("score"))]
+        eligible.sort(key=lambda r: r["score"], reverse=not self.task_card.is_lower_better)
+        if not baseline.get("model_artifact"):
+            raise RuntimeError("Final evaluation requires a retained baseline")
 
-    def _allow_neutral_axis_fallback(self) -> bool:
-        return str(self._staged_axes_config().get("allow_neutral_axis_fallback") or "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "y",
-            "on",
-        }
-
-    def _neutral_axis_record(self, axis: str, baseline_code: str, reason: str) -> dict[str, Any]:
-        return {
-            "idea_id": f"neutral_{axis}",
-            "idea": f"No-op/baseline fallback for {axis}; keep the baseline behavior for this axis.",
-            "candidate_type": self._staged_axis_candidate_type(axis),
-            "code": baseline_code,
-            "success": True,
-            "score": None,
-            "is_axis_fallback": True,
-            "fallback_axis": axis,
-            "fallback_reason": reason,
-            "reason_code": "neutral_axis_fallback",
-            "failure_category": "none",
-        }
-
-    def _staged_late_result_recovery_config(self) -> dict[str, Any]:
-        staged_recovery = self._staged_axes_config().get("late_result_recovery")
-        if isinstance(staged_recovery, dict):
-            return staged_recovery
-        remote = self.sure_config.get("remote_training") or {}
-        if isinstance(remote, dict):
-            remote_recovery = remote.get("result_recovery") or {}
-            if isinstance(remote_recovery, dict):
-                return remote_recovery
-        return {}
-
-    def _staged_late_result_recovery_enabled(self) -> bool:
-        recovery = self._staged_late_result_recovery_config()
-        if "enabled" not in recovery:
-            return False
-        return str(recovery.get("enabled") or "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "y",
-            "on",
-        }
-
-    def _remote_result_path_from_record(self, record: dict[str, Any]) -> Path | None:
-        details = record.get("details")
-        candidates: list[Any] = []
-        if isinstance(details, dict):
-            execution_info = details.get("execution_info")
-            if isinstance(execution_info, dict):
-                candidates.extend(
-                    [
-                        execution_info.get("remote_result"),
-                        execution_info.get("result_path"),
-                    ]
-                )
-            nested = details.get("details")
-            if isinstance(nested, dict):
-                nested_info = nested.get("execution_info")
-                if isinstance(nested_info, dict):
-                    candidates.extend(
-                        [
-                            nested_info.get("remote_result"),
-                            nested_info.get("result_path"),
-                        ]
-                    )
-        workspace = record.get("workspace")
-        if workspace:
-            candidates.append(Path(str(workspace)) / "metric" / "remote_training_result.json")
-        for candidate in candidates:
-            if candidate:
-                return Path(str(candidate)).expanduser()
-        return None
-
-    def _recover_late_remote_record(self, record: dict[str, Any]) -> dict[str, Any]:
-        if not self._staged_late_result_recovery_enabled():
-            return record
-        if record.get("success"):
-            return record
-        if str(record.get("failure_category") or "") != "system_failure":
-            return record
-        if str(record.get("reason_code") or "") not in {
-            "remote_submit_timeout",
-            "remote_result_missing",
-            "remote_result_invalid_json",
-        }:
-            return record
-        result_path = self._remote_result_path_from_record(record)
-        if result_path is None or not result_path.is_file():
-            return record
-        try:
-            payload = json.loads(result_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            self.logger.debug("Late remote result recovery failed for %s: %s", result_path, exc)
-            return record
-        if not isinstance(payload, dict):
-            return record
-        recovered = dict(record)
-        details = payload.get("details") if isinstance(payload.get("details"), dict) else payload
-        success = bool(payload.get("success"))
-        reason_code = self._record_reason_code(payload) if not success else "success"
-        recovered.update(
-            {
-                "success": success,
-                "score": payload.get("score"),
-                "code": payload.get("code") or record.get("code", ""),
-                "details": details,
-                "reason_code": reason_code,
-                "failure_category": "none" if success else self._failure_category_from_reason(reason_code),
-                "metric_feedback": payload.get("metric_feedback", record.get("metric_feedback", "")),
-                "terminal_output": payload.get("terminal_output", record.get("terminal_output", "")),
-                "recovered_late_remote_result": True,
-                "late_remote_result_path": str(result_path),
-                "original_reason_code": record.get("reason_code"),
-            }
-        )
-        return recovered
-
-    def _recover_late_remote_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [self._recover_late_remote_record(record) for record in records]
-
-    def _run_staged_records(
-        self,
-        *,
-        records: list[dict[str, Any]],
-        task_description: str,
-        data_preview: str,
-        previous_solution: str,
-        role_paths: dict[str, str | None],
-        stage_name: str,
-        rung: dict[str, Any] | None = None,
-        phase: str = "search",
-        base_model_source_overrides: dict[str, str] | None = None,
-        reuse_code: bool = False,
-        data_knowledge: str = "",
-        model_knowledge: str = "",
-    ) -> list[dict[str, Any]]:
-        tasks = []
-        workspace_names = []
-        exps: list[SureRunExp] = []
-        rung_name = str((rung or {}).get("name") or "single")
-        for i, record in enumerate(records):
-            exp_idx = self.exp_index + i
-            exp = self._create_run_exp("improve", exp_idx)
-            exp.execution_env = self._staged_execution_env(
-                phase=phase,
-                stage_name=stage_name,
-                rung=rung,
-                extra_env=record.get("execution_env") if isinstance(record.get("execution_env"), dict) else None,
-            )
-            candidate_type = str(record.get("candidate_type") or INFERENCE)
-            exp.candidate_stage_name = stage_name
-            exp.candidate_phase = phase
-            exp.candidate_rung_name = rung_name
-            exp.candidate_idea_id = str(record.get("idea_id") or record.get("combo_id") or "")
-            exp.execution_env.update(
-                {
-                    "SURE_STAGE_NAME": stage_name,
-                    "SURE_PHASE_NAME": phase,
-                    "SURE_RUNG_NAME": rung_name,
-                    "SURE_IDEA_ID": exp.candidate_idea_id,
-                    "SURE_CANDIDATE_TYPE_HINT": candidate_type,
-                }
-            )
-            exp.enforce_candidate_type = True
-            exps.append(exp)
-            workspace_names.append(exp.exp_name)
-            if reuse_code:
-                tasks.append(
-                    partial(
-                        exp.run_existing_code,
-                        code=str(record.get("code") or ""),
-                        role_paths=role_paths,
-                        candidate_type_hint=candidate_type,
-                        base_model_source_overrides=base_model_source_overrides,
-                    )
-                )
-            else:
-                tasks.append(
-                    partial(
-                        exp.run,
-                        task_description=task_description,
-                        data_preview=data_preview,
-                        data_knowledge=data_knowledge,
-                        model_knowledge=model_knowledge,
-                        previous_solution=previous_solution,
-                        improve_idea=record.get("idea"),
-                        role_paths=role_paths,
-                        candidate_type_hint=candidate_type,
-                        base_model_source_overrides=base_model_source_overrides,
-                    )
-                )
-        self.exp_index += len(records)
-        results = self.execute_parallel_tasks(
-            tasks,
-            max_workers=self._staged_records_max_workers(records),
-            workspace_names=workspace_names,
-        )
-        return [
-            self._record_from_result(
-                base_record=record,
-                result=result,
-                exp=exp,
-                stage_name=stage_name,
-                rung_name=rung_name,
-            )
-            for record, result, exp in zip(records, results, exps)
-        ]
-
-    def _run_axis_screening(
-        self,
-        *,
-        axis: str,
-        task_description: str,
-        data_preview: str,
-        baseline_code: str,
-        data_knowledge: str,
-        model_knowledge: str,
-    ) -> list[dict[str, Any]]:
-        final_keep = self._staged_final_keep(axis)
-        ideas = self._generate_staged_axis_ideas(
-            axis=axis,
-            task_description=task_description,
-            data_preview=data_preview,
-        )
-        if not ideas:
-            raise RuntimeError(f"Staged {axis} search produced no ideas")
-
-        records = ideas
-        previous_ranked: list[dict[str, Any]] = []
-        for rung_index, rung in enumerate(self._staged_axis_rungs(axis, final_keep)):
-            run_records = [dict(record) for record in records]
-            if rung_index > 0:
-                for record in run_records:
-                    resume_env = self._staged_resume_env(
-                        record,
-                        axis=axis,
-                        current_rung=rung,
-                    )
-                    if resume_env:
-                        merged_env = dict(record.get("execution_env") or {})
-                        merged_env.update(resume_env)
-                        record["execution_env"] = merged_env
-            evaluated = self._run_staged_records(
-                records=run_records,
-                task_description=task_description,
-                data_preview=data_preview,
-                previous_solution=baseline_code,
-                role_paths=self._staged_role_paths("search"),
-                stage_name=f"stage_{axis}",
-                rung=rung,
-                phase="search",
-                base_model_source_overrides=self._staged_base_model_overrides("search"),
-                reuse_code=rung_index > 0,
-                data_knowledge=data_knowledge,
-                model_knowledge=model_knowledge,
-            )
-            evaluated = self._recover_late_remote_records(evaluated)
-            evaluated = self._staged_promote_checkpoints(evaluated, axis=axis, rung=rung)
-            ranked = self._rank_staged_records(evaluated)
-            self._write_staged_json(
-                f"leaderboard_{axis}_{rung['name']}.json",
-                {"axis": axis, "rung": rung, "records": ranked, "all_records": evaluated},
-            )
-            keep = min(self._staged_int(rung.get("keep"), final_keep, minimum=1), len(ranked))
-            records = ranked[:keep]
-            if not records:
-                summary = self._staged_rung_failure_summary(
-                    axis=axis,
-                    rung=rung,
-                    evaluated=evaluated,
-                    ranked=ranked,
-                )
-                if self._should_fallback_to_previous_rung(
-                    evaluated=evaluated,
-                    previous_ranked=previous_ranked,
-                ):
-                    fallback_keep = min(
-                        self._staged_int(rung.get("keep"), final_keep, minimum=1),
-                        len(previous_ranked),
-                    )
-                    records = [dict(record) for record in previous_ranked[:fallback_keep]]
-                    summary["fallback_used"] = True
-                    summary["fallback_source"] = "previous_rung"
-                    summary["fallback_records"] = [
-                        {"idea_id": record.get("idea_id"), "score": record.get("score")}
-                        for record in records
-                    ]
-                    self._write_staged_json(
-                        f"{axis}_{rung['name']}_failure_summary.json",
-                        summary,
-                    )
-                    self.logger.warning(
-                        "Staged %s rung %s had only system failures; falling back to %s previous-rung candidate(s)",
-                        axis,
-                        rung["name"],
-                        len(records),
-                    )
-                    continue
-                if self._should_fallback_final_candidate_failure(
-                    rung=rung,
-                    previous_ranked=previous_ranked,
-                    evaluated=evaluated,
-                ):
-                    fallback_keep = min(
-                        self._staged_int(rung.get("keep"), final_keep, minimum=1),
-                        len(previous_ranked),
-                    )
-                    records = [dict(record) for record in previous_ranked[:fallback_keep]]
-                    summary["fallback_used"] = True
-                    summary["fallback_source"] = "previous_rung_after_final_candidate_failure"
-                    summary["fallback_reason_code"] = evaluated[0].get("reason_code") if evaluated else None
-                    summary["fallback_records"] = [
-                        {"idea_id": record.get("idea_id"), "score": record.get("score")}
-                        for record in records
-                    ]
-                    self._write_staged_json(
-                        f"{axis}_{rung['name']}_failure_summary.json",
-                        summary,
-                    )
-                    self.logger.warning(
-                        "Staged %s final rung failed; falling back to %s previous-rung candidate(s)",
-                        axis,
-                        len(records),
-                    )
-                    continue
-                if (
-                    self._allow_neutral_axis_fallback()
-                    and self._staged_failure_policy() == "continue_on_system_failure"
-                    and evaluated
-                    and all(
-                        not record.get("success")
-                        and str(record.get("failure_category") or "") == "system_failure"
-                        for record in evaluated
-                    )
-                ):
-                    records = [
-                        self._neutral_axis_record(
-                            axis,
-                            baseline_code,
-                            reason=f"all_{rung['name']}_records_system_failure",
-                        )
-                    ]
-                    summary["fallback_used"] = True
-                    summary["fallback_source"] = "neutral_axis"
-                    summary["fallback_records"] = [
-                        {"idea_id": record.get("idea_id"), "score": record.get("score")}
-                        for record in records
-                    ]
-                    self._write_staged_json(
-                        f"{axis}_{rung['name']}_failure_summary.json",
-                        summary,
-                    )
-                    self.logger.warning(
-                        "Staged %s rung %s had only system failures; using neutral axis fallback",
-                        axis,
-                        rung["name"],
-                    )
-                    continue
-                summary["fallback_used"] = False
-                self._write_staged_json(
-                    f"{axis}_{rung['name']}_failure_summary.json",
-                    summary,
-                )
-                raise RuntimeError(f"Staged {axis} search had no successful candidates at rung {rung['name']}")
-            if any(not record.get("success") for record in evaluated):
-                self._write_staged_json(
-                    f"{axis}_{rung['name']}_failure_summary.json",
-                    self._staged_rung_failure_summary(
-                        axis=axis,
-                        rung=rung,
-                        evaluated=evaluated,
-                        ranked=ranked,
-                    ),
-                )
-            previous_ranked = [dict(record) for record in records]
-        if records and all(record.get("is_axis_fallback") for record in records):
-            top_records = [dict(record) for record in records[:final_keep]]
-        else:
-            top_records = self._rank_staged_records(records)[:final_keep]
-        self._write_staged_json(f"top_{axis}.json", top_records)
-        return top_records
-
-    def _combination_idea(
-        self,
-        *,
-        arch_record: dict[str, Any],
-        train_record: dict[str, Any],
-        inference_record: dict[str, Any],
-        combo_id: str,
-    ) -> str:
-        def _axis_line(label: str, record: dict[str, Any]) -> str:
-            if record.get("is_axis_fallback"):
-                return f"{label}: baseline/no-op fallback ({record.get('fallback_reason')})."
-            return f"{label}: {record.get('idea')}"
-
-        task_card = getattr(self, "task_card", None)
-        canonical_task = str(
-            getattr(task_card, "canonical_task", "")
-            or getattr(task_card, "task_id", "")
-        ).lower()
-        if canonical_task == "tts":
-            return (
-                "[arch] Limited F5-TTS combination candidate for staged SURE search.\n"
-                f"Combination id: {combo_id}\n"
-                "Implement a single run_sure.py that combines these selected factors:\n"
-                f"{_axis_line('Architecture idea', arch_record)}\n"
-                f"{_axis_line('Training strategy idea', train_record)}\n"
-                f"{_axis_line('Inference/decoding idea', inference_record)}\n\n"
-                "Important: call `SURE_TTS_ARCH_WRAPPER` with "
-                "`action=arch_finetune_short`, apply the selected architecture "
-                "fields and selected training strategy in that wrapper invocation, "
-                "use `--init-mode partial_load` or `SURE_TTS_ARCH_INIT_MODE=partial_load`, "
-                "then evaluate its `final_checkpoint.pt` and `model_cfg.yaml` with "
-                "`SURE_TTS_BATCH_INFER_WRAPPER` using the selected inference settings. "
-                "Scratch architecture checkpoints are screening-only artifacts; do "
-                "not reuse or evaluate them as final combination checkpoints. "
-                "Do not patch raw F5-TTS model source files, do not call raw F5-TTS "
-                "training or infer_cli entrypoints, and do not concatenate or reuse "
-                "incompatible arch-only and fine-tune-only checkpoints."
-            )
-        return (
-            "[arch] Limited combination candidate for staged SURE search.\n"
-            f"Combination id: {combo_id}\n"
-            "Implement a single run_sure.py that combines these selected factors:\n"
-            f"Architecture idea: {arch_record.get('idea')}\n"
-            f"Training strategy idea: {train_record.get('idea')}\n"
-            f"Inference/decoding idea: {inference_record.get('idea')}\n\n"
-            "Important: train the selected architecture using the selected training "
-            "strategy to produce a fresh checkpoint, then evaluate that checkpoint "
-            "with the selected inference/decoding method. Do not concatenate or "
-            "reuse incompatible arch-only and train-only checkpoints."
-        )
-
-    def _combination_candidate_type(
-        self,
-        arch_record: dict[str, Any],
-        train_record: dict[str, Any],
-        inference_record: dict[str, Any],
-        baseline_code: str,
-    ) -> str:
-        if not arch_record.get("is_axis_fallback"):
-            return ARCH
-        if not train_record.get("is_axis_fallback"):
-            return FINE_TUNE
-        if not inference_record.get("is_axis_fallback"):
-            return INFERENCE
-        return candidate_type_from_code(baseline_code, default=INFERENCE)
-
-    def _run_staged_combinations(
-        self,
-        *,
-        task_description: str,
-        data_preview: str,
-        baseline_code: str,
-        top_arch: list[dict[str, Any]],
-        top_train: list[dict[str, Any]],
-        top_inference: list[dict[str, Any]],
-        data_knowledge: str,
-        model_knowledge: str,
-    ) -> list[dict[str, Any]]:
-        combo_records: list[dict[str, Any]] = []
-        for combo_index, (arch_record, train_record, inference_record) in enumerate(
-            product(top_arch, top_train, top_inference),
-            start=1,
-        ):
-            combo_id = f"combo_{combo_index:02d}"
-            combo_records.append(
-                {
-                    "combo_id": combo_id,
-                    "idea_id": combo_id,
-                    "idea": self._combination_idea(
-                        arch_record=arch_record,
-                        train_record=train_record,
-                        inference_record=inference_record,
-                        combo_id=combo_id,
-                    ),
-                    "candidate_type": self._combination_candidate_type(
-                        arch_record,
-                        train_record,
-                        inference_record,
-                        baseline_code,
-                    ),
-                    "arch_idea_id": arch_record.get("idea_id"),
-                    "train_idea_id": train_record.get("idea_id"),
-                    "inference_idea_id": inference_record.get("idea_id"),
-                    "arch_idea": arch_record.get("idea"),
-                    "train_idea": train_record.get("idea"),
-                    "inference_idea": inference_record.get("idea"),
-                }
-            )
-        if not combo_records:
-            raise RuntimeError("No staged combinations were created")
-
-        phase_config = self._staged_phase_config("combination")
-        combination_rung = {
-            "name": "combination",
-            "execution_env": self._string_dict(phase_config.get("execution_env")),
-        }
-        evaluated = self._run_staged_records(
-            records=combo_records,
-            task_description=task_description,
-            data_preview=data_preview,
-            previous_solution=baseline_code,
-            role_paths=self._staged_role_paths("combination"),
-            stage_name="stage_combination",
-            rung=combination_rung,
-            phase="combination",
-            base_model_source_overrides=self._staged_base_model_overrides("combination"),
-            reuse_code=False,
-            data_knowledge=data_knowledge,
-            model_knowledge=model_knowledge,
-        )
-        evaluated = self._recover_late_remote_records(evaluated)
-        ranked = self._rank_staged_records(evaluated)
-        for rank, record in enumerate(ranked, start=1):
-            record["search_rank"] = rank
-        self._write_staged_json(
-            "leaderboard_combination_search.json",
-            {"records": ranked, "all_records": evaluated},
-        )
-        return ranked
-
-    def _baseline_record(self, baseline_code: str) -> dict[str, Any]:
-        return {
-            "idea_id": "baseline_draft",
-            "idea": "baseline/draft",
-            "candidate_type": candidate_type_from_code(baseline_code, default=INFERENCE),
-            "code": baseline_code,
-            "is_baseline": True,
-        }
-
-    def _run_staged_rerank(
-        self,
-        *,
-        phase: str,
-        records: list[dict[str, Any]],
-        task_description: str,
-        data_preview: str,
-        baseline_code: str,
-    ) -> list[dict[str, Any]]:
-        phase_config = self._staged_phase_config(phase)
-        rung = {
-            "name": phase,
-            "execution_env": self._string_dict(phase_config.get("execution_env")),
-        }
-        evaluated = self._run_staged_records(
-            records=records,
-            task_description=task_description,
-            data_preview=data_preview,
-            previous_solution=baseline_code,
-            role_paths=self._staged_role_paths(phase),
-            stage_name=f"stage_{phase}",
-            rung=rung,
-            phase=phase,
-            base_model_source_overrides=self._staged_base_model_overrides(phase),
-            reuse_code=True,
-        )
-        evaluated = self._recover_late_remote_records(evaluated)
-        ranked = self._rank_staged_records(evaluated)
-        for rank, record in enumerate(ranked, start=1):
-            record[f"{phase}_rank"] = rank
-        self._write_staged_json(
-            f"leaderboard_{phase}.json",
-            {"records": ranked, "all_records": evaluated},
-        )
-        return ranked
-
-    def _holdout_enabled(self) -> bool:
-        holdout = self._staged_phase_config("holdout")
-        if "enabled" in holdout:
-            return bool(holdout.get("enabled"))
-        return any(
-            key in holdout
-            for key in ("inputs", "execution_env", "base_model_source_paths")
-        )
-
-    def _run_staged_axes(
-        self,
-        *,
-        task_description: str,
-        data_preview: str,
-        role_paths: dict[str, str | None],
-    ) -> dict[str, Any]:
-        self.logger.info("Running SURE staged_axes search strategy")
-        start_phase = self._staged_start_phase()
-        data_knowledge = ""
-        model_knowledge = ""
-        prefetch_exp = PrefetchExp(
-            self.agents.prefetch_agent,
-            self.config,
-            f"exp_{self.exp_index}_prefetch",
-            self.task_card,
-            self.base_model_profile,
-        )
-        self.exp_index += 1
-        prefetch_result = self.execute_parallel_tasks(
-            [partial(prefetch_exp.run, task_description=task_description)],
-            max_workers=1,
-            workspace_names=[prefetch_exp.exp_name],
-        )[0]
-        if isinstance(prefetch_result, Exception):
-            self.logger.warning("SURE prefetch failed non-fatally: %s", prefetch_result)
-        else:
-            data_knowledge, model_knowledge, self.prefetch_descriptor = prefetch_result
-
-        baseline_executed = start_phase == "draft"
-        if baseline_executed:
-            draft_exp = self._create_run_exp("draft", self.exp_index)
-            draft_candidate_type = self._draft_candidate_type_hint()
-            draft_exp.execution_env = self._staged_draft_execution_env()
-            draft_exp.candidate_stage_name = "stage0_draft"
-            draft_exp.candidate_phase = "draft"
-            draft_exp.candidate_rung_name = "draft"
-            draft_exp.candidate_idea_id = "baseline_draft"
-            draft_exp.execution_env.update(
-                {
-                    "SURE_STAGE_NAME": "stage0_draft",
-                    "SURE_PHASE_NAME": "draft",
-                    "SURE_RUNG_NAME": "draft",
-                    "SURE_IDEA_ID": "baseline_draft",
-                    "SURE_CANDIDATE_TYPE_HINT": draft_candidate_type,
-                }
-            )
+        def evaluate(record: dict, phase: str) -> dict:
+            load_bundle(record["model_artifact"])
+            split = specs[phase]
+            exp = self._create_run_exp("improve", self.exp_index)
             self.exp_index += 1
-            draft_result = self.execute_parallel_tasks(
-                [
-                    partial(
-                        draft_exp.run,
-                        task_description=task_description,
-                        data_preview=data_preview,
-                        data_knowledge=data_knowledge,
-                        model_knowledge=model_knowledge,
-                        role_paths=self._staged_role_paths("draft"),
-                        candidate_type_hint=draft_candidate_type,
-                        base_model_source_overrides=self._staged_base_model_overrides("draft"),
-                    )
-                ],
-                max_workers=1,
-                workspace_names=[draft_exp.exp_name],
+            exp.candidate_phase = phase
+            exp.candidate_idea_id = record["idea_id"]
+            exp.execution_env.update(self.task_adapter.phase_environment(split))
+            exp.execution_env["SURE_FROZEN_MODEL_ARTIFACT"] = record["model_artifact"]
+            exp.execution_env.pop("SURE_PARENT_MODEL_ARTIFACT", None)
+            result = self.execute_parallel_tasks(
+                [partial(exp.run_existing_code, code=self.task_adapter.frozen_code(record["model_artifact"]),
+                         role_paths={**self._role_paths(), **split.roles}, candidate_type_hint=INFERENCE,
+                         base_model_source_overrides=split.base_model_source_paths)],
+                max_workers=1, workspace_names=[exp.exp_name],
             )[0]
-            if isinstance(draft_result, Exception):
-                raise draft_result
-            is_success, baseline_score, _uid, baseline_code, baseline_details = draft_result
-            self.initial_code = baseline_code
-            self.best_solution = baseline_code
-            self.best_score = baseline_score
-            self.real_time_best_solution = baseline_code
-            if not is_success:
-                return {
-                    "status": "failed",
-                    "steps": 0,
-                    "search_strategy": "staged_axes",
-                    "start_phase": start_phase,
-                    "best_score": None,
-                    "metric": self.task_card.primary_metric,
-                    "error": "Draft phase failed to produce a SURE-scored solution",
-                }
-            baseline_payload = {
-                "start_phase": start_phase,
-                "execution_status": "executed",
-                "score": baseline_score,
-                "code": baseline_code,
-                "details": baseline_details,
-                "workspace": draft_exp.workspace_path,
-            }
-        else:
-            configured_path, baseline_code, source_path = self._staged_initial_source()
-            baseline_score = None
-            self.initial_code = baseline_code
-            self.best_solution = baseline_code
-            self.best_score = None
-            self.real_time_best_solution = baseline_code
-            baseline_payload = {
-                "start_phase": start_phase,
-                "execution_status": "not_executed",
-                "configured_source_path": configured_path,
-                "resolved_source_path": str(source_path),
-                "score": None,
-                "code": baseline_code,
-                "details": None,
-                "workspace": None,
-            }
-            self.logger.info(
-                "Starting staged search at arch with unexecuted initial source: %s",
-                source_path,
-            )
+            if isinstance(result, Exception):
+                raise result
+            success, score, _uid, _code, _details = result
+            if not success or not self._is_valid_score(score):
+                raise RuntimeError(f"Frozen {phase} failed for {record['idea_id']}")
+            return {**record, "score": score, "phase": phase, "workspace": exp.workspace_path}
 
-        self._write_staged_json("baseline_draft.json", baseline_payload)
-        save_code_to_file(
-            os.path.join(self.session.config.workspace_path, "best_solution"),
-            "best_solution.py",
-            baseline_code or "",
-        )
+        selection = [evaluate(r, "selection") for r in [baseline, *eligible[:2]]]
+        selection.sort(key=lambda r: r["score"], reverse=not self.task_card.is_lower_better)
+        winner = selection[0]
+        self.best_score, self.best_solution = winner["score"], winner["code"]
+        self.best_model_artifact = {"model_artifact": winner["model_artifact"]}
+        holdout = []
+        if "holdout" in specs:
+            records = [baseline] if winner["idea_id"] == baseline["idea_id"] else [baseline, winner]
+            holdout = [evaluate(r, "holdout") for r in records]
+        result = {"selection": selection, "holdout": holdout, "winner": winner["idea_id"]}
+        self._write_run_json("final_evaluation.json", result)
+        return result
 
-        top_arch = self._run_axis_screening(
-            axis="arch",
-            task_description=task_description,
-            data_preview=data_preview,
-            baseline_code=baseline_code,
-            data_knowledge=data_knowledge,
-            model_knowledge=model_knowledge,
-        )
-        top_train = self._run_axis_screening(
-            axis="train",
-            task_description=task_description,
-            data_preview=data_preview,
-            baseline_code=baseline_code,
-            data_knowledge=data_knowledge,
-            model_knowledge=model_knowledge,
-        )
-        top_inference = self._run_axis_screening(
-            axis="inference",
-            task_description=task_description,
-            data_preview=data_preview,
-            baseline_code=baseline_code,
-            data_knowledge=data_knowledge,
-            model_knowledge=model_knowledge,
-        )
-
-        search_ranked = self._run_staged_combinations(
-            task_description=task_description,
-            data_preview=data_preview,
-            baseline_code=baseline_code,
-            top_arch=top_arch,
-            top_train=top_train,
-            top_inference=top_inference,
-            data_knowledge=data_knowledge,
-            model_knowledge=model_knowledge,
-        )
-        if not search_ranked:
-            raise RuntimeError("Stage4 combination produced no successful candidates")
-
-        selection_count = min(1 + self._staged_runner_up_count(), len(search_ranked))
-        selection_inputs = [dict(record) for record in search_ranked[:selection_count]]
-        if baseline_executed:
-            selection_inputs.append(self._baseline_record(baseline_code))
-        selection_ranked = self._run_staged_rerank(
-            phase="selection",
-            records=selection_inputs,
-            task_description=task_description,
-            data_preview=data_preview,
-            baseline_code=baseline_code,
-        )
-        final_record = selection_ranked[0] if selection_ranked else search_ranked[0]
-        self.best_solution = str(final_record.get("code") or baseline_code)
-        self.best_score = final_record.get("score")
-        self.real_time_best_solution = self.best_solution
-        save_code_to_file(
-            os.path.join(self.session.config.workspace_path, "best_solution"),
-            "best_solution.py",
-            self.best_solution,
-        )
-
-        holdout_ranked: list[dict[str, Any]] = []
-        if self._holdout_enabled():
-            holdout_inputs = [final_record]
-            if baseline_executed:
-                holdout_inputs.append(self._baseline_record(baseline_code))
-            holdout_ranked = self._run_staged_rerank(
-                phase="holdout",
-                records=holdout_inputs,
-                task_description=task_description,
-                data_preview=data_preview,
-                baseline_code=baseline_code,
-            )
-
-        summary = {
-            "status": "completed",
-            "steps": 0,
-            "search_strategy": "staged_axes",
-            "start_phase": start_phase,
-            "task_id": self.task_card.task_id,
-            "metric": self.task_card.primary_metric,
-            "is_lower_better": self.task_card.is_lower_better,
-            "baseline_score": baseline_score,
-            "search_best_score": search_ranked[0].get("score"),
-            "selection_best_score": final_record.get("score"),
-            "holdout_scores": [
-                {
-                    "idea_id": record.get("idea_id"),
-                    "score": record.get("score"),
-                    "is_baseline": record.get("is_baseline", False),
-                }
-                for record in holdout_ranked
-            ],
-            "best_score": self.best_score,
-            "best_idea_id": final_record.get("idea_id"),
-            "best_combo_id": final_record.get("combo_id"),
-            "staged_axes_dir": str(self._staged_output_dir()),
-        }
-        self._write_staged_json("summary.json", summary)
-        return summary
 
     def run(self, task_description: str, output_file: str | None = None) -> dict:
-        watchdog = TimeoutWatchdog(RUN_TIMEOUT_SECONDS)
+        watchdog = TimeoutWatchdog(int(self.sure_config.get("controller_timeout_seconds", RUN_TIMEOUT_SECONDS)))
         watchdog.start()
         self.logger.info("Watchdog started (%s seconds)", RUN_TIMEOUT_SECONDS)
         try:
+            strategy = str(self.sure_config.get("search_strategy", "ordinary")).lower()
+            if strategy not in {"ordinary", "origin"} or (self.sure_config.get("staged_axes") or {}).get("enabled"):
+                raise ValueError("staged_axes is retired; migrate to ordinary + XLab")
+            if not self._xlab_enabled():
+                raise ValueError("ordinary search requires the XLab idea provider")
+            self.sure_config["search_strategy"] = "ordinary"
+            if self.task_adapter is None:
+                self.task_adapter = get_adapter(self.task_card.canonical_task, self.sure_config.get("adapter"))
+            preflight = self.sure_config.get("preflight", False)
+            if preflight is True or (isinstance(preflight, dict) and preflight.get("enabled")):
+                from ..tools.preflight import check_config
+                check_config({"sure": self.sure_config, "xlab": self.config_manager.get("xlab", {})},
+                             check_model=self.sure_config.get("execution_mode") != "slurm")
             self.setup()
+            self._configure_xlab_provider()
             self._setup_trajectory_file(output_file)
             data_preview = self._build_data_preview()
             role_paths = self._role_paths()
-            self.logger.info(
-                "SURE search limits: max_research_rounds=%s, max_improve_directions_per_round=%s, max_ideas_per_direction=%s",
-                self.max_research_rounds,
-                self.max_improve_directions_per_round or "unlimited",
-                self.max_ideas_per_direction or "unlimited",
-            )
-            if self._staged_axes_enabled():
-                return self._run_staged_axes(
-                    task_description=task_description,
-                    data_preview=data_preview,
-                    role_paths=role_paths,
-                )
 
-            data_knowledge = ""
-            model_knowledge = ""
-            prefetch_exp = PrefetchExp(
-                self.agents.prefetch_agent,
-                self.config,
-                f"exp_{self.exp_index}_prefetch",
-                self.task_card,
-                self.base_model_profile,
-            )
-            self.exp_index += 1
-            prefetch_result = self.execute_parallel_tasks(
-                [partial(prefetch_exp.run, task_description=task_description)],
-                max_workers=1,
-                workspace_names=[prefetch_exp.exp_name],
-            )[0]
-            if isinstance(prefetch_result, Exception):
-                self.logger.warning("SURE prefetch failed non-fatally: %s", prefetch_result)
+            state_path = Path(self.session.config.workspace_path) / "metric/controller_state.json"
+            state = json.loads(state_path.read_text()) if state_path.exists() else {}
+            state_keys = ("exp_index", "run_id", "initial_code", "best_score", "best_solution", "baseline_score",
+                          "best_model_artifact", "real_time_best_solution", "research_plan_and_result",
+                          "_xlab_history", "_xlab_summary_artifacts", "_xlab_last_batch_artifacts")
+            if state:
+                if state.get("contract_digest") != digest(self.sure_config):
+                    raise ValueError("Existing run has a different execution contract; use a new run directory")
+                for key in state_keys:
+                    setattr(self, key, state["attributes"][key])
+                baseline_record = state["baseline"]
+                scored_candidates = state["candidates"]
+                successful_training_candidates = state["successful_training_candidates"]
             else:
-                data_knowledge, model_knowledge, self.prefetch_descriptor = prefetch_result
-
-            draft_exp = self._create_run_exp("draft", self.exp_index)
-            draft_candidate_type = self._draft_candidate_type_hint()
-            self.exp_index += 1
-            draft_result = self.execute_parallel_tasks(
-                [
-                    partial(
-                        draft_exp.run,
-                        task_description=task_description,
-                        data_preview=data_preview,
-                        data_knowledge=data_knowledge,
-                        model_knowledge=model_knowledge,
-                        role_paths=role_paths,
-                        candidate_type_hint=draft_candidate_type,
-                    )
-                ],
-                max_workers=1,
-                workspace_names=[draft_exp.exp_name],
-            )[0]
-            if isinstance(draft_result, Exception):
-                raise draft_result
-            is_success, validation_score, _uid, self.best_solution, _details = draft_result
-            self.initial_code = self.best_solution
-            if not is_success:
-                return {
-                    "status": "failed",
-                    "steps": 0,
-                    "best_score": None,
-                    "metric": self.task_card.primary_metric,
-                    "error": "Draft phase failed to produce a SURE-scored solution",
-                }
-
-            self.best_score = validation_score
-            self.real_time_best_solution = self.best_solution
-            save_code_to_file(
-                os.path.join(self.session.config.workspace_path, "best_solution"),
-                "best_solution.py",
-                self.best_solution or "",
-            )
-
-            for research_round in range(self.max_research_rounds):
-                base_solution = self.best_solution or ""
-                round_results: dict[str, dict[tuple, dict]] = {}
-
-                research_exp = ResearchExp(
-                    self.agents.reseach_agent,
-                    self.config,
-                    self.initial_code or "",
-                    f"exp_{self.exp_index}_research",
-                    self.task_card,
-                    self.base_model_profile,
-                )
+                data_knowledge = ""
+                model_knowledge = ""
+                prefetch_exp = self._create_prefetch_exp(self.exp_index)
                 self.exp_index += 1
-                research_plan = self.execute_parallel_tasks(
+                prefetch_result = self.execute_parallel_tasks(
+                    [partial(prefetch_exp.run, task_description=task_description)],
+                    max_workers=1,
+                    workspace_names=[prefetch_exp.exp_name],
+                )[0]
+                if isinstance(prefetch_result, Exception):
+                    self.logger.warning("SURE prefetch failed non-fatally: %s", prefetch_result)
+                else:
+                    data_knowledge, model_knowledge, self.prefetch_descriptor = prefetch_result
+
+                draft_exp = self._create_run_exp("draft", self.exp_index)
+                draft_candidate_type = self._draft_candidate_type_hint()
+                self.exp_index += 1
+                draft_result = self.execute_parallel_tasks(
                     [
                         partial(
-                            research_exp.run,
+                            draft_exp.run,
                             task_description=task_description,
                             data_preview=data_preview,
-                            best_solution=self.best_solution or "",
-                            research_plan_and_result=self.research_plan_and_result,
+                            data_knowledge=data_knowledge,
+                            model_knowledge=model_knowledge,
+                            role_paths=role_paths,
+                            candidate_type_hint=draft_candidate_type,
                         )
                     ],
                     max_workers=1,
-                    workspace_names=[research_exp.exp_name],
+                    workspace_names=[draft_exp.exp_name],
                 )[0]
-                if isinstance(research_plan, Exception):
-                    raise research_plan
+                if isinstance(draft_result, Exception):
+                    raise draft_result
+                is_success, validation_score, _uid, self.best_solution, _details = draft_result
+                self.initial_code = self.best_solution
+                if not is_success:
+                    return {
+                        "status": "failed",
+                        "steps": 0,
+                        "best_score": None,
+                        "metric": self.task_card.primary_metric,
+                        "error": "Draft phase failed to produce a SURE-scored solution",
+                    }
+
+                if not self._is_valid_score(validation_score):
+                    raise RuntimeError("Baseline returned an invalid score")
+                self.best_score = validation_score
+                self.baseline_score = validation_score
+                self.best_model_artifact = (_details or {}).get("produced_artifacts", {})
+                baseline_record = {"idea_id": "baseline", "score": validation_score,
+                                   "model_artifact": self.best_model_artifact.get("model_artifact"), "code": self.best_solution}
+                scored_candidates: list[dict[str, Any]] = []
+                successful_training_candidates = 0
+                self.real_time_best_solution = self.best_solution
+                save_code_to_file(
+                    os.path.join(self.session.config.workspace_path, "best_solution"),
+                    "best_solution.py",
+                    self.best_solution or "",
+                )
+
+            search_policy = self.sure_config.get("search_budget") or {}
+            minimum_rounds = int(search_policy.get("min_rounds", self.max_research_rounds))
+            maximum_rounds = int(search_policy.get("max_rounds", self.max_research_rounds))
+            patience = int(search_policy.get("patience", 3))
+            from .utils.slurm import atomic_json
+            def checkpoint_controller(completed_rounds, stale):
+                atomic_json(state_path, {"contract_digest": digest(self.sure_config),
+                    "attributes": {key: getattr(self, key) for key in state_keys},
+                    "baseline": baseline_record, "candidates": scored_candidates,
+                    "successful_training_candidates": successful_training_candidates,
+                "search_best_score": self.best_score,
+                "best_score_split": "search",
+                    "completed_rounds": completed_rounds, "stale_rounds": stale})
+            stale_rounds = state.get("stale_rounds", 0)
+            completed_rounds = state.get("completed_rounds", 0)
+            checkpoint_controller(completed_rounds, stale_rounds)
+            if completed_rounds >= minimum_rounds and stale_rounds >= patience:
+                maximum_rounds = completed_rounds
+            for research_round in range(completed_rounds, maximum_rounds):
+                round_start_score = self.best_score
+                base_solution = self.best_solution or ""
+                round_results: dict[str, dict[tuple, dict]] = {}
+
+                round_model = dict(self.best_model_artifact)
+                research_plan = self._xlab_ordinary_plan(task_description, research_round + 1)
 
                 session_config = self.config.session.get("local", {})
                 parallel_config = session_config.get("parallel", {}) or {}
@@ -2546,7 +1515,7 @@ class SureMasterPlayground(BasePlayground):
                     direction_best_idea = None
                     round_results[direction] = {}
                     ideas = list((direction_plan or {}).items())
-                    if self.max_ideas_per_direction > 0:
+                    if self.max_ideas_per_direction > 0 and not self._xlab_enabled():
                         ideas = ideas[: self.max_ideas_per_direction]
                     idea_entries = self._filter_and_order_ideas(
                         ideas,
@@ -2564,6 +1533,13 @@ class SureMasterPlayground(BasePlayground):
                         idea = entry["idea"]
                         exp_idx = self.exp_index + i
                         improve_exp = self._create_run_exp("improve", exp_idx)
+                        improve_exp.enforce_candidate_type = True
+                        improve_exp.candidate_phase = "search"
+                        improve_exp.candidate_idea_id = self._xlab_idea_metadata.get(self._idea_result_key(idea), {}).get("idea_id", "")
+                        if entry["candidate_type"] == INFERENCE and round_model.get("model_artifact"):
+                            improve_exp.execution_env["SURE_PARENT_MODEL_ARTIFACT"] = round_model["model_artifact"]
+                        else:
+                            improve_exp.execution_env.pop("SURE_PARENT_MODEL_ARTIFACT", None)
                         improve_exps.append(improve_exp)
                         workspace_names.append(improve_exp.exp_name)
                         tasks.append(
@@ -2591,15 +1567,36 @@ class SureMasterPlayground(BasePlayground):
                             is_success = False
                             validation_score = None
                             solution = None
+                            _details = {"reason_code": "exception", "error": str(result)}
                         else:
                             is_success, validation_score, _uid, solution, _details = result
 
                         improved = self.compare_score(direction_baseline_score, validation_score)
+                        if is_success and entry["candidate_type"] in TRAINING_TYPES:
+                            successful_training_candidates += 1
+                        metadata = self._xlab_idea_metadata.get(idea_key, {})
+                        if is_success:
+                            scored_candidates.append({"idea_id": metadata.get("idea_id", str(idea_key)),
+                                                      "score": validation_score, "code": solution,
+                                                      "model_artifact": (_details or {}).get("produced_artifacts", {}).get("model_artifact")})
+                        reason = str((_details or {}).get("reason_code") or ("success" if is_success else "execution_failed"))
                         round_results[direction][idea_key] = {
                             "improved": improved,
                             "is_best_in_direction": False,
                             "score": validation_score,
+                            "success": bool(is_success),
                             "candidate_type": entry["candidate_type"],
+                            "idea_id": metadata.get("idea_id", str(idea_key)),
+                            "artifact_id": metadata.get("artifact_id"),
+                            "artifact_digest": metadata.get("artifact_digest"),
+                            "reason_code": reason,
+                            "failure_category": None if is_success else self._failure_category_from_reason(reason),
+                            "metric_feedback": improve_exp.metric_feedback,
+                            "runtime_seconds": (_details or {}).get("runtime_seconds"),
+                            "produced_artifacts": (_details or {}).get("produced_artifacts", {}),
+                            "idea": metadata.get("idea", {}),
+                            "code": solution if isinstance(solution, str) else "",
+                            "workspace": improve_exp.workspace_path,
                         }
                         if (
                             improved
@@ -2610,6 +1607,7 @@ class SureMasterPlayground(BasePlayground):
                             direction_best_score = validation_score
                             direction_best_solution = solution
                             direction_best_idea = idea
+                            self.best_model_artifact = (_details or {}).get("produced_artifacts", {})
                             save_code_to_file(
                                 os.path.join(self.session.config.workspace_path, "best_solution"),
                                 "best_solution.py",
@@ -2623,6 +1621,106 @@ class SureMasterPlayground(BasePlayground):
                         ] = True
                     self.best_solution = direction_best_solution
                     self.best_score = direction_best_score
+                    self._commit_best_state()
+                    self._record_xlab_event(
+                        "best_committed",
+                        {
+                            "axis": None,
+                            "research_round": research_round + 1,
+                            "score": self.best_score,
+                            "solution_digest": digest(self.best_solution or ""),
+                        },
+                    )
+
+                if self.xlab_provider is not None:
+                    candidates = []
+                    for direction, records in round_results.items():
+                        for idea_key, record in records.items():
+                            candidates.append(
+                                CandidateResult(
+                                    idea_id=str(record.get("idea_id") or idea_key),
+                                    idea_artifact_id=str(record.get("artifact_id") or idea_key),
+                                    final_status="success" if record.get("success") else "failed",
+                                    code_digest=digest(record.get("code") or ""),
+                                    workspace_ref=record.get("workspace"),
+                                    candidate_type=record.get("candidate_type"),
+                                    failure_category=record.get("failure_category"),
+                                    reason_code=record.get("reason_code"),
+                                    improved=bool(record.get("improved")),
+                                    idea=record.get("idea", {}),
+                                    metric_feedback=record.get("metric_feedback", ""),
+                                    rungs=[RungResult(
+                                        name="search", success=bool(record.get("success")),
+                                        score=record.get("score"),
+                                        runtime_seconds=record.get("runtime_seconds"),
+                                        checkpoint_artifact=record.get("produced_artifacts", {}).get("model_artifact"),
+                                        reason_code=record.get("reason_code"),
+                                        failure_category=record.get("failure_category"),
+                                    )],
+                                )
+                            )
+                    round_result = RoundResult(
+                        sure_run_id=self._ensure_run_id(),
+                        search_mode="ordinary",
+                        round_index=research_round + 1,
+                        baseline_digest=digest(base_solution),
+                        idea_batch_digest=self._xlab_last_batch_digest or digest(research_plan),
+                        result_digest=digest({direction: list(records.values()) for direction, records in round_results.items()}),
+                        candidates=candidates,
+                        ranking=sorted(
+                            (candidate.idea_id for candidate in candidates if candidate.final_status == "success"),
+                            key=lambda idea_id: next(c.rungs[0].score for c in candidates if c.idea_id == idea_id),
+                            reverse=not self.task_card.is_lower_better,
+                        ),
+                        metric={"name": self.task_card.primary_metric, "direction": "lower" if self.task_card.is_lower_better else "higher"},
+                        baseline_score=self.baseline_score,
+                        rung_names=sorted({rung.name for candidate in candidates for rung in candidate.rungs}),
+                        current_best={
+                            "score": self.best_score,
+                            "solution_digest": digest(self.best_solution or ""),
+                        },
+                        parent_artifacts=list(self._xlab_last_batch_artifacts) + list(self._xlab_summary_artifacts),
+                    )
+                    summary = self._summarize_xlab_result(round_result)
+                    history_record = {
+                        "axis": None,
+                        "research_round": research_round + 1,
+                        "batch_digest": round_result.idea_batch_digest,
+                        "result_digest": round_result.result_digest,
+                        "summary_digest": summary.summary_digest,
+                        "summary": asdict(summary),
+                        "baseline_score": round_result.baseline_score,
+                        "metric": round_result.metric,
+                        "execution_contract": dict(self.sure_config.get("execution_contract") or {}),
+                        "evaluation_scope": {"search": self._role_paths(), "manifest": self._execution_env().get("SURE_EVAL_MANIFEST")},
+                        "ranking": list(round_result.ranking),
+                        "candidates": [
+                            {
+                                "idea_id": candidate.idea_id,
+                                "status": candidate.final_status,
+                                "idea": candidate.idea,
+                                "code_digest": candidate.code_digest,
+                                "idea_artifact_id": candidate.idea_artifact_id,
+                                "candidate_type": candidate.candidate_type,
+                                "reason_code": candidate.reason_code,
+                                "improved": candidate.improved,
+                                "failure_category": candidate.failure_category,
+                                "rungs": [rung.__dict__ for rung in candidate.rungs],
+                            }
+                            for candidate in candidates
+                        ],
+                    }
+                    self._xlab_history.append(history_record)
+                    self._record_xlab_event("round_result_published", {
+                        "axis": None,
+                        "research_round": research_round + 1,
+                        "result_digest": round_result.result_digest,
+                        "batch_digest": round_result.idea_batch_digest,
+                        "candidate_count": len(candidates),
+                    })
+                    self._record_xlab_event("summary_published", history_record)
+                    if summary.summary_digest not in self._xlab_summary_artifacts:
+                        self._xlab_summary_artifacts.append(summary.summary_digest)
 
                 self.research_plan_and_result.append(
                     json.dumps(research_plan, ensure_ascii=False, indent=2)
@@ -2655,11 +1753,35 @@ class SureMasterPlayground(BasePlayground):
                     raise knowledge_result
                 self.research_plan_and_result.append(knowledge_result)
 
+                records = [record for group in round_results.values() for record in group.values()]
+                if any(r.get("failure_category") == "system_failure" for r in records) or not any(r.get("success") for r in records):
+                    raise RuntimeError("Round incomplete: restore infrastructure/valid experiments before counting stagnation")
+                stale_rounds = 0 if self.compare_score(round_start_score, self.best_score) else stale_rounds + 1
+                self._write_run_json("search_progress.json", {"rounds": research_round + 1,
+                                    "stale_rounds": stale_rounds, "best_score": self.best_score})
+                checkpoint_controller(research_round + 1, stale_rounds)
+                if research_round + 1 >= minimum_rounds and stale_rounds >= patience:
+                    break
+
+            search_best_score = self.best_score
+            full_baseline, full_candidates = self.task_adapter.final_candidates(self, baseline_record, scored_candidates)
+            final_evaluation = self._final_evaluation(full_baseline, full_candidates)
+            self._commit_best_state()
+            best_dir = Path(self.session.config.workspace_path) / "best_solution"
+            best_dir.mkdir(parents=True, exist_ok=True)
+            (best_dir / "model_artifact.json").write_text(json.dumps(self.best_model_artifact, indent=2) + "\n")
+            save_code_to_file(str(best_dir), "best_solution.py", self.best_solution or "")
             return {
-                "status": "completed",
+                "status": "incomplete" if self.sure_config.get("require_training_candidate") and not successful_training_candidates else "completed",
                 "steps": 0,
                 "task_id": self.task_card.task_id,
                 "metric": self.task_card.primary_metric,
+                "baseline_score": self.baseline_score,
+                "successful_training_candidates": successful_training_candidates,
+                "search_best_score": search_best_score,
+                "best_score_split": "selection" if final_evaluation else "search",
+                "best_model_artifact": self.best_model_artifact,
+                "final_evaluation": final_evaluation,
                 "best_score": self.best_score,
                 "is_lower_better": self.task_card.is_lower_better,
             }
@@ -2691,11 +1813,17 @@ class SureMasterPlayground(BasePlayground):
                 "timeout_seconds": RUN_TIMEOUT_SECONDS,
                 "wisdom_promotion_result": wisdom_result,
             }
+        except XlabIdeaClientError as e:
+            self.logger.error("XLab operation is incomplete: %s", e, exc_info=True)
+            return {"status": "incomplete", "steps": 0, "error": str(e),
+                    "best_score": self.best_score,
+                    "best_model_artifact": getattr(self, "best_model_artifact", {})}
         except Exception as e:
             self.logger.error("SURE Master task execution failed: %s", e, exc_info=True)
             return {"status": "failed", "steps": 0, "error": str(e)}
         finally:
             watchdog.stop()
+            self._close_xlab_provider()
             self.cleanup()
 
     def _build_data_preview(self) -> str:

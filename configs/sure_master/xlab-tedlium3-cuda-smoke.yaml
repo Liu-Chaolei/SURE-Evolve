@@ -1,0 +1,232 @@
+sure:
+  root: ${SURE_EVAL_ROOT}
+  pythonpath: ${SURE_EVAL_ROOT}/src
+  task_cards_path: ./playground/sure_master/task_cards/sure_tasks.yaml
+  task_id: asr_en_wer
+  device: cpu
+  cache_dir: null
+  validate_env: false
+  require_base_model: true
+  workspace_cleanup:
+    enabled: true
+    on_success: true
+    on_failure: false
+    remove_models: true
+    remove_working: true
+    remove_runtime_cache: true
+    compact_metric_logs: true
+    keep_log_tails: true
+    log_tail_bytes: 65536
+  execution_mode: local
+  search_strategy: ordinary
+  coordinator:
+    local_gpu_policy: disabled
+  remote_training:
+    enabled: false
+  initial_solution_path: playground/sure_master/baselines/zipformer_large_cr_ctc_rnnt_baseline.py
+  inputs:
+    ref: ${SURE_DATA_DIR}/refs/asr_tedlium3_smoke_ref.txt
+  execution_env:
+    SURE_ASR_DATASET: tedlium3
+    SURE_ASR_RECIPE_PROFILE: tedlium3_zipformer
+    SURE_ASR_EVAL_SPLITS: dev
+    SURE_ASR_EVAL_REF_ONLY: '1'
+    SURE_ICEFALL_PYTHON: ${SURE_WORKER_PYTHON}
+    PYTHONPATH: ${SURE_EVOLVE_ROOT}:${SURE_ICEFALL_ROOT}
+    SURE_ASR_ZIPFORMER_WRAPPER: ${SURE_EVOLVE_ROOT}/playground/sure_master/tools/run_icefall_zipformer_candidate.py
+    SURE_ASR_REQUIRE_ZIPFORMER_WRAPPER: '1'
+    SURE_MAX_TRAIN_EPOCHS: '1'
+    SURE_ASR_FIXED_SEED: '42'
+    SURE_MAX_DURATION: '30'
+    SURE_BASELINE_TRAIN_MAX_DURATION: '30'
+    SURE_BASELINE_DECODE_MAX_DURATION: '30'
+    SURE_DECODE_DURATION_MIN: '30'
+    SURE_DECODE_DURATION_MAX: '30'
+    SURE_DECODE_DURATION_SAFETY_STEPS: '0'
+    SURE_TRAIN_DURATION_MIN: '10'
+    SURE_DURATION_AUTOTUNE_MIN: '10'
+    SURE_TRAIN_DURATION_RETRY_STEP: '10'
+    SURE_DURATION_AUTOTUNE: '0'
+    SURE_USE_FP16: '0'
+    SURE_BASELINE_USE_PRETRAINED: '0'
+    SURE_DECODE_ONLY: '0'
+    SURE_BASELINE_EPOCH: '1'
+    SURE_BASELINE_AVG: '1'
+    SURE_BASELINE_USE_AVERAGED_MODEL: '0'
+    SURE_BASELINE_WORLD_SIZE: '1'
+    ASR_WORLD_SIZE: '1'
+    SURE_ENABLE_MUSAN: '0'
+    SURE_ASR_REQUIRE_LOCAL_CHECKPOINT: '1'
+    SURE_ASR_FAIL_ON_TRAIN_FATAL_WITHOUT_CHECKPOINT: '1'
+    SURE_DECODE_METHOD: greedy_search
+    SURE_RUN_TIMEOUT: '43200'
+  base_models:
+    asr_en_wer:
+      source_paths:
+        root: ${SURE_ICEFALL_ROOT}
+        recipe: ${SURE_ICEFALL_ROOT}/egs/tedlium3/ASR/zipformer
+        data: ${SURE_DATA_DIR}
+      python: ${SURE_WORKER_PYTHON}
+  runtime:
+    accelerator: cuda
+    devices:
+    - ${SURE_DEVICE}
+    python: ${SURE_WORKER_PYTHON}
+  metric_gpu:
+    enabled: false
+  preflight: true
+  require_training_candidate: true
+  execution_contract:
+    accelerator: cuda
+    model_family: zipformer
+    dataset: tedlium3
+    training_epochs: 1
+    training_hours: 1
+    precision: fp32
+    world_size: 1
+    decode_method: greedy_search
+    structure_arguments: [num-encoder-layers, encoder-dim, feedforward-dim, encoder-unmasked-dim]
+    training_seed: 42
+    max_duration: 30
+    metric: WER
+    metric_direction: lower
+    constraints:
+    - Use the guarded Zipformer wrapper.
+    - Keep the RNN-T objective.
+    - Train only on train; never use test during search.
+    - Use the same seed and epoch budget as baseline.
+  final_evaluation:
+    selection_ref: ${SURE_DATA_DIR}/refs/asr_tedlium3_selection_ref.txt
+    test_ref: ${SURE_DATA_DIR}/refs/asr_tedlium3_test_ref.txt
+max_research_rounds: 2
+llm:
+  openai:
+    provider: openai
+    model: ${SURE_AGENT_MODEL}
+    api_key: ${OPENAI_API_KEY}
+    base_url: ${OPENAI_BASE_URL}
+    temperature: 1
+    max_tokens: 32768
+    timeout: 3600
+  default: openai
+agents:
+  prefetch:
+    llm: openai
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: latest_half
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: prompts/prefetch_system_prompt.txt
+    user_prompt_file: prompts/prefetch_user_prompt.txt
+  draft:
+    llm: openai
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: latest_half
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: prompts/draft_system_prompt.txt
+    user_prompt_file: prompts/draft_user_prompt.txt
+  debug:
+    llm: openai
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: latest_half
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: prompts/debug_system_prompt.txt
+    user_prompt_file: prompts/debug_user_prompt.txt
+  improve:
+    llm: openai
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: latest_half
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: prompts/improve_system_prompt.txt
+    user_prompt_file: prompts/improve_user_prompt.txt
+  reseach:
+    llm: openai
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: latest_half
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: prompts/reseach_system_prompt.txt
+    user_prompt_file: prompts/reseach_user_prompt.txt
+  knowledge_promotion:
+    llm: openai
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: latest_half
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: prompts/knowledge_promotion_system_prompt.txt
+    user_prompt_file: prompts/knowledge_promotion_user_prompt.txt
+  wisdom_promotion:
+    llm: openai
+    max_turns: 10
+    tools:
+      builtin: []
+    context:
+      max_tokens: 128000
+      truncation_strategy: latest_half
+      preserve_system_messages: true
+      preserve_recent_turns: 5
+    system_prompt_file: prompts/wisdom_promotion_system_prompt.txt
+    user_prompt_file: prompts/wisdom_promotion_user_prompt.txt
+session:
+  type: local
+  local:
+    working_dir: ./runs/tedlium3_cuda
+    timeout: 43200
+    gpu_devices: none
+    parallel:
+      enabled: false
+      max_parallel: 1
+      split_workspace_for_exp: true
+llm_output:
+  show_in_console: true
+  log_to_file: true
+logging:
+  level: INFO
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  file: null
+  console: true
+xlab:
+  enabled: true
+  idea_generation:
+    max_attempts: 8
+  idea_provider:
+    enabled: true
+    preflight_command:
+    - ${XLAB_PYTHON}
+    - ${XLAB_ROOT}/xlab/skills/sure_master/scripts/xlab_idea_client.py
+    - --check-survey
+    - ${XLAB_SURE_SURVEY_PATH}
+    command:
+    - ${XLAB_PYTHON}
+    - ${XLAB_ROOT}/xlab/skills/sure_master/scripts/xlab_idea_client.py
+    timeout_seconds: 14400
+    environment:
+      XLAB_SURE_RUN_ROOT: ${SURE_EVOLVE_ROOT}/runs/xlab_ideas
+      XLAB_SURE_SURVEY_PATH: ${XLAB_SURE_SURVEY_PATH}

@@ -104,7 +104,8 @@ def load_sure_objects(config) -> tuple[Any, Any, SureMetricRunner, dict[str, str
     metric_runner = SureMetricRunner(
         sure_root=sure_root,
         pythonpath=pythonpath,
-        device=sure_config.get("device", "cuda"),
+        device=(sure_config.get("metric_runtime") or {}).get("device", sure_config.get("device", "cpu")),
+        python=(sure_config.get("metric_runtime") or {}).get("python"),
         cache_dir=sure_config.get("cache_dir"),
         validate_env=bool(sure_config.get("validate_env", False)),
         metric_gpu=sure_config.get("metric_gpu"),
@@ -131,8 +132,15 @@ def load_sure_objects(config) -> tuple[Any, Any, SureMetricRunner, dict[str, str
     for key in ("ASR_WORLD_SIZE", "SURE_BASELINE_WORLD_SIZE"):
         if key in os.environ and is_runtime_env_override_key(key):
             execution_env.setdefault(key, os.environ[key])
+    from playground.sure_master.tasks import get_adapter
+    from playground.sure_master.core.datasets import split_specs
+    adapter = get_adapter(task_card.canonical_task, sure_config.get("adapter"))
+    execution_env.update(adapter.environment(sure_config))
     role_paths = dict(task_card.artifact_contract)
     role_paths.update(sure_config.get("inputs", {}) or {})
+    search = split_specs(sure_config).get("search")
+    if search:
+        role_paths.update(search.roles)
     return task_card, base_model_profile, metric_runner, execution_env, role_paths
 
 
@@ -840,6 +848,9 @@ def main() -> None:
                 candidate_type=exp.candidate_type_hint,
             )
 
+        from playground.sure_master.tasks import get_adapter
+        adapter = get_adapter(task_card.canonical_task)
+        role_paths = adapter.scoring_roles(str(workspace), exp.execution_env, role_paths)
         metric_result = metric_runner.run(
             task_card=task_card,
             workspace_path=workspace,
@@ -857,6 +868,11 @@ def main() -> None:
             "execution_info": execution_info,
             "details": SureRunExp._metric_details(metric_result),
         }
+        if metric_result.success:
+            retained = adapter.collect_model(str(workspace), exp.execution_env)
+            if retained:
+                payload["details"]["produced_artifacts"] = retained
+                payload["produced_artifacts"] = retained
         if not metric_result.success:
             payload["error"] = metric_result.error
         write_json(result_path, payload)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -74,7 +74,7 @@ DATASET_PROFILES: dict[str, AsrDatasetProfile] = {
         },
         ref_file_prefix="asr_tedlium3",
         key_normalization="identity",
-        grouping_key="speaker_or_recording",
+        grouping_key="recording",
     ),
 }
 
@@ -149,6 +149,17 @@ RECIPE_PROFILES: dict[str, AsrRecipeProfile] = {
         decode_patch_strategy="tedlium3_eval_splits",
     ),
 }
+
+# Keep the earlier Large profile stable for existing experiments.
+RECIPE_PROFILES["tedlium3_zipformer_native"] = replace(
+    RECIPE_PROFILES["tedlium3_zipformer"], name="tedlium3_zipformer_native",
+    recipe_family="tedlium3_zipformer_native",
+    arch_args=("--num-encoder-layers", "2,2,3,4,3,2",
+               "--feedforward-dim", "512,768,1024,1536,1024,768",
+               "--encoder-dim", "192,256,384,512,384,256",
+               "--encoder-unmasked-dim", "192,192,256,256,256,192"),
+    train_only_args=("--enable-spec-aug", "1"),
+)
 
 DEFAULT_RECIPE_BY_DATASET = {
     "librispeech": "librispeech_zipformer_large_cr_ctc_rnnt",

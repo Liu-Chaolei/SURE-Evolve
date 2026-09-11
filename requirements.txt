@@ -10,7 +10,7 @@ anthropic
 google-genai
 
 # MCP (Model Context Protocol)
-mcp
+mcp==1.26.0
 
 # viewer
 flask
