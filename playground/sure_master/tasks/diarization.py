@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from functools import partial
 
-from ..runtime.model_source import snapshot_source, prepare_audio_io
+from ..runtime.model_source import snapshot_source, prepare_audio_io, prepare_diarizen_inference_source
 
 INFER_KEYS = {
     "seg_duration",
@@ -178,6 +178,7 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
     }
     resources.update(saved)
     root = snapshot_source(resources["source"], Path("working/diarizen_source"))
+    prepare_diarizen_inference_source(root)
     pipeline_file = root / "diarizen/pipelines/inference.py"
     text = pipeline_file.read_text()
     text = text.replace(

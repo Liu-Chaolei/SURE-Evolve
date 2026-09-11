@@ -4,7 +4,39 @@ from __future__ import annotations
 
 import shutil
 import ast
+import sys
 from pathlib import Path
+
+
+def prepare_diarizen_inference_source(root: Path) -> None:
+    """Use the saved custom pyannote source with the current audio/device ABI."""
+    root.resolve().relative_to(Path.cwd().resolve())
+    custom = root / "pyannote-audio/pyannote"
+    version = (root / "pyannote-audio/version.txt").read_text().strip()
+    (custom / "audio/version.py").write_text(
+        f"__version__ = {version!r}\ngit_version = 'workspace'\n"
+    )
+    verification = custom / "audio/pipelines/speaker_verification.py"
+    text = verification.read_text()
+    marker = "try:\n    from speechbrain.pretrained import ("
+    replacement = (
+        "try:\n    if not hasattr(__import__('torchaudio'), 'list_audio_backends'):\n"
+        "        raise ImportError('Legacy SpeechBrain backend unavailable; SD uses WeSpeaker')\n"
+        "    from speechbrain.pretrained import ("
+    )
+    verification.write_text(text.replace(marker, replacement))
+    wespeaker = custom / "audio/models/embedding/wespeaker/__init__.py"
+    text = wespeaker.read_text().replace('device.type == "mps"', 'device.type in {"mps", "npu"}')
+    wespeaker.write_text(text)
+    mixins = custom / "audio/tasks/segmentation/mixins.py"
+    mixins.write_text(mixins.read_text().replace(
+        "from torchaudio import AudioMetaData",
+        "from playground.sure_master.runtime.audio_io import AudioMetaData"))
+    prepare_audio_io(custom / "audio/core/io.py")
+    sys.path[:0] = [str(root), str(root / "pyannote-audio")]
+    # The installed namespace .pth is loaded before workspace paths are injected.
+    import pyannote
+    pyannote.__path__ = [str(custom), *(p for p in pyannote.__path__ if p != str(custom))]
 
 
 def snapshot_source(source: Path, target: Path) -> Path:

@@ -6,6 +6,7 @@ import argparse
 import json
 import shlex
 import shutil
+import hashlib
 from pathlib import Path
 
 import yaml
@@ -46,13 +47,14 @@ def main():
     sure["execution_mode"] = "slurm"
     sure["task_cards_path"] = str(PROJECT / "playground/sure_master/task_cards/sure_tasks.yaml")
     sure["initial_solution_path"] = str(PROJECT / sure["initial_solution_path"])
-    sure["execution_env"]["SURE_TRAIN_BUDGET_SECONDS"] = "86400"
+    # User removed the 24-hour projection gate; Slurm limits are resumable slices.
+    sure["execution_env"]["SURE_TRAIN_BUDGET_SECONDS"] = "0"
     sure["execution_env"]["SURE_RUN_TIMEOUT"] = "0"
     sure["execution_env"]["ASCEND_PROCESS_LOG_PATH"] = "/local/job/ascend/log"
     sure["execution_env"]["ASCEND_WORK_PATH"] = "/local/job/ascend/work"
     sure["slurm"] = {"shared_root": str(PERSONAL), "image": args.image,
                      "partition": "compute", "max_parallel": 1,
-                     "time_limit": "1-00:00:00", "max_segments": 1, "poll_seconds": 20}
+                     "time_limit": "1-00:00:00", "max_segments": 30, "poll_seconds": 20}
     for agent in config["agents"].values():
         for key in ("system_prompt_file", "user_prompt_file"):
             agent[key] = str(PROJECT / "playground/sure_master" / agent[key])
@@ -63,6 +65,10 @@ def main():
     candidate.write_text(yaml.safe_dump(config, sort_keys=False))
     snapshot, deployment = freeze(candidate, output)
     shutil.copy2(PROJECT / "run.py", snapshot / "run.py")
+    manifest_path = snapshot / "source_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"]["run.py"] = hashlib.sha256((snapshot / "run.py").read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, indent=2))
     environment = output / "runtime.env"
     environment.write_text("".join(f"export {key}={shlex.quote(value)}\n" for key, value in env.items()))
     environment.chmod(0o600)

@@ -15,7 +15,7 @@ from playground.sure_master.core.artifacts import file_digest
 from playground.sure_master.core.utils.metric import SureMetricRunner
 from playground.sure_master.core.utils.task_cards import resolve_task_card
 from playground.sure_master.runtime.accelerator import RuntimeBackend
-from playground.sure_master.runtime.model_source import snapshot_source, prepare_audio_io
+from playground.sure_master.runtime.model_source import snapshot_source, prepare_audio_io, prepare_diarizen_inference_source
 from playground.sure_master.runtime.training_state import atomic_json
 from playground.sure_master.tasks.diarization import clip_rttm, validate_rttm_outputs
 from playground.sure_master.tools.probe_task import expand
@@ -42,6 +42,7 @@ def main():
     if file_digest(checkpoint / "training.pt") != metadata["files"]["training.pt"]:
         raise ValueError("Corrupt probe checkpoint")
     source = snapshot_source(Path(sure["task"]["resources"]["source"]), work / "source")
+    prepare_diarizen_inference_source(source)
     pipeline_file = source / "diarizen/pipelines/inference.py"
     text = pipeline_file.read_text().replace(
         'torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")',
