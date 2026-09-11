@@ -48,7 +48,13 @@ set -a
 source .env
 set +a
 
-for required_var in OPENAI_API_KEY GPT_BASE_URL GPT_CHAT_MODEL; do
+if [[ -z "${OPENAI_API_KEY:-}" && -n "${ZAI_API_KEY:-}" ]]; then
+  export OPENAI_API_KEY="${ZAI_API_KEY}"
+  export OPENAI_BASE_URL="${ZAI_BASE_URL:-}"
+  export SURE_AGENT_MODEL="${SURE_AGENT_MODEL:-glm-5.3-flash}"
+fi
+
+for required_var in OPENAI_API_KEY OPENAI_BASE_URL SURE_AGENT_MODEL; do
   if [[ -z "${!required_var:-}" ]]; then
     echo "Missing ${required_var} after sourcing .env."
     exit 2

@@ -9,7 +9,11 @@ from ..core.artifacts import file_digest
 
 
 def validate_prepared_data(
-    adapter: str, preparation: Path, manifests: dict[str, Path]
+    adapter: str,
+    preparation: Path,
+    manifests: dict[str, Path],
+    *,
+    allow_extracted_only: bool = False,
 ) -> dict:
     record = json.loads(preparation.read_text())
     if (
@@ -19,6 +23,10 @@ def validate_prepared_data(
     ):
         raise ValueError(
             "Full training needs a verified complete preparation, not partial downloaded data"
+        )
+    if record.get("source_mode") == "extracted_only" and not allow_extracted_only:
+        raise ValueError(
+            "extracted-only Premium preparation requires explicit data_provenance_mode=extracted_only"
         )
     for role, path in manifests.items():
         expected = record.get("digests", {}).get(role)
@@ -60,4 +68,9 @@ def validate_task_resources(adapter: str, sure: dict) -> None:
     }
     if adapter == "tts.f5tts":
         manifests["train_csv"] = Path(settings["training"]["manifest"])
-    validate_prepared_data(adapter, Path(sure["data_preparation"]), manifests)
+    validate_prepared_data(
+        adapter,
+        Path(sure["data_preparation"]),
+        manifests,
+        allow_extracted_only=(sure.get("data_provenance_mode") == "extracted_only"),
+    )

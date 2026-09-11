@@ -82,6 +82,7 @@ class BaseAdapter:
         env = {
             "SURE_TASK_ADAPTER": self.name,
             "SURE_WORKER_PYTHON": worker,
+            "SURE_CANDIDATE_PYTHON": worker,
             "SURE_TASK_SETTINGS": json.dumps(settings),
             "SURE_TASK_WRAPPER": str(
                 PROJECT_ROOT / "playground/sure_master/tools/run_task_candidate.py"
@@ -93,6 +94,8 @@ class BaseAdapter:
             "structure_arguments", sorted(STRUCTURE_ARGUMENTS)))
         if sure.get("data_preparation"):
             env["SURE_DATA_PREPARATION"] = str(sure["data_preparation"])
+        if sure.get("data_provenance_mode"):
+            env["SURE_DATA_PROVENANCE_MODE"] = str(sure["data_provenance_mode"])
         specs = split_specs(sure)
         if "search" in specs:
             env.update(self.phase_environment(specs["search"]))
@@ -412,6 +415,10 @@ class TtsAdapter(BaseAdapter):
                     "qk_norm": ["none", "rms_norm"],
                     "attn_mask_enabled": [False, True],
                     "checkpoint_activations": [False, True],
+                    "text_mask_padding": [False, True],
+                    "text_embedding_average_upsampling": [False, True],
+                    "pe_attn_head": [None, 1, 2, 4, 8, 16],
+                    "long_skip_connection": [False, True],
                 },
             },
         }

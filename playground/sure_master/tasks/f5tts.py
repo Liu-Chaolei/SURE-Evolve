@@ -31,6 +31,10 @@ ARCH_KEYS = {
     "qk_norm",
     "attn_mask_enabled",
     "checkpoint_activations",
+    "text_mask_padding",
+    "text_embedding_average_upsampling",
+    "pe_attn_head",
+    "long_skip_connection",
 }
 
 

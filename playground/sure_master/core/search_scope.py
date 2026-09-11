@@ -51,7 +51,7 @@ def execution_contract(context: dict, sure: dict) -> dict:
             "architecture": {
                 key: value
                 for key, value in parameters["architecture"].items()
-                if key != "checkpoint_activations"
+                if key not in {"checkpoint_activations"}
             }
         }
     elif "train_args_json" in parameters:

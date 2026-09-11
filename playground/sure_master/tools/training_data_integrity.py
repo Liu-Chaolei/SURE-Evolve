@@ -11,6 +11,55 @@ from playground.sure_master.core.artifacts import file_digest
 from playground.sure_master.runtime.training_state import atomic_json
 
 
+def verify_extracted_premium(root: Path) -> dict:
+    """Validate an already-extracted Premium tree without archive provenance.
+
+    This is an explicit fallback for installations where the original tarballs
+    are no longer available. It validates the complete extracted inventory and
+    records the limitation instead of pretending archive MD5 verification took
+    place.
+    """
+    checksum = root / "Premium_md5check.txt"
+    if not checksum.is_file():
+        raise FileNotFoundError(f"Missing Premium checksum manifest: {checksum}")
+    expected = []
+    for line in checksum.read_text().splitlines():
+        if not line.strip():
+            continue
+        digest, name = line.split(maxsplit=1)
+        name = name.strip().lstrip("*")
+        if len(digest) != 32 or not name.endswith(".tar.gz"):
+            raise ValueError("Invalid Premium archive checksum manifest")
+        expected.append(Path(name).stem.removesuffix(".tar"))
+    if not expected:
+        raise ValueError("Empty Premium archive manifest")
+
+    inventory = {}
+    total = 0
+    for directory_name in expected:
+        directory = root / directory_name
+        txt_dir, wav_dir = directory / "txts", directory / "wavs"
+        if not txt_dir.is_dir() or not wav_dir.is_dir():
+            raise ValueError(f"Missing extracted Premium directory: {directory}")
+        texts = {path.stem for path in txt_dir.glob("*.txt")}
+        waves = {path.stem for path in wav_dir.glob("*.wav")}
+        if not texts or texts != waves:
+            raise ValueError(f"Extracted Premium inventory mismatch: {directory}")
+        total += len(texts)
+        inventory[directory_name] = {
+            "transcripts": len(texts),
+            "audio": len(waves),
+        }
+
+    return {
+        "source_mode": "extracted_only",
+        "archive_md5_verified": False,
+        "archive_manifest": str(checksum.absolute()),
+        "directories": inventory,
+        "utterance_count": total,
+    }
+
+
 def verify_premium_source(root: Path, receipt: Path) -> dict:
     checksum = root / "Premium_md5check.txt"
     expected = {}
@@ -115,6 +164,7 @@ def write_preparation(output: Path, adapter: str, splits: dict, source: dict) ->
             "schema_version": "sure.prepared_training.v1",
             "adapter": adapter,
             "source_complete": True,
+            "source_mode": source.get("source_mode", "archive_verified"),
             "training_selection": "full_prepared_train",
             "digests": digests,
             "source": source,

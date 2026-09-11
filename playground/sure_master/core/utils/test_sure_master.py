@@ -88,6 +88,7 @@ from .vc_remote import (
     remote_candidate_types_from,
     remote_resource_config_from,
     remote_training_max_parallel,
+    write_worker_config,
 )
 from .workspace_cleanup import (
     WorkspaceCleanupConfig,
@@ -123,6 +124,33 @@ class SureTaskCardsTest(unittest.TestCase):
             "'base_model/recipe/train.py', '--world-size', '8']"
         )
         self.assertEqual(candidate_type_from_code(code, default=INFERENCE), FINE_TUNE)
+
+    def test_worker_config_excludes_credentials_and_remote_controls(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            config = {
+                "sure": {
+                    "task_id": "asr_en_wer",
+                    "execution_env": {
+                        "SURE_MAX_TRAIN_EPOCHS": "30",
+                        "ZAI_API_KEY": "secret-key",
+                    },
+                    "api_key": "secret-key",
+                    "remote_training": {"enabled": True},
+                }
+            }
+
+            path = write_worker_config(config, workspace)
+            payload = json.loads(path.read_text())
+            serialized = path.read_text()
+
+            self.assertNotIn("secret-key", serialized)
+            self.assertNotIn("api_key", serialized.lower())
+            self.assertEqual(payload["sure"]["execution_mode"], "local")
+            self.assertEqual(payload["sure"]["remote_training"], {"enabled": False})
+            self.assertEqual(
+                payload["sure"]["execution_env"]["SURE_MAX_TRAIN_EPOCHS"], "30"
+            )
 
     def test_asr_candidate_type_code_forces_arch_structure_args(self):
         code = (
@@ -1278,6 +1306,7 @@ class SureTaskCardsTest(unittest.TestCase):
         self.assertTrue(candidate_runs_remotely(config, TRAINING))
         playground = SureMasterPlayground.__new__(SureMasterPlayground)
         playground.config = config
+        playground.sure_config = config["sure"]
         playground.task_card = SureTaskCard(
             task_id="tts_en_wer",
             canonical_task="tts",

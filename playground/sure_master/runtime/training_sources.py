@@ -63,3 +63,13 @@ def prepare_f5_training_source(root: Path) -> None:
     )
     ast.parse(text)
     path.write_text(text)
+    prepare_csv = root / "src/f5_tts/train/datasets/prepare_csv_wavs.py"
+    if prepare_csv.exists():
+        source = prepare_csv.read_text()
+        marker = "PRETRAINED_VOCAB_PATH = files(\"f5_tts\").joinpath(\"../../data/Emilia_ZH_EN_pinyin/vocab.txt\")"
+        replacement = (
+            "PRETRAINED_VOCAB_PATH = Path(os.environ.get(\"SURE_F5_VOCAB_FILE\", "
+            "str(files(\"f5_tts\").joinpath(\"../../data/Emilia_ZH_EN_pinyin/vocab.txt\"))))"
+        )
+        if marker in source and replacement not in source:
+            prepare_csv.write_text(source.replace(marker, replacement, 1))

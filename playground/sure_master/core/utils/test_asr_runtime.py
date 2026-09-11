@@ -13,7 +13,11 @@ from unittest.mock import patch
 
 import yaml
 
-from playground.sure_master.tools.prepare_tedlium import read_stm_split, training_subset
+from playground.sure_master.tools.prepare_tedlium import (
+    read_stm_split,
+    reuse_precomputed_features,
+    training_subset,
+)
 from playground.sure_master.runtime.accelerator import runtime_environment, prepare_npu_recipe
 from playground.sure_master.runtime.data_view import evaluation_data_view
 from playground.sure_master.tools.with_xlab_environment import xlab_environment
@@ -92,6 +96,70 @@ class AsrRuntimeTests(unittest.TestCase):
             self.assertEqual(rows[0].channel, 0)
             self.assertEqual(rows[0].text, "Hello world")
             self.assertEqual(training_subset(rows, 1, 42), rows)
+
+    def test_train_stm_directory_symlink_falls_back_to_flattened_data(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dev = root / "legacy/dev"
+            dev.mkdir(parents=True)
+            (dev / "dev.sph").write_bytes(b"audio fixture")
+            (dev / "dev.stm").write_text("dev 1 speaker 0.0 1.0 <o> Dev text\n")
+            data = root / "data"
+            (data / "stm").mkdir(parents=True)
+            (data / "sph").mkdir()
+            (data / "train.sph").write_bytes(b"audio fixture")
+            (data / "sph/train.sph").write_bytes(b"audio fixture")
+            (data / "stm/train.stm").write_text(
+                "train 1 speaker 0.0 1.0 <o> Train text\n"
+            )
+            train = root / "legacy/train"
+            train.mkdir(parents=True)
+            (train / "stm").symlink_to(Path("../../data/stm"), target_is_directory=True)
+            (train / "sph").symlink_to(Path("../../data/sph"), target_is_directory=True)
+
+            rows = read_stm_split(root, "train")
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].recording_id, "train")
+            self.assertEqual(rows[0].text, "Train text")
+
+    def test_reuses_lowercase_icefall_features_without_copying_archives(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source/data"
+            fbank = source / "fbank"
+            bpe = root / "bpe"
+            output = root / "prepared"
+            fbank.mkdir(parents=True)
+            bpe.mkdir()
+            (bpe / "bpe.model").write_bytes(b"tokenizer")
+            for split in ("train", "dev", "test"):
+                feature_dir = fbank / f"tedlium_feats_{split}"
+                feature_dir.mkdir()
+                (feature_dir / "feats-0.lca").write_bytes(b"features")
+                with gzip.open(
+                    fbank / f"tedlium_cuts_{split}_lowercase.jsonl.gz", "wt"
+                ) as stream:
+                    stream.write(
+                        json.dumps(
+                            {
+                                "id": f"{split}-1",
+                                "features": {
+                                    "num_features": 80,
+                                    "storage_path": f"data/fbank/{feature_dir.name}/feats-0.lca",
+                                },
+                            }
+                        )
+                        + "\n"
+                    )
+
+            metadata = reuse_precomputed_features(source, bpe, output)
+
+            self.assertTrue(metadata["feature_reuse"])
+            self.assertEqual(metadata["feature_manifest_rows"]["train"], 1)
+            self.assertTrue((output / "lang_bpe_500").is_symlink())
+            self.assertTrue((output / "fbank/tedlium_feats_train").is_symlink())
+            self.assertTrue((output / "fbank/tedlium_cuts_train.jsonl.gz").is_symlink())
 
     def test_retained_checkpoint_survives_cleanup_and_restores_independently(self):
         with tempfile.TemporaryDirectory() as temporary:

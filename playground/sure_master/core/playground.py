@@ -895,6 +895,12 @@ class SureMasterPlayground(BasePlayground):
             return local_workers
         remote_types = remote_candidate_types_from(self.config)
         remote_workers = remote_training_max_parallel(self.config, default=1)
+        if (
+            str(self.sure_config.get("search_scope", "architecture_only")).lower()
+            == "architecture_only"
+            and ARCH in remote_types
+        ):
+            return remote_workers
         if {INFERENCE, *TRAINING_TYPES}.issubset(remote_types):
             return remote_workers
         return local_workers + remote_workers
@@ -908,13 +914,26 @@ class SureMasterPlayground(BasePlayground):
         round_candidate_limits: dict[str, int],
     ) -> list[dict[str, Any]]:
         entries: list[dict[str, Any]] = []
+        architecture_only = (
+            str(self.sure_config.get("search_scope", "architecture_only")).lower()
+            == "architecture_only"
+        )
         for idea in ideas:
             metadata = getattr(self, "_xlab_idea_metadata", {}).get(self._idea_result_key(idea), {})
-            candidate_type = (
-                metadata.get("candidate_type")
-                or (candidate_type_from_idea(idea) if mixed_enabled else INFERENCE)
-            )
-            if mixed_enabled and not metadata:
+            if architecture_only:
+                declared = metadata.get("candidate_type")
+                if declared and declared != ARCH:
+                    raise ValueError(
+                        "architecture_only search received a non-arch XLab candidate: "
+                        + str(declared)
+                    )
+                candidate_type = ARCH
+            else:
+                candidate_type = (
+                    metadata.get("candidate_type")
+                    or (candidate_type_from_idea(idea) if mixed_enabled else INFERENCE)
+                )
+            if mixed_enabled and not metadata and not architecture_only:
                 limit = round_candidate_limits.get(candidate_type, 0)
                 if limit > 0 and round_candidate_counts.get(candidate_type, 0) >= limit:
                     self.logger.info(
@@ -929,7 +948,7 @@ class SureMasterPlayground(BasePlayground):
                 )
             entries.append({"idea": idea, "candidate_type": candidate_type})
 
-        if mixed_enabled:
+        if mixed_enabled and not architecture_only:
             order = {INFERENCE: 0, FINE_TUNE: 1, ARCH: 2}
             entries.sort(key=lambda item: order.get(item["candidate_type"], 99))
         return entries
@@ -1393,8 +1412,12 @@ class SureMasterPlayground(BasePlayground):
             preflight = self.sure_config.get("preflight", False)
             if preflight is True or (isinstance(preflight, dict) and preflight.get("enabled")):
                 from ..tools.preflight import check_config
+                remote_complete, _remote_diagnostics = complete_remote_coverage_from(self.config)
                 check_config({"sure": self.sure_config, "xlab": self.config_manager.get("xlab", {})},
-                             check_model=self.sure_config.get("execution_mode") != "slurm")
+                             check_model=(
+                                 self.sure_config.get("execution_mode") != "slurm"
+                                 and not remote_complete
+                             ))
             self.setup()
             self._configure_xlab_provider()
             self._setup_trajectory_file(output_file)

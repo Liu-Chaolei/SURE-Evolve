@@ -45,7 +45,13 @@ def read_stm_split(root: Path, split: str) -> list[Segment]:
     directory = root / "legacy" / split
     if split == "train" and not directory.is_dir():
         directory = root / "data"
+    # The shipped corpus uses legacy/train/stm as a directory symlink to
+    # data/stm. pathlib.rglob() does not recurse through that symlink, so use
+    # the flattened data layout when the selected split has no STM files.
     stms = sorted(directory.rglob("*.stm"))
+    if not stms and split == "train":
+        directory = root / "data"
+        stms = sorted(directory.rglob("*.stm"))
     audio = {path.stem: path for path in directory.rglob("*.sph")}
     if not stms:
         raise ValueError(f"No STM files for {split}: {directory}")
@@ -154,6 +160,68 @@ def prepare_features(splits: dict[str, list[Segment]], output: Path, jobs: int) 
         result.to_file(target)
 
 
+def _ensure_symlink(target: Path, source: Path) -> None:
+    source = source.expanduser().absolute()
+    if target.is_symlink() and target.resolve() == source.resolve():
+        return
+    if target.exists() or target.is_symlink():
+        raise ValueError(f"Cannot replace existing prepared-data path: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(source, target_is_directory=source.is_dir())
+
+
+def reuse_precomputed_features(
+    feature_data: Path,
+    bpe_dir: Path,
+    output: Path,
+) -> dict[str, object]:
+    """Create a SURE data view over complete Icefall TEDLIUM3 features."""
+    data = feature_data.expanduser().absolute()
+    if (data / "data/fbank").is_dir():
+        data = data / "data"
+    fbank = data / "fbank"
+    if not fbank.is_dir():
+        raise FileNotFoundError(f"Missing reusable Icefall fbank directory: {fbank}")
+
+    manifest_rows: dict[str, int] = {}
+    manifest_variant: dict[str, str] = {}
+    for split in ("train", "dev", "test"):
+        lowercase = fbank / f"tedlium_cuts_{split}_lowercase.jsonl.gz"
+        source = lowercase if lowercase.is_file() else fbank / f"tedlium_cuts_{split}.jsonl.gz"
+        if not source.is_file():
+            raise FileNotFoundError(f"Missing reusable {split} manifest: {source}")
+        with gzip.open(source, "rt", encoding="utf-8") as stream:
+            first = stream.readline()
+            if not first.strip():
+                raise ValueError(f"Reusable {split} manifest is empty: {source}")
+            sample = json.loads(first)
+        features = sample.get("features") or {}
+        if features.get("num_features") != 80 or not features.get("storage_path"):
+            raise ValueError(f"Reusable {split} manifest has incompatible features: {source}")
+        feature_dir = fbank / f"tedlium_feats_{split}"
+        if not feature_dir.is_dir() or not any(feature_dir.glob("*.lca")):
+            raise FileNotFoundError(f"Missing reusable {split} feature archives: {feature_dir}")
+        with gzip.open(source, "rt", encoding="utf-8") as stream:
+            manifest_rows[split] = sum(1 for line in stream if line.strip())
+        manifest_variant[split] = "lowercase" if source == lowercase else "default"
+        _ensure_symlink(output / "fbank" / f"tedlium_cuts_{split}.jsonl.gz", source)
+        _ensure_symlink(output / "fbank" / feature_dir.name, feature_dir)
+
+    bpe = bpe_dir.expanduser().absolute()
+    if bpe.is_file() and bpe.name == "bpe.model":
+        bpe = bpe.parent
+    if not (bpe / "bpe.model").is_file():
+        raise FileNotFoundError(f"Missing reusable TEDLIUM3 BPE model: {bpe / 'bpe.model'}")
+    _ensure_symlink(output / "lang_bpe_500", bpe)
+    return {
+        "feature_reuse": True,
+        "feature_source": str(data),
+        "feature_manifest_rows": manifest_rows,
+        "feature_manifest_variant": manifest_variant,
+        "bpe_source": str(bpe),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", type=Path, required=True)
@@ -163,7 +231,21 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42, help="Training subset seed; dev tier partition stays fixed")
     parser.add_argument("--search-hours", type=float, default=0, help="Create a feature-sharing search subset after full preparation")
     parser.add_argument("--refs-only", action="store_true")
+    parser.add_argument(
+        "--reuse-feature-data",
+        type=Path,
+        help="Reuse an existing Icefall TEDLIUM3 data/fbank tree instead of extracting features",
+    )
+    parser.add_argument(
+        "--reuse-bpe-dir",
+        type=Path,
+        help="BPE directory paired with --reuse-feature-data (must contain bpe.model)",
+    )
     args = parser.parse_args()
+    if bool(args.reuse_feature_data) != bool(args.reuse_bpe_dir):
+        parser.error("--reuse-feature-data and --reuse-bpe-dir must be set together")
+    if args.refs_only and args.reuse_feature_data:
+        parser.error("--refs-only cannot be combined with reusable feature data")
     root, output = corpus_directory(args.corpus), args.output.resolve()
     if output == root or root in output.parents:
         raise ValueError("Output must be outside the source corpus")
@@ -178,13 +260,22 @@ def main() -> None:
     previous_ready = marker.exists() and json.loads(marker.read_text()).get("features_ready", False)
     marker.write_text(json.dumps({"fingerprint": fingerprint, "features_ready": previous_ready}) + "\n")
     counts = prepare_refs(splits, output / "refs")
+    feature_metadata: dict[str, object] = {}
     if not args.refs_only:
-        prepare_features(splits, output, args.jobs)
+        if args.reuse_feature_data:
+            feature_metadata = reuse_precomputed_features(
+                args.reuse_feature_data,
+                args.reuse_bpe_dir,
+                output,
+            )
+        else:
+            prepare_features(splits, output, args.jobs)
     summary = {"fingerprint": fingerprint, "corpus": str(root), "refs": counts,
                "training_selection": "full" if args.train_hours == 0 else "subset",
                "requested_train_hours": args.train_hours,
                "features_ready": previous_ready or not args.refs_only,
-               "splits": {k: {"utterances": len(v), "hours": sum(s.duration for s in v) / 3600} for k, v in splits.items()}}
+               "splits": {k: {"utterances": len(v), "hours": sum(s.duration for s in v) / 3600} for k, v in splits.items()},
+               **feature_metadata}
     marker.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     if args.search_hours:
         if args.train_hours != 0 or args.refs_only:

@@ -588,7 +588,11 @@ class SureRunExp(BaseExp):
         candidate_type = normalize_candidate_type(self.candidate_type_hint)
         stage = str(self.candidate_stage_name or self.stage).strip().lower()
         if "draft" in stage:
-            candidate_type = candidate_type_from_code(self.code, default=INFERENCE)
+            # The configured baseline intentionally has no candidate marker;
+            # preserve its reviewed type instead of silently routing it as
+            # inference (which would allocate only one GPU for DDP training).
+            default_type = self.candidate_type_hint
+            candidate_type = candidate_type_from_code(self.code, default=default_type)
             if candidate_type in {FINE_TUNE, ARCH}:
                 return "draft_training"
         return candidate_type

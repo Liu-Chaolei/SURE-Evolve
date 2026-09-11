@@ -1,13 +1,17 @@
 # SURE Master Icefall ASR 启动手册
 
-这份手册保留当前要用的 ASR staged self-evolution 启动流程：
-Zipformer draft + `staged_axes` 三轴自进化 + CPU-only coordinator + 全远端 VC
-候选执行，覆盖 LibriSpeech 和 TEDLIUM3 配置。脚本名沿用 `run_mixed_local.sh`，
-但当前 production 配置默认不是 mixed-local GPU 执行。
+当前 TEDLIUM3 CUDA + VC 入口为
+`configs/sure_master/zai-tedlium3-cuda-vc-evolution.yaml`。训练候选统一申请 8
+张 GPU；提交前从 `vc info` 的配置 partition 列表中选择空闲 GPU 数不少于 8 的
+partition，具体 GPU 由 VC scheduler 分配。coordinator 只需要本地 CPU 和 ZAI API
+访问，模型训练、解码及 SURE 评分均在 VC child 中完成。
+
+这份手册同时保留旧的 staged 配置说明；新的 TEDLIUM3 CUDA 入口使用 ordinary + XLab
+architecture-only search。脚本名沿用 `run_mixed_local.sh`，但 coordinator 默认不占用本地 GPU。
 
 ## 当前入口
 
-使用配置（二选一）：
+旧 staged 配置（二选一）：
 
 ```text
 # LibriSpeech 官方预训练 draft
@@ -23,12 +27,43 @@ configs/sure_master/gpt-5-icefall-tedlium3-staged-axes-mixed.yaml
 docker/sure-master-icefall/run_mixed_local.sh
 ```
 
+当前 TEDLIUM3 CUDA 运行直接使用：
+
+```bash
+cd /hpc_stor03/sjtu_home/chaolei.liu/SURE-Evolve
+SURE_MASTER_CONFIG=configs/sure_master/zai-tedlium3-cuda-vc-evolution.yaml \
+SURE_MASTER_RUN_NAME=tedlium3_cuda_vc \
+bash docker/sure-master-icefall/run_mixed_local.sh
+```
+
+首次运行前在 host 上创建完整数据视图（不会修改或复制原始特征）：
+
+```bash
+PYTHONPATH=/hpc_stor03/sjtu_home/chaolei.liu/SURE-Evolve \
+/hpc_stor03/sjtu_home/chaolei.liu/anaconda3/envs/icefall/bin/python \
+-m playground.sure_master.tools.prepare_tedlium \
+--corpus /hpc_stor03/sjtu_home/chaolei.liu/data/datasets/data/asr/rawdata/TEDLIUM_release-3 \
+--output /hpc_stor03/sjtu_home/chaolei.liu/data/sure_tedlium3_full \
+--train-hours 0 --jobs 1 \
+--reuse-feature-data /hpc_stor03/sjtu_home/chaolei.liu/data/datasets/data/asr/am/icefall/tedlium3 \
+--reuse-bpe-dir /hpc_stor03/sjtu_home/chaolei.liu/ASR/icefall/egs/tedlium3/ASR/data/lang_bpe_500
+```
+
+该步骤复用 central lowercase train/dev/test 特征和 recipe 的 500-token BPE，仅生成
+SURE refs、软链接及带数据谱系的 `preparation.json`。不指定两个 `--reuse-*` 参数时才会
+从原始 SPH 重新提取约 50G 特征。
+
+训练候选默认申请 8 GPU；`remote_training.partitions` 中的候选队列由每次
+VC 提交前的 `vc info` 空闲 GPU 数动态排序。需要限制队列时可设置
+`SURE_REMOTE_PARTITIONS`，但不要设置 `SURE_REMOTE_GPU_PER_TASK`，以免覆盖
+8-GPU training profile。
+
 运行方式：
 
 ```text
 本地 coordinator：CPU-only，负责 SURE Master / LLM 编排和提交 VC 子任务
-远端 inference：每个 VC child job 使用 1 GPU / 8 CPU / 32G
-远端 fine_tune、arch 及需从头训练的 draft：每个 VC child job 使用 8 GPU / 64 CPU / 256G
+远端 inference：每个 VC child job 使用 1 GPU / 8 CPU / 12G
+远端 fine_tune、arch 及需从头训练的 draft：每个 VC child job 使用 8 GPU / 64 CPU / 96G
 SURE metric：在对应 VC child job 内运行
 ```
 
@@ -41,13 +76,18 @@ SURE metric：在对应 VC child job 内运行
 确认 coordinator 所需路径存在：
 
 ```bash
-REPO_DIR=/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve
+REPO_DIR=/hpc_stor03/sjtu_home/chaolei.liu/SURE-Evolve
 
 test -f "${REPO_DIR}/.env"
 test -d /hpc_stor03/sjtu_home/chaolei.liu/sure
 test -x /hpc_stor03/sjtu_home/chaolei.liu/anaconda3/envs/suremaster-f5tts-local/bin/python
 command -v vc
 ```
+
+XLab idea generation 需要单独的 Python 环境并安装
+`playground/sure_master/requirements-xlab.txt`（至少可导入
+`sentence_transformers` 和 `faiss`）。默认使用 `SURE_MASTER_PYTHON`；也可通过
+`XLAB_PYTHON=/path/to/xlab-python` 指定该环境。
 
 全远端模式下 coordinator 不要求本地 GPU、`nvidia-smi`、Icefall runtime 或
 Icefall Python；Icefall、CUDA、数据和 checkpoint 的可用性由 VC child image 及其
@@ -71,13 +111,15 @@ rg -n '/Agent/(EvoMaster|SURE-Evolve-old)' \
 
 所选 launcher/YAML 不应包含旧仓库路径。
 
-`.env` 至少需要：
+当前 launcher 的 `.env` 只需要：
 
 ```bash
-OPENAI_API_KEY=...
-GPT_BASE_URL=...
-GPT_CHAT_MODEL=...
+ZAI_API_KEY=...
+ZAI_BASE_URL=...
 ```
+
+launcher 会在 coordinator 进程内将它们映射为 OpenAI-compatible 环境变量；不会
+把 key 注入 VC training child。
 
 ## Official Draft
 
@@ -109,7 +151,7 @@ pretrained.pt sha256=2ca2bf48b5ae52de95402749df9756da28b50f85d75933e361f135ceb42
 epoch-50.pt   sha256=11a0a03fc768125266e50bb55a9bae766f83e532daa93700ffee78a6db4ffd95
 ```
 
-## Staged Axes
+## Historical Staged Reference
 
 当前 ASR staged 配置已经写好，不需要手动复制 YAML：
 
@@ -141,70 +183,9 @@ staged_axes:
 
 ## 启动
 
-### TEDLIUM3：先 smoke，再启动完整搜索
-
-不要在预处理后直接启动完整 TEDLIUM3 staged search。请先使用
-`configs/sure_master/gpt-5-icefall-tedlium3-smoke-staged-axes-mixed.yaml`
-完成 smoke 验证；完整命令和验收标准以
-[SURE Master 使用手册](../../playground/sure_master/USAGE.md)中的“先 smoke，再 full staged search”章节为准。
-验收时必须确认 `arch/short` 至少执行一个真实 duration probe：日志中的 `train.py`
-指向 TEDLIUM3 recipe，命令不包含 `--full-libri` 或 argparse error，并在观察到配置数量的
-真实 training batch 后接受 duration。随后还要确认 `artifacts/candidate_status.json`
-状态有效且 SURE scoring 成功，才能启动下方的完整搜索。
-
-每次 smoke 和 full search 都使用新的唯一 run 名称。当前 staged 流程只支持同一次运行内
-rung 间 checkpoint 晋级；旧 run 的 `leaderboard_*.json` 不能让新进程从
-`arch/short` 持久化恢复。失败 run 应保留作为排障证据，修复后重新执行 draft 属于预期行为。
-
-以下示例启动 **TEDLIUM3**。启动入口是 `run_mixed_local.sh`；示例显式传入
-`SURE_MASTER_REPO_DIR`，便于确认 launcher 和 YAML 使用同一仓库：
-
-```bash
-cd /hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve
-
-REPO_DIR=/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve
-CONFIG=configs/sure_master/gpt-5-icefall-tedlium3-staged-axes-mixed.yaml
-RUN_NAME=zipformer_tedlium3_staged
-LOG_DIR=/hpc_stor03/sjtu_home/chaolei.liu/log
-MASTER_LOG="${LOG_DIR}/sure_master_${RUN_NAME}.log"
-NOHUP_LOG="${LOG_DIR}/sure_master_${RUN_NAME}.nohup.log"
-
-REMOTE_PARTITION=""
-REMOTE_PARTITIONS=pdgpu-3090,pdgpu-4090,pdgpu-a10
-REMOTE_PARTITION_POLICY=most_free_gpu
-REMOTE_PARTITION_FALLBACK=queue_first
-REMOTE_MAX_PARALLEL=4
-
-mkdir -p "${LOG_DIR}"
-
-nohup env \
-  SURE_MASTER_REPO_DIR="${REPO_DIR}" \
-  SURE_MASTER_CONFIG="${CONFIG}" \
-  SURE_MASTER_RUN_NAME="${RUN_NAME}" \
-  SURE_MASTER_LOG_FILE="${MASTER_LOG}" \
-  SURE_REMOTE_PARTITION="${REMOTE_PARTITION}" \
-  SURE_REMOTE_PARTITIONS="${REMOTE_PARTITIONS}" \
-  SURE_REMOTE_PARTITION_POLICY="${REMOTE_PARTITION_POLICY}" \
-  SURE_REMOTE_PARTITION_FALLBACK="${REMOTE_PARTITION_FALLBACK}" \
-  SURE_REMOTE_MAX_PARALLEL="${REMOTE_MAX_PARALLEL}" \
-  bash docker/sure-master-icefall/run_mixed_local.sh \
-  > "${NOHUP_LOG}" 2>&1 &
-
-PID=$!
-echo "pid=${PID}"
-echo "master_log=${MASTER_LOG}"
-echo "nohup_log=${NOHUP_LOG}"
-```
-
-启动 **LibriSpeech** 时只替换：
-
-```bash
-CONFIG=configs/sure_master/gpt-5-icefall-staged-axes-mixed.yaml
-RUN_NAME=zipformer_staged
-```
-
-`SURE_MASTER_CONFIG` 可省略，因为 launcher 当前默认即为
-`gpt-5-icefall-staged-axes-mixed.yaml`；TEDLIUM3 必须显式设置其配置路径。
+旧的 staged 配置和 smoke 流程仅作为历史参考保留，不适用于当前 TEDLIUM3 CUDA
+8-GPU ordinary search。当前运行命令见本文开头的 `zai-tedlium3-cuda-vc-evolution.yaml`
+示例；它会直接提交完整 baseline 和候选训练。
 
 `SURE_REMOTE_PARTITION=""` 表示不固定单一队列。空值会被忽略，框架会从
 `SURE_REMOTE_PARTITIONS` 中按照 `most_free_gpu` 选择；查询失败时按照
@@ -374,7 +355,7 @@ SURE_REMOTE_PARTITIONS=pdgpu-3090,pdgpu-4090,pdgpu-a10
 若 launcher 无法进入仓库：确认 `SURE_MASTER_REPO_DIR` 指向：
 
 ```bash
-SURE_MASTER_REPO_DIR=/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve
+SURE_MASTER_REPO_DIR=/hpc_stor03/sjtu_home/chaolei.liu/SURE-Evolve
 ```
 
 VC 子任务找不到 runner、ref 或 wrapper：检查所选 YAML 中是否仍有旧路径：
@@ -383,7 +364,7 @@ VC 子任务找不到 runner、ref 或 wrapper：检查所选 YAML 中是否仍�
 rg -n '/Agent/(EvoMaster|SURE-Evolve-old)' "${CONFIG}"
 ```
 
-`Missing OPENAI_API_KEY/GPT_BASE_URL/GPT_CHAT_MODEL`：检查 `.env` 变量名。
+`Missing ZAI_API_KEY/ZAI_BASE_URL`：检查 `.env` 变量名。
 
 `Python is not executable` 或运行时依赖导入失败：通过 `SURE_MASTER_PYTHON`
 指定 coordinator Python，并确认该环境能导入 `evomaster`、`openai`、

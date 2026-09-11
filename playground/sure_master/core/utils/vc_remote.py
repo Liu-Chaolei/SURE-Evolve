@@ -38,6 +38,7 @@ REMOTE_ENV_OVERRIDES = {
 DEFAULT_PARTITION_POLICY = "most_free_gpu"
 DEFAULT_PARTITION_FALLBACK = "queue_first"
 VALID_REMOTE_CANDIDATE_TYPES = {INFERENCE, FINE_TUNE, ARCH, TRAINING}
+_SECRET_KEY_MARKERS = ("API_KEY", "PASSWORD", "SECRET", "TOKEN")
 
 
 def _config_to_dict(config: Any) -> dict[str, Any]:
@@ -266,6 +267,40 @@ def _resolve_config_path(config_path: str | Path | None) -> Path:
     return path.resolve()
 
 
+def _worker_config_value(value: Any) -> Any:
+    """Copy configuration data while excluding secret-bearing fields."""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            normalized = str(key).upper()
+            if any(marker in normalized for marker in _SECRET_KEY_MARKERS):
+                continue
+            result[str(key)] = _worker_config_value(item)
+        return result
+    if isinstance(value, list):
+        return [_worker_config_value(item) for item in value]
+    return value
+
+
+def write_worker_config(config: Any, workspace: Path) -> Path:
+    """Write a worker-only config outside the repository's secret-bearing .env."""
+    sure = sure_config_from(config)
+    worker_sure = _worker_config_value(sure)
+    worker_sure["execution_mode"] = "local"
+    worker_sure["remote_training"] = {"enabled": False}
+    payload = {"sure": worker_sure}
+    target = workspace / "metric" / "remote_worker_config.yaml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(target.name + ".pending")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    temporary.replace(target)
+    return target
+
+
 def _safe_job_name(value: str, max_len: int = 63) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-")
     cleaned = cleaned or "sure-f5tts-train"
@@ -371,6 +406,7 @@ class VcRemoteTrainingExecutor:
 
         try:
             self._preflight(workspace=workspace, result_path=result_path)
+            write_worker_config(self.config, workspace)
             command = self._build_vc_command(
                 workspace=workspace,
                 result_path=result_path,
@@ -621,9 +657,7 @@ class VcRemoteTrainingExecutor:
             raise ValueError("sure.remote_training.image is required")
 
         workdir = str(self._source_workdir())
-        remote_workdir = Path(workdir)
         artifact_workdir = self._artifact_workdir()
-        remote_config_path = self._source_path_for_child(self.config_path, remote_workdir)
         remote_workspace = self._source_path_for_child(workspace, artifact_workdir)
         remote_result_path = self._source_path_for_child(result_path, artifact_workdir)
         python_bin = str(self.remote_config.get("python") or "/opt/conda/envs/evomaster/bin/python")
@@ -635,7 +669,10 @@ class VcRemoteTrainingExecutor:
         workload = str(self.resource_profile.get("candidate_type") or "training").replace("_", "-")
         job_name = _safe_job_name(f"{job_prefix}-{workload}-{exp_name}-{int(time.time())}")
         self.last_job_name = job_name
-        env_file = Path(str(self.remote_config.get("env_file") or PROJECT_ROOT / ".env"))
+        worker_config = workspace / "metric" / "remote_worker_config.yaml"
+        remote_worker_config = self._source_path_for_child(
+            worker_config, artifact_workdir
+        )
         profile_name = str(self.resource_profile.get("profile_name") or "legacy")
         requested_resources = json.dumps(
             self.resource_profile.get("requested_resources") or {},
@@ -646,13 +683,11 @@ class VcRemoteTrainingExecutor:
             [
                 "set -eo pipefail",
                 f"cd {shlex.quote(workdir)}",
-                f"if [ -f {shlex.quote(str(env_file))} ]; then set -a; source {shlex.quote(str(env_file))}; set +a; "
-                "elif [ -f .env ]; then set -a; source .env; set +a; fi",
                 f"export SURE_VC_RESOURCE_PROFILE={shlex.quote(profile_name)}",
                 f"export SURE_VC_REQUESTED_RESOURCES={shlex.quote(requested_resources)}",
                 (
                     f"{shlex.quote(python_bin)} -u {shlex.quote(runner)} "
-                    f"--config {shlex.quote(str(remote_config_path))} "
+                    f"--config {shlex.quote(str(remote_worker_config))} "
                     f"--workspace {shlex.quote(str(remote_workspace))} "
                     f"--result {shlex.quote(str(remote_result_path))} "
                     f"--timeout {int(execution_timeout)}"

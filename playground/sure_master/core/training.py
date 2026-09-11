@@ -12,6 +12,7 @@ from typing import Any
 from .artifacts import file_digest, safe_relative
 
 F5_RECIPE = "f5tts.finetune_cli.v1"
+F5_DDP8_RECIPE = "f5tts.finetune_cli.v1.ddp8"
 SD_RECIPE = "diarizen.wavlm_updated.v1"
 REPORT_SCHEMA = "sure.training_completion.v1"
 
@@ -35,6 +36,7 @@ F5_TRAINING = {
     "checkpoint_selection": "final_ema",
     "initialization": "official_pretrained_weights",
 }
+F5_DDP8_TRAINING = {**F5_TRAINING, "recipe": F5_DDP8_RECIPE, "world_size": 8}
 SD_TRAINING = {
     "recipe": SD_RECIPE,
     "epochs": 100,
@@ -79,7 +81,10 @@ def official_training(adapter: str) -> dict:
 def validate_training_config(
     adapter: str, config: dict, runtime: dict | None = None
 ) -> dict:
-    expected = official_training(adapter)
+    if adapter == "tts.f5tts" and config.get("recipe") == F5_DDP8_RECIPE:
+        expected = deepcopy(F5_DDP8_TRAINING)
+    else:
+        expected = official_training(adapter)
     if "max_steps" in config and config["max_steps"] not in (None, 0):
         raise ValueError(
             "Full training does not accept the legacy max_steps cap; migrate to the official epoch recipe"

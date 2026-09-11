@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import importlib
 import importlib.util
 import json
+import os
+import shutil
 import sys
 from functools import partial
 from pathlib import Path
@@ -68,19 +71,31 @@ def f5_train(job):
     output, source = Path(job["output"]), Path(job["source"])
     training = job["contract"]["training"]
     resources = job["settings"]["resources"]
-    prepared = output / "prepared_data"
     manifest = Path(job["manifests"]["train_csv"])
-    marker = prepared / "prepared.json"
     identity = {
         "csv": file_digest(manifest),
         "vocab": file_digest(Path(resources["vocab"])),
     }
+    os.environ["SURE_F5_VOCAB_FILE"] = str(Path(resources["vocab"]).resolve())
+    cache_value = str(job.get("prepared_cache") or "").strip()
+    cache_root = Path(cache_value).expanduser() if cache_value else None
+    if cache_root is not None:
+        cache_key = hashlib.sha256(
+            json.dumps(identity, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        prepared = cache_root / cache_key
+    else:
+        prepared = output / "prepared_data"
+    marker = prepared / "prepared.json"
     if marker.exists():
         if json.loads(marker.read_text()) != identity:
             raise ValueError(
                 "Prepared F5 data belongs to another training manifest/vocabulary"
             )
     else:
+        if prepared.exists():
+            shutil.rmtree(prepared)
+        prepared.mkdir(parents=True, exist_ok=True)
         with (output / "prepare.log").open("w") as log:
             run_bounded(
                 [

@@ -7,6 +7,25 @@ production 配置默认不是 mixed-local GPU 执行。
 
 ## 当前入口
 
+中文 Premium 正式结构搜索使用：
+
+```text
+configs/sure_master/tts-zh-zai-vc.yaml
+```
+
+该配置使用 `tts_zh_cer`、Seed-TTS zh holdout、ZAI `glm-5.3-flash` 和 8-GPU
+F5-TTS DDP 完整训练。先按 extracted-only 模式准备数据：
+
+```bash
+python playground/sure_master/tools/prepare_task_data.py tts \\
+  --root /hpc_stor03/sjtu_home/chaolei.liu/data/datasets/data/tts/WenetSpeech4TTS/Premium \\
+  --seed-root /hpc_stor03/sjtu_home/chaolei.liu/data/datasets/seed-tts-eval \\
+  --output /hpc_stor03/sjtu_home/chaolei.liu/data/sure_premium_f5tts \\
+  --source-mode extracted_only
+```
+
+正式运行时设置 `SURE_MASTER_CONFIG` 指向该配置；不会执行 smoke 阶段。
+
 推荐使用的 staged 配置：
 
 ```text
@@ -74,12 +93,21 @@ rg -n '/Agent/(EvoMaster|SURE-Evolve-old)' \
 
 所选 launcher/YAML 不应包含旧仓库路径。
 
-`.env` 至少需要：
+`.env` 至少需要 OpenAI-compatible 配置之一：
 
 ```bash
 OPENAI_API_KEY=...
 GPT_BASE_URL=...
 GPT_CHAT_MODEL=...
+```
+
+也可以只配置 ZAI 兼容端点；launcher 会将其映射到 coordinator 使用的
+`OPENAI_API_KEY`、`OPENAI_BASE_URL` 和 `SURE_AGENT_MODEL`：
+
+```bash
+ZAI_API_KEY=...
+ZAI_BASE_URL=...
+SURE_AGENT_MODEL=glm-5.3-flash
 ```
 
 F5-TTS child runtime 默认离线使用 Hugging Face cache：
@@ -373,7 +401,7 @@ VC 子任务找不到数据、wrapper、workdir 或 `.env`：检查所选 YAML �
 rg -n '/Agent/(EvoMaster|SURE-Evolve-old)' "${CONFIG}"
 ```
 
-`Missing OPENAI_API_KEY/GPT_BASE_URL/GPT_CHAT_MODEL`：检查 `.env` 变量名。
+`Missing OPENAI_API_KEY/OPENAI_BASE_URL/SURE_AGENT_MODEL`：检查 `.env`；如果使用 ZAI，确认 `ZAI_API_KEY` 和 `ZAI_BASE_URL` 已配置。
 
 `Python is not executable` 或运行时依赖导入失败：使用
 `SURE_MASTER_PYTHON` 指定 coordinator Python。

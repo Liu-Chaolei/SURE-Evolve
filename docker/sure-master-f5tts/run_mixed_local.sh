@@ -11,6 +11,10 @@ LOG_DIR="${SURE_MASTER_LOG_DIR:-/hpc_stor03/sjtu_home/chaolei.liu/log}"
 
 PRESET_MASTER_PYTHON="${SURE_MASTER_PYTHON:-}"
 
+if [[ -z "${SURE_MASTER_TASK:-}" && "${CONFIG_PATH}" == *"tts-zh-zai-vc.yaml" ]]; then
+  TASK_PATH="playground/sure_master/data/tts_zh_cer_f5tts_description.md"
+fi
+
 cd "${REPO_DIR}"
 mkdir -p "${LOG_DIR}"
 
@@ -49,6 +53,12 @@ set -a
 source .env
 set +a
 
+if [[ -z "${OPENAI_API_KEY:-}" && -n "${ZAI_API_KEY:-}" ]]; then
+  export OPENAI_API_KEY="${ZAI_API_KEY}"
+  export OPENAI_BASE_URL="${ZAI_BASE_URL:-}"
+  export SURE_AGENT_MODEL="${SURE_AGENT_MODEL:-glm-5.3-flash}"
+fi
+
 PYTHON_BIN="${PRESET_MASTER_PYTHON:-${SURE_LOCAL_PYTHON:-${LOCAL_ENV_PYTHON}}}"
 SURE_ROOT="${SURE_ROOT:-/hpc_stor03/sjtu_home/chaolei.liu/sure}"
 SURE_PYTHONPATH="${SURE_PYTHONPATH:-${SURE_ROOT}/src}"
@@ -68,7 +78,7 @@ if ! command -v vc >/dev/null 2>&1; then
   exit 2
 fi
 
-for required_var in OPENAI_API_KEY GPT_BASE_URL GPT_CHAT_MODEL; do
+for required_var in OPENAI_API_KEY OPENAI_BASE_URL SURE_AGENT_MODEL; do
   if [[ -z "${!required_var:-}" ]]; then
     echo "Missing ${required_var} after sourcing .env."
     exit 2

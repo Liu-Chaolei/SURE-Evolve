@@ -106,7 +106,14 @@ def run_training(
         checked_manifests["train_validation"] = Path(
             os.environ["SURE_TRAIN_VALIDATION_MANIFEST"]
         )
-    validate_prepared_data(adapter, preparation, checked_manifests)
+    validate_prepared_data(
+        adapter,
+        preparation,
+        checked_manifests,
+        allow_extracted_only=(
+            os.environ.get("SURE_DATA_PROVENANCE_MODE") == "extracted_only"
+        ),
+    )
     if adapter == "sd.diarizen":
         validate_wavlm_provenance(initial)
     manifests["preparation"] = preparation
@@ -146,6 +153,9 @@ def run_training(
             "structural": structural,
             "contract": contract,
             "manifests": {k: str(v.resolve()) for k, v in manifests.items()},
+            "prepared_cache": os.environ.get("SURE_F5_PREPARED_CACHE", "")
+            if adapter == "tts.f5tts"
+            else "",
         }
         atomic_json(output / "job.json", job)
         env = {

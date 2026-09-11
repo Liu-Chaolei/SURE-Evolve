@@ -10,6 +10,7 @@ import random
 import re
 import sys
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 from pathlib import Path
 
@@ -64,6 +65,7 @@ def premium_rows(root: Path, groups: Path | None) -> list[dict]:
         )
     mapping = json.loads(groups.read_text()) if groups else {}
     result, seen = [], set()
+    pending: list[tuple[str, str, str, Path]] = []
     for transcript in transcripts:
         fields = transcript.read_text().splitlines()[0].split("\t")
         if len(fields) < 2 or not fields[1].strip():
@@ -79,18 +81,25 @@ def premium_rows(root: Path, groups: Path | None) -> list[dict]:
         if sid not in mapping or not str(mapping[sid]).strip():
             raise ValueError(f"Missing speaker/original-recording group mapping: {sid}")
         audio = transcript.parent.parent / "wavs" / f"{sid}.wav"
-        duration = audio_duration(audio)
-        if not 1 <= duration <= 30:
-            continue
-        result.append(
-            {
-                "sample_id": sid,
-                "group_id": "premium:" + str(mapping[sid]),
-                "audio": str(audio.resolve()),
-                "text": text,
-                "duration": duration,
-            }
-        )
+        pending.append((sid, str(mapping[sid]), text, audio))
+    # WAV metadata reads are latency-bound on the shared filesystem. Keep a
+    # bounded pool while preserving transcript order for deterministic splits.
+    with ThreadPoolExecutor(max_workers=32, thread_name_prefix="premium-wav") as pool:
+        durations = list(pool.map(lambda item: audio_duration(item[3]), pending))
+    for (sid, group, text, audio), duration in zip(pending, durations):
+        if 1 <= duration <= 30:
+            result.append(
+                {
+                    "sample_id": sid,
+                    "group_id": "premium:" + group,
+                    # Preserve the logical shared-filesystem prefix. Resolving
+                    # symlinks here can produce a host-only /mnt path that is
+                    # not visible inside VC child containers.
+                    "audio": str(audio.absolute()),
+                    "text": text,
+                    "duration": duration,
+                }
+            )
     if not result:
         raise ValueError("No usable Premium audio")
     return result
@@ -141,7 +150,7 @@ def seed_rows(root: Path, language: str) -> list[dict]:
                 "sample_id": sid,
                 "group_id": f"seed:{language}:{Path(raw).stem}",
                 "language": language,
-                "reference_audio": str(audio),
+                "reference_audio": str(audio.absolute()),
                 "reference_text": text,
                 "target_text": target,
             }
@@ -149,9 +158,26 @@ def seed_rows(root: Path, language: str) -> list[dict]:
     return result
 
 
-def prepare_tts(root: Path, groups: Path | None, seed_root: Path, output: Path) -> dict:
-    from playground.sure_master.tools.training_data_integrity import verify_premium_source, write_preparation
-    integrity = verify_premium_source(root, output / "source_integrity.json")
+def prepare_tts(
+    root: Path,
+    groups: Path | None,
+    seed_root: Path,
+    output: Path,
+    *,
+    source_mode: str = "archive_verified",
+) -> dict:
+    from playground.sure_master.tools.training_data_integrity import (
+        verify_extracted_premium,
+        verify_premium_source,
+        write_preparation,
+    )
+
+    if source_mode == "extracted_only":
+        integrity = verify_extracted_premium(root)
+    elif source_mode == "archive_verified":
+        integrity = verify_premium_source(root, output / "source_integrity.json")
+    else:
+        raise ValueError(f"Unsupported Premium source mode: {source_mode}")
     raw = premium_rows(root, groups)
     splits = grouped_split(
         raw,
@@ -276,11 +302,23 @@ def main():
     parser.add_argument(
         "--seed-root", type=Path, default=Path("/shared/chaolei.liu/data/seed-tts-eval")
     )
+    parser.add_argument(
+        "--source-mode",
+        choices=["archive_verified", "extracted_only"],
+        default="archive_verified",
+        help="Premium provenance mode; extracted_only does not claim archive MD5 verification.",
+    )
     parser.add_argument("--recipe-data", type=Path)
     parser.add_argument("--language", choices=["zh", "en"], default="zh")
     args = parser.parse_args()
     if args.task == "tts":
-        prepared = prepare_tts(args.root, args.groups, args.seed_root, args.output)
+        prepared = prepare_tts(
+            args.root,
+            args.groups,
+            args.seed_root,
+            args.output,
+            source_mode=args.source_mode,
+        )
     elif args.task == "sd":
         if not args.recipe_data:
             parser.error("AMI requires --recipe-data from DiariZen")

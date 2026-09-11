@@ -1,0 +1,259 @@
+# Formal Chinese F5-TTS architecture search.
+# The coordinator is CPU-only; all baseline/architecture training and frozen
+# replay candidates are dispatched to VC child jobs.
+
+sure:
+  root: "/hpc_stor03/sjtu_home/chaolei.liu/sure"
+  pythonpath: "/hpc_stor03/sjtu_home/chaolei.liu/sure/src"
+  task_cards_path: "./playground/sure_master/task_cards/sure_tasks.yaml"
+  task_id: "tts_zh_cer"
+  device: "cpu"
+  metric_runtime:
+    device: "cpu"
+  cache_dir: "/hpc_stor03/sjtu_home/chaolei.liu/.cache/sure-eval/tts-metrics"
+  validate_env: false
+  require_base_model: true
+  initial_solution_path: "playground/sure_master/baselines/task_baseline.py"
+  execution_mode: "mixed_local_vc"
+  search_strategy: "ordinary"
+  search_scope: "architecture_only"
+  training_mode: "full_during_search"
+  data_provenance_mode: "extracted_only"
+  coordinator:
+    local_gpu_policy: disabled
+  remote_training:
+    enabled: true
+    draft_enabled: true
+    # These are transport profiles for internal baseline/replay actions. XLab
+    # research ideas are still architecture-only (see search_scope below).
+    candidate_types: [inference, fine_tune, arch]
+    image: "docker.v2.aispeech.com/sjtu/sjtu_yukai-chaolei-suremaster_f5tts:v1.3"
+    partition: ""
+    partitions: [pdgpu-3090, pdgpu-4090, pdgpu-a10]
+    partition_policy: "most_free_gpu"
+    partition_fallback: "queue_first"
+    nopassenv: true
+    resource_profiles:
+      inference:
+        num_task: 1
+        gpu_per_task: 1
+        cpu_per_task: 8
+        mem_per_task: 32G
+      training:
+        num_task: 1
+        gpu_per_task: 8
+        cpu_per_task: 64
+        mem_per_task: 256G
+    volumes:
+      - "/hpc_stor03/sjtu_home/chaolei.liu:/hpc_stor03/sjtu_home/chaolei.liu"
+      - "/hpc_stor03/public/shared/data:/hpc_stor03/public/shared/data"
+    workdir: "/hpc_stor03/sjtu_home/chaolei.liu/SURE-Evolve"
+    artifact_workdir: "/hpc_stor03/sjtu_home/chaolei.liu/SURE-Evolve"
+    python: "/opt/conda/envs/evomaster/bin/python"
+    runner: "playground/sure_master/tools/run_vc_sure_candidate.py"
+    job_prefix: "sure-f5tts-zh-arch"
+    sync: true
+    debug: true
+    max_parallel: 1
+    submit_timeout: 0
+    result_recovery:
+      enabled: true
+      grace_seconds: 3600
+      poll_seconds: 15
+      recover_missing_result: true
+  execution_env:
+    SURE_RUN_TIMEOUT: "0"
+    SURE_TRAIN_WORLD_SIZE: "8"
+    SURE_PRECISION: "fp32"
+    SURE_REQUIRE_CANDIDATE_CHANGES: "1"
+    TOKENIZERS_PARALLELISM: "false"
+    WANDB_MODE: "offline"
+    HF_HUB_DISABLE_XET: "1"
+    HF_HUB_OFFLINE: "1"
+    SURE_F5_PREPARED_CACHE: "/hpc_stor03/sjtu_home/chaolei.liu/.cache/sure-evolve/f5-prepared"
+    PYTHONPATH: "base_model/root/src:/hpc_stor03/sjtu_home/chaolei.liu/sure/src"
+  base_models:
+    tts_zh_cer:
+      model_id: "f5tts_v1_base"
+      model_type: "tts_model"
+      framework: "f5-tts"
+      usage_policy: "required"
+      required_paths:
+        root: "base_model/root"
+      source_paths:
+        root: "/hpc_stor03/sjtu_home/chaolei.liu/TTS/F5-TTS"
+      python: "/opt/conda/envs/f5tts/bin/python"
+      prompt_guidance: "XLab research candidates must change registered F5-TTS architecture parameters only; training and inference settings are fixed."
+  runtime:
+    accelerator: "cuda"
+    devices: ["0"]
+    python: "/opt/conda/envs/f5tts/bin/python"
+    precision: "fp32"
+    cpu_threads: 4
+    world_size: 8
+  preflight:
+    enabled: true
+    required_env_vars:
+      - ZAI_API_KEY
+      - ZAI_BASE_URL
+  task:
+    language: "zh"
+    resources:
+      source: "/hpc_stor03/sjtu_home/chaolei.liu/TTS/F5-TTS"
+      checkpoint: "/hpc_stor03/sjtu_home/chaolei.liu/models/official_drafts/SWivid-F5-TTS/F5TTS_v1_Base/model_1250000.safetensors"
+      vocab: "/hpc_stor03/sjtu_home/chaolei.liu/models/official_drafts/SWivid-F5-TTS/F5TTS_v1_Base/vocab.txt"
+      vocoder: "/hpc_stor03/sjtu_home/chaolei.liu/.cache/huggingface/hub/models--charactr--vocos-mel-24khz/snapshots/0feb3fdd929bcd6649e0e7c5a688cf7dd012ef21"
+    training:
+      recipe: "f5tts.finetune_cli.v1.ddp8"
+      epochs: 100
+      learning_rate: 1.0e-5
+      batch_size_type: "frame"
+      batch_size_per_gpu: 3200
+      max_samples: 64
+      grad_accumulation_steps: 1
+      num_warmup_updates: 20000
+      max_grad_norm: 1.0
+      seed: 42
+      shuffle_seed: 666
+      world_size: 8
+      save_per_updates: 50000
+      checkpoint_every_updates: 5000
+      keep_last_n_checkpoints: 2
+      early_stopping_patience: 0
+      checkpoint_selection: "final_ema"
+      initialization: "official_pretrained_weights"
+      manifest: "/hpc_stor03/sjtu_home/chaolei.liu/data/sure_premium_f5tts/train/metadata.csv"
+    inference:
+      nfe_step: 32
+      cfg_strength: 2.0
+      sway_sampling_coef: -1.0
+      speed: 1.0
+      remove_silence: false
+      text_cleanup: "none"
+      max_chunk_chars: 300
+      min_chunk_chars: 40
+      target_rms: 0.1
+      cross_fade_duration: 0.15
+  datasets:
+    train:
+      manifest: "/hpc_stor03/sjtu_home/chaolei.liu/data/sure_premium_f5tts/train/manifest.jsonl"
+    train_validation:
+      manifest: "/hpc_stor03/sjtu_home/chaolei.liu/data/sure_premium_f5tts/train_validation/manifest.jsonl"
+    search:
+      manifest: "/hpc_stor03/sjtu_home/chaolei.liu/data/sure_premium_f5tts/search/manifest.jsonl"
+    selection:
+      manifest: "/hpc_stor03/sjtu_home/chaolei.liu/data/sure_premium_f5tts/selection/manifest.jsonl"
+    holdout:
+      manifest: "/hpc_stor03/sjtu_home/chaolei.liu/data/sure_premium_f5tts/holdout/manifest.jsonl"
+  data_preparation: "/hpc_stor03/sjtu_home/chaolei.liu/data/sure_premium_f5tts/preparation.json"
+  execution_contract:
+    initialization: "baseline and architecture candidates use the official checkpoint; fresh optimizer per candidate"
+    training_recipe: "f5tts.finetune_cli.v1.ddp8"
+    training_epochs: 100
+    requires_training: true
+    constraints:
+      - "XLab candidates must be architecture-only and use SURE_TASK_WRAPPER."
+      - "Training and inference settings remain fixed across research candidates."
+      - "Holdout is never used during search."
+
+max_research_rounds: 2
+
+llm:
+  zai_flash:
+    provider: openai
+    model: "glm-5.3-flash"
+    api_key: "${ZAI_API_KEY}"
+    base_url: "${ZAI_BASE_URL}"
+    temperature: 1
+    max_tokens: 32768
+    timeout: 3600
+    max_retries: 2
+  default: zai_flash
+
+x_agent_defaults: &agent_defaults
+  llm: zai_flash
+  max_turns: 10
+  tools:
+    builtin: []
+  context:
+    max_tokens: 128000
+    truncation_strategy: latest_half
+    preserve_system_messages: true
+    preserve_recent_turns: 5
+
+agents:
+  prefetch:
+    <<: *agent_defaults
+    system_prompt_file: prompts/prefetch_system_prompt.txt
+    user_prompt_file: prompts/prefetch_user_prompt.txt
+  draft:
+    <<: *agent_defaults
+    system_prompt_file: prompts/draft_system_prompt.txt
+    user_prompt_file: prompts/draft_user_prompt.txt
+  debug:
+    <<: *agent_defaults
+    system_prompt_file: prompts/debug_system_prompt.txt
+    user_prompt_file: prompts/debug_user_prompt.txt
+  improve:
+    <<: *agent_defaults
+    system_prompt_file: prompts/improve_system_prompt.txt
+    user_prompt_file: prompts/improve_user_prompt.txt
+  reseach:
+    <<: *agent_defaults
+    system_prompt_file: prompts/reseach_system_prompt.txt
+    user_prompt_file: prompts/reseach_user_prompt.txt
+  knowledge_promotion:
+    <<: *agent_defaults
+    system_prompt_file: prompts/knowledge_promotion_system_prompt.txt
+    user_prompt_file: prompts/knowledge_promotion_user_prompt.txt
+  wisdom_promotion:
+    <<: *agent_defaults
+    system_prompt_file: prompts/wisdom_promotion_system_prompt.txt
+    user_prompt_file: prompts/wisdom_promotion_user_prompt.txt
+
+session:
+  type: local
+  local:
+    working_dir: ./runs/tts_zh_zai_vc
+    timeout: 172800
+    gpu_devices: none
+    parallel:
+      enabled: true
+      max_parallel: 1
+      gpus_per_exp: 1
+      serial_gpus_per_exp: 1
+      set_asr_world_size: false
+      split_workspace_for_exp: true
+
+xlab:
+  enabled: true
+  idea_generation:
+    max_attempts: 8
+  idea_provider:
+    enabled: true
+    preflight_command:
+      - /hpc_stor03/sjtu_home/chaolei.liu/anaconda3/bin/python
+      - /hpc_stor03/sjtu_home/chaolei.liu/XLab/xlab/skills/sure_master/scripts/xlab_idea_client.py
+      - --check-survey
+      - /hpc_stor03/sjtu_home/chaolei.liu/XLab/.xlab/sure_research_transfer_20260911_162740/TTS/survey/artifacts/survey.json
+    command:
+      - /hpc_stor03/sjtu_home/chaolei.liu/anaconda3/bin/python
+      - /hpc_stor03/sjtu_home/chaolei.liu/XLab/xlab/skills/sure_master/scripts/xlab_idea_client.py
+    timeout_seconds: 14400
+    environment:
+      XLAB_SURE_RUN_ROOT: /hpc_stor03/sjtu_home/chaolei.liu/data/experiments/SURE-Evolve/runs/xlab_ideas
+      XLAB_SURE_SURVEY_PATH: /hpc_stor03/sjtu_home/chaolei.liu/XLab/.xlab/sure_research_transfer_20260911_162740/TTS/survey/artifacts/survey.json
+      OPENAI_API_KEY: ${ZAI_API_KEY}
+      OPENAI_BASE_URL: ${ZAI_BASE_URL}
+      LLM_BASE_URL: ${ZAI_BASE_URL}
+      LLM_MODEL: glm-5.3-flash
+
+llm_output:
+  show_in_console: true
+  log_to_file: true
+
+logging:
+  level: INFO
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  file: null
+  console: true

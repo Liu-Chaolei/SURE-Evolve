@@ -137,6 +137,7 @@ class FullSearchTests(unittest.TestCase):
             "glm-tedlium3-npu-evolution.yaml",
             "ordinary-asr-cuda.yaml",
             "ordinary-asr-npu.yaml",
+            "zai-tedlium3-cuda-vc-evolution.yaml",
         ):
             with self.subTest(config=name):
                 sure = yaml.safe_load(
@@ -152,6 +153,21 @@ class FullSearchTests(unittest.TestCase):
                 )
                 self.assertNotIn("initial_baseline_run", sure)
                 self.assertNotIn("full_training", sure)
+
+                if name == "zai-tedlium3-cuda-vc-evolution.yaml":
+                    self.assertEqual(sure["runtime"]["world_size"], 8)
+                    self.assertEqual(
+                        sure["remote_training"]["resource_profiles"]["training"]["gpu_per_task"],
+                        8,
+                    )
+                    self.assertEqual(
+                        sure["remote_training"]["partition_policy"], "most_free_gpu"
+                    )
+                    self.assertEqual(sure["runtime"]["precision"], "fp32")
+                    self.assertEqual(
+                        sure["remote_training"]["partitions"],
+                        ["pdgpu-3090", "pdgpu-4090", "pdgpu-a10"],
+                    )
 
 
 if __name__ == "__main__":

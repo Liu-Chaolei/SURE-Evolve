@@ -1,10 +1,10 @@
 #!/bin/bash
 set -eo pipefail
 
-REPO_DIR="${SURE_MASTER_REPO_DIR:-/hpc_stor03/sjtu_home/chaolei.liu/Agent/SURE-Evolve}"
+REPO_DIR="${SURE_MASTER_REPO_DIR:-/hpc_stor03/sjtu_home/chaolei.liu/SURE-Evolve}"
 LOCAL_ENV_PYTHON="${SURE_LOCAL_PYTHON:-/hpc_stor03/sjtu_home/chaolei.liu/anaconda3/envs/suremaster-f5tts-local/bin/python}"
-CONFIG_PATH="${SURE_MASTER_CONFIG:-configs/sure_master/gpt-5-icefall-staged-axes-mixed.yaml}"
-TASK_PATH="${SURE_MASTER_TASK:-playground/sure_master/data/asr_en_wer_zipformer_description.md}"
+CONFIG_PATH="${SURE_MASTER_CONFIG:-configs/sure_master/zai-tedlium3-cuda-vc-evolution.yaml}"
+TASK_PATH="${SURE_MASTER_TASK:-playground/sure_master/data/asr_tedlium3_evolution_description.md}"
 RUN_DIR="${SURE_MASTER_RUN_DIR:-}"
 RUN_NAME="${SURE_MASTER_RUN_NAME:-}"
 LOG_DIR="${SURE_MASTER_LOG_DIR:-/hpc_stor03/sjtu_home/chaolei.liu/log}"
@@ -50,6 +50,7 @@ source .env
 set +a
 
 PYTHON_BIN="${PRESET_MASTER_PYTHON:-${SURE_LOCAL_PYTHON:-${LOCAL_ENV_PYTHON}}}"
+export XLAB_PYTHON="${XLAB_PYTHON:-${PYTHON_BIN}}"
 SURE_ROOT="${SURE_ROOT:-/hpc_stor03/sjtu_home/chaolei.liu/sure}"
 SURE_PYTHONPATH="${SURE_PYTHONPATH:-${SURE_ROOT}/src}"
 
@@ -69,12 +70,19 @@ if ! command -v vc >/dev/null 2>&1; then
   exit 2
 fi
 
-for required_var in OPENAI_API_KEY GPT_BASE_URL GPT_CHAT_MODEL; do
+for required_var in ZAI_API_KEY ZAI_BASE_URL; do
   if [[ -z "${!required_var:-}" ]]; then
     echo "Missing ${required_var} after sourcing .env."
     exit 2
   fi
 done
+
+# SURE and XLab speak OpenAI-compatible protocols; keep the source credential
+# names ZAI_* while exposing only the coordinator-side aliases they require.
+export OPENAI_API_KEY="${ZAI_API_KEY}"
+export OPENAI_BASE_URL="${ZAI_BASE_URL}"
+export LLM_BASE_URL="${ZAI_BASE_URL}"
+export LLM_MODEL="glm-5.3-flash"
 
 "${PYTHON_BIN}" - <<'PY'
 import evomaster
@@ -84,6 +92,31 @@ import yaml
 
 print("evomaster runtime ok")
 PY
+
+"${XLAB_PYTHON}" - <<'PY'
+import faiss
+import sentence_transformers
+
+print("xlab research runtime ok")
+PY
+
+if [[ "${SURE_SKIP_ZAI_PREFLIGHT:-0}" != "1" ]]; then
+  "${PYTHON_BIN}" - <<'PY'
+import json
+import os
+import sys
+
+from playground.sure_master.tools.zai_preflight import check_zai_api
+
+result = check_zai_api({
+    "ZAI_API_KEY": os.environ["ZAI_API_KEY"],
+    "ZAI_BASE_URL": os.environ["ZAI_BASE_URL"],
+})
+print(json.dumps(result, ensure_ascii=True))
+if result["status"] != "passed":
+    sys.exit(2)
+PY
+fi
 
 exec "${PYTHON_BIN}" -u run.py \
   --agent sure_master \
