@@ -54,6 +54,8 @@ DEFAULTS = {
     "workers": "auto",
     "max_chunk_chars": 300,
     "min_chunk_chars": 40,
+    "target_rms": 0.1,
+    "cross_fade_duration": 0.15,
 }
 
 
@@ -803,11 +805,11 @@ def launch_workers(
         log.close()
         procs.append((worker_index, proc, log_path))
 
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout if timeout > 0 else None
     failed: list[str] = []
     try:
         for worker_index, proc, log_path in procs:
-            remaining = max(1, int(deadline - time.monotonic()))
+            remaining = max(1, int(deadline - time.monotonic())) if deadline is not None else None
             try:
                 rc = proc.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
@@ -861,6 +863,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cfg-strength", type=float, default=parse_float(env_str("SURE_TTS_CFG_STRENGTH", str(DEFAULTS["cfg_strength"])), 2.0))
     parser.add_argument("--sway-sampling-coef", type=float, default=parse_float(env_str("SURE_TTS_SWAY_SAMPLING_COEF", str(DEFAULTS["sway_sampling_coef"])), -1.0))
     parser.add_argument("--speed", type=float, default=parse_float(env_str("SURE_TTS_SPEED", str(DEFAULTS["speed"])), 1.0))
+    parser.add_argument("--target-rms", type=float, default=DEFAULTS["target_rms"])
+    parser.add_argument("--cross-fade-duration", type=float, default=DEFAULTS["cross_fade_duration"])
     parser.add_argument("--remove-silence", default=env_str("SURE_TTS_REMOVE_SILENCE", "0"))
     parser.add_argument("--text-cleanup", choices=["none", "typography", "conservative"], default=env_str("SURE_TTS_TEXT_CLEANUP", "none"))
     parser.add_argument(
@@ -872,7 +876,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--training-action", default=env_str("SURE_TTS_TRAIN_ACTION", "no_train"))
     parser.add_argument("--arch-action", default=env_str("SURE_TTS_ARCH_ACTION", "no_arch"))
     parser.add_argument("--resume", default=env_str("SURE_TTS_INFER_RESUME", "1"))
-    parser.add_argument("--timeout", type=int, default=parse_int(env_str("SURE_RUN_TIMEOUT", str(DEFAULTS["run_timeout"])), 21600, 60))
+    parser.add_argument("--timeout", type=int, default=parse_int(env_str("SURE_RUN_TIMEOUT", str(DEFAULTS["run_timeout"])), 21600, 0))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--worker-config", help=argparse.SUPPRESS)
@@ -939,6 +943,8 @@ def write_candidate_changes(args: argparse.Namespace, rows: list[dict[str, Any]]
     )
 
     defaults = {
+        "target_rms": DEFAULTS["target_rms"],
+        "cross_fade_duration": DEFAULTS["cross_fade_duration"],
         "nfe_step": parse_int(env_str("SURE_TTS_NFE_STEP", str(DEFAULTS["nfe_step"])), 32, 1),
         "cfg_strength": parse_float(env_str("SURE_TTS_CFG_STRENGTH", str(DEFAULTS["cfg_strength"])), 2.0),
         "sway_sampling_coef": parse_float(env_str("SURE_TTS_SWAY_SAMPLING_COEF", str(DEFAULTS["sway_sampling_coef"])), -1.0),
@@ -957,6 +963,8 @@ def write_candidate_changes(args: argparse.Namespace, rows: list[dict[str, Any]]
         ),
     }
     used = {
+        "target_rms": float(getattr(args, "target_rms", DEFAULTS["target_rms"])),
+        "cross_fade_duration": float(getattr(args, "cross_fade_duration", DEFAULTS["cross_fade_duration"])),
         "nfe_step": int(args.nfe_step),
         "cfg_strength": float(args.cfg_strength),
         "sway_sampling_coef": float(args.sway_sampling_coef),
@@ -1060,6 +1068,8 @@ def run_main(args: argparse.Namespace) -> int:
         "cfg_strength": args.cfg_strength,
         "sway_sampling_coef": args.sway_sampling_coef,
         "speed": args.speed,
+        "target_rms": args.target_rms,
+        "cross_fade_duration": args.cross_fade_duration,
         "remove_silence": args.remove_silence,
         "resume": args.resume,
         "max_chunk_chars": args.max_chunk_chars,

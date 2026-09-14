@@ -1,7 +1,8 @@
 # SURE Master
 
 > 新运行入口：**ordinary + XLab**；staged_axes 执行引擎已退役。
-> 当前 `search_scope: architecture_only`：每轮四个结构候选，训练和推理设置固定。
+> 默认 `search_scope: architecture_only` 固定训练和推理设置；每轮数量由 `search_budget.ideas_per_round` 配置。
+> [F5-TTS 中文正式实验](../../docs/zh/f5tts_premium_evolution_slurm.md)使用 `search_scope: all`：每轮三个自由方案，完整 Premium train 微调 50 epoch，默认每卡 25600 frames、BF16 autocast，每个训练方案八张 NPU，最多三个并行。
 > 正式 ASR 搜索直接使用全量数据训练 30 epoch，选优后只复评，不再重训。
 > TTS/SD 也采用[各自官方完整训练预算](../../docs/zh/sure_master_official_training.md)，包括基线、完成证明和续训。
 > ASR、F5-TTS、DiariZen 的统一配置、数据准备与轻量验证见 [多任务指南](../../docs/zh/sure_master_multitask.md)。

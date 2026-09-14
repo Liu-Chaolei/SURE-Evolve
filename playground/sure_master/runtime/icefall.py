@@ -42,9 +42,29 @@ def prepare_npu_recipe(source: Path, destination: Path) -> Path:
                     raise ValueError(f"Unsupported Icefall recipe: missing {function}")
                 text = text.replace(f"k2.{function}(", f"npu_k2.{function}(")
             text = text.replace("self.decoder(sos_y_padded)", "self.decoder(sos_y_padded.to(encoder_out.device))")
+        if name == "decode.py" and os.environ.get("SURE_ASR_CPU_AVERAGING") == "1":
+            marker = 'if __name__ == "__main__":'
+            if marker not in text:
+                raise ValueError("Missing decode entrypoint for CPU averaging")
+            override = "from playground.sure_master.runtime.asr_averaging import average_checkpoints_with_averaged_model"
+            if override not in text:
+                text = text.replace(marker, override + "\n\n" + marker)
         path.write_text(text)
     scaling = destination / "scaling.py"
     scaling.write_text(scaling.read_text().replace("import k2\n", "from playground.sure_master.runtime import npu_k2 as k2\n"))
+    # Pack variable-length encoder outputs without the Ascend padded-row bug.
+    beam_search = destination / "beam_search.py"
+    beam_text = beam_search.read_text()
+    packing_call = "torch.nn.utils.rnn.pack_padded_sequence("
+    if packing_call not in beam_text and "from npu_rnn import pack_padded_sequence" not in beam_text:
+        raise ValueError("Unsupported Icefall recipe: missing packed sequence decoding")
+    if "from npu_rnn import pack_padded_sequence" not in beam_text:
+        beam_text = beam_text.replace("import torch\n", "import torch\nfrom npu_rnn import pack_padded_sequence\n")
+    beam_search.write_text(beam_text.replace(packing_call, "pack_padded_sequence("))
+    helper = destination / "npu_rnn.py"
+    if helper.is_symlink():
+        helper.unlink()
+    shutil.copy2(Path(__file__).with_name("npu_rnn.py"), helper)
     return destination
 
 

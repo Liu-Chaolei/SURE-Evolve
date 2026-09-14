@@ -14,7 +14,13 @@ def stage_view(source: Path) -> Path:
     if not os.environ.get("SLURM_JOB_ID") or not local.is_dir():
         raise RuntimeError("Data staging requires the Slurm private local directory")
     manifests = sorted((source / "fbank").glob("tedlium_cuts_*.jsonl.gz"))
+    if os.environ.get("SURE_ENABLE_MUSAN") == "1" and any("_train." in p.name for p in manifests):
+        musan = source / "fbank/musan_cuts.jsonl.gz"
+        if not musan.is_file():
+            raise FileNotFoundError("MUSAN is enabled but its feature manifest is missing")
+        manifests.append(musan)
     digest = hashlib.sha256()
+    digest.update((source / "lang_bpe_500/bpe.model").read_bytes())
     for manifest in manifests:
         digest.update(manifest.name.encode())
         digest.update(manifest.read_bytes())

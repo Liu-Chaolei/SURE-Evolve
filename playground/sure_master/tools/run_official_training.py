@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fcntl
 import hashlib
 import importlib
 import importlib.util
@@ -16,7 +17,7 @@ from functools import partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from playground.sure_master.core.training import validate_training_config
+from playground.sure_master.core.training import validate_training_config, validate_contract_precision
 from playground.sure_master.runtime.training_state import atomic_json
 
 
@@ -56,6 +57,32 @@ def load_initial_f5(model, checkpoint: Path, *, structural: bool) -> dict:
     return {"matched_parameter_ratio": ratio, "strict": not structural}
 
 
+def load_initial_f5_ema(ema, checkpoint: Path, *, structural: bool) -> dict:
+    """Match finetune_cli: restore EMA weights and its pretrained update state."""
+    import torch
+
+    if checkpoint.suffix == ".safetensors":
+        from safetensors.torch import load_file
+        state = load_file(str(checkpoint), device="cpu")
+    else:
+        saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        state = saved.get("ema_model_state_dict", saved)
+    state = dict(state)
+    for key in (
+        "ema_model.mel_spec.mel_stft.mel_scale.fb",
+        "ema_model.mel_spec.mel_stft.spectrogram.window",
+    ):
+        state.pop(key, None)
+    if structural:
+        # New architecture tensors retain the already initialized online model values.
+        own = ema.state_dict()
+        own.update({k: v for k, v in state.items() if k in own and own[k].shape == v.shape})
+        state = own
+    ema.load_state_dict(state, strict=True)
+    return {"step": int(ema.step.item()), "initted": bool(ema.initted.item()),
+            "initialization": "official_pretrained_ema_state"}
+
+
 def f5_train(job):
     from datasets import Dataset, load_from_disk
     from f5_tts.model import CFM, DiT, Trainer
@@ -63,6 +90,7 @@ def f5_train(job):
     from f5_tts.model.utils import get_tokenizer
     from playground.sure_master.runtime.official_trainers import (
         F5TrainingSession,
+        F5ComponentComplete,
         f5_trainer_class,
     )
     from playground.sure_master.runtime.process import run_bounded
@@ -75,6 +103,8 @@ def f5_train(job):
     identity = {
         "csv": file_digest(manifest),
         "vocab": file_digest(Path(resources["vocab"])),
+        "preparer": file_digest(source / "src/f5_tts/train/datasets/prepare_csv_wavs.py"),
+        "vocab_mode": "official",
     }
     os.environ["SURE_F5_VOCAB_FILE"] = str(Path(resources["vocab"]).resolve())
     cache_value = str(job.get("prepared_cache") or "").strip()
@@ -87,29 +117,35 @@ def f5_train(job):
     else:
         prepared = output / "prepared_data"
     marker = prepared / "prepared.json"
-    if marker.exists():
-        if json.loads(marker.read_text()) != identity:
-            raise ValueError(
-                "Prepared F5 data belongs to another training manifest/vocabulary"
-            )
-    else:
-        if prepared.exists():
-            shutil.rmtree(prepared)
-        prepared.mkdir(parents=True, exist_ok=True)
-        with (output / "prepare.log").open("w") as log:
-            run_bounded(
-                [
-                    sys.executable,
-                    str(source / "src/f5_tts/train/datasets/prepare_csv_wavs.py"),
-                    str(manifest),
-                    str(prepared),
-                    "--workers",
-                    "4",
-                ],
-                timeout=None,
-                output=log,
-            )
+    prepared.parent.mkdir(parents=True, exist_ok=True)
+    with prepared.with_suffix(".lock").open("a") as preparation_lock:
+        fcntl.flock(preparation_lock, fcntl.LOCK_EX)
+        if marker.exists():
+            if json.loads(marker.read_text()) != identity:
+                raise ValueError(
+                    "Prepared F5 data belongs to another training manifest/vocabulary"
+                )
+        else:
+            if prepared.exists():
+                shutil.rmtree(prepared)
+            prepared.mkdir(parents=True, exist_ok=True)
+            with (output / "prepare.log").open("a") as log:
+                run_bounded(
+                    [
+                        sys.executable,
+                        str(source / "src/f5_tts/train/datasets/prepare_csv_wavs.py"),
+                        str(manifest),
+                        str(prepared),
+                        "--workers",
+                        "4",
+                    ],
+                    timeout=None,
+                    output=log,
+                    env={**os.environ, "PYTHONPATH": str(source / "src") + os.pathsep + os.environ.get("PYTHONPATH", "")},
+                )
         atomic_json(marker, identity)
+    if file_digest(prepared / "vocab.txt") != identity["vocab"]:
+        raise ValueError("F5 preparation changed the official vocabulary")
     try:
         raw = load_from_disk(str(prepared / "raw"))
     except FileNotFoundError:
@@ -125,6 +161,11 @@ def f5_train(job):
     durations = json.loads((prepared / "duration.json").read_text())["duration"]
     if len(durations) != len(raw):
         raise ValueError("Prepared F5 duration count mismatch")
+    if os.environ.get("SURE_STAGE_TTS_AUDIO") == "1":
+        from playground.sure_master.runtime.tts_staging import stage_audio
+        mapping = stage_audio(list(raw["audio_path"]), identity)
+        raw = raw.map(lambda row: {"audio_path": mapping[row["audio_path"]]},
+                      keep_in_memory=True, load_from_cache_file=False)
     tokenizer, size = get_tokenizer(str(resources["vocab"]), "custom")
     mel = dict(
         n_fft=1024,
@@ -142,7 +183,7 @@ def f5_train(job):
     initialization = load_initial_f5(
         model, Path(resources["checkpoint"]), structural=job["structural"]
     )
-    atomic_json(output / "initialization.json", initialization)
+    os.environ["SURE_F5_TRAINING_JSON"] = json.dumps(training)
     cls = f5_trainer_class(Trainer)
     trainer = cls(
         model,
@@ -160,12 +201,31 @@ def f5_train(job):
         logger=None,
         log_samples=False,
         last_per_updates=training["checkpoint_every_updates"],
-        accelerate_kwargs={"mixed_precision": "no"},
+        accelerate_kwargs={"mixed_precision": "bf16" if job["contract"]["precision"] == "bf16" else "no"},
     )
     trainer.sure_training = F5TrainingSession(trainer, output, job["contract"])
+    from playground.sure_master.runtime.f5_precision import install_precision_audit
+    install_precision_audit(trainer, output, job["contract"])
+    num_workers = int(os.environ.get("SURE_F5_DATALOADER_WORKERS", "16"))
+    if not 0 <= num_workers <= 16:
+        raise ValueError("SURE_F5_DATALOADER_WORKERS must be between 0 and 16")
+    if trainer.accelerator.is_main_process:
+        initialization["ema"] = load_initial_f5_ema(
+            trainer.ema_model, Path(resources["checkpoint"]), structural=job["structural"]
+        )
+        initialization["data_loader"] = {"num_workers": num_workers, "start_method": "spawn"}
+        atomic_json(output / "initialization.json", initialization)
+    if "train_validation" in job["manifests"]:
+        from playground.sure_master.runtime.f5_validation import F5Validation
+        trainer.sure_validation = F5Validation(trainer, Path(job["manifests"]["train_validation"]), mel, job["contract"]["backend"])
     data = CustomDataset(raw, durations=durations, preprocessed_mel=False, **mel)
-    trainer.train(data, num_workers=4, resumable_with_seed=training["shuffle_seed"])
+    try:
+        trainer.train(data, num_workers=num_workers, resumable_with_seed=training["shuffle_seed"])
+    except F5ComponentComplete:
+        trainer.accelerator.end_training()
+        return
     trainer.sure_training.finish()
+    trainer.accelerator.end_training()
 
 
 def sd_train(job):
@@ -196,7 +256,7 @@ def sd_train(job):
         max_steps=0,
         max_patience=training["early_stopping_patience"],
         validation_interval=1,
-        freeze_wavlm=False,
+        freeze_wavlm=training["freeze_wavlm"],
         lr_decay=False,
         use_one_cycle_lr=False,
         gradient_accumulation_steps=1,
@@ -229,6 +289,13 @@ def sd_train(job):
     optimizer_big = torch.optim.AdamW(
         model.non_wavlm_parameters(), lr=training["learning_rate_network"]
     )
+    evolution = training.get("recipe") == "diarizen.evolution.v1"
+    if evolution:
+        from playground.sure_master.runtime.sd_evolution import optimizers
+        if training["freeze_wavlm"]:
+            model.wavlm_model.requires_grad_(False)
+        custom_optimizers = optimizers(model, training)
+        optimizer_small, optimizer_big = custom_optimizers["wavlm"], custom_optimizers["network"]
     if accelerator.is_main_process:
         _dataset(
             root,
@@ -304,6 +371,12 @@ def sd_train(job):
         optimizer_small=optimizer_small,
         optimizer_big=optimizer_big,
     )
+    trainer.sure_schedulers = {}
+    if evolution:
+        from playground.sure_master.runtime.sd_evolution import schedulers
+        trainer.sure_schedulers = schedulers(
+            {"wavlm": optimizer_small, "network": optimizer_big}, training,
+            len(train_loader) * training["epochs"])
     trainer.train_full(train_loader, val_loader, output, job["contract"])
 
 
@@ -313,10 +386,11 @@ def main():
     args = parser.parse_args()
     job = json.loads(args.job.read_text())
     validate_training_config(job["adapter"], job["contract"]["training"])
-    if job["contract"]["component_test"] and job["adapter"] != "sd.diarizen":
-        raise ValueError("Component training probes are only implemented for DiariZen")
-    if job["contract"]["component_test"] and not 1 <= int(os.environ.get("SURE_SD_PROBE_UPDATES", "0")) <= 1000:
-        raise ValueError("SD component probes require a bounded update count")
+    validate_contract_precision(job["contract"])
+    if job["contract"]["component_test"]:
+        key = "SURE_F5_PROBE_UPDATES" if job["adapter"] == "tts.f5tts" else "SURE_SD_PROBE_UPDATES"
+        if not 1 <= int(os.environ.get(key, "0")) <= 1000:
+            raise ValueError("Component probes require a bounded update count")
     source = Path(job["source"])
     if job["contract"]["backend"] == "npu":
         import torch_npu  # noqa: F401

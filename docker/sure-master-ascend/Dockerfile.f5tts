@@ -1,0 +1,9 @@
+FROM registry.cluster.local:5000/users/chaolei-liu/sure-zipformer@sha256:d557a61e7beb3b675917946061e63790997fc9f672563fe7882f3336b1a8fa64
+USER root
+COPY playground/sure_master/runtime/environments/f5tts.txt /tmp/f5tts.txt
+RUN python -m pip freeze | python -c 'import sys; print("".join(l for l in sys.stdin if l.lower().startswith(("torch==", "torch-npu==", "torch_npu==", "torchaudio=="))), end="")' > /tmp/torch-constraints.txt
+RUN python -m pip install --no-cache-dir -c /tmp/torch-constraints.txt -r /tmp/f5tts.txt \
+    funasr modelscope omegaconf sentencepiece jieba onnxruntime einops scipy jiwer \
+    && python -m pip freeze > /opt/f5tts-environment.txt
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /workspace

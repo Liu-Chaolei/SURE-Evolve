@@ -841,6 +841,8 @@ class SureMasterPlayground(BasePlayground):
             pythonpath=pythonpath,
             device=(self.sure_config.get("metric_runtime") or {}).get("device", self.sure_config.get("device", "cpu")),
             python=(self.sure_config.get("metric_runtime") or {}).get("python"),
+            tts_runtime=(self.sure_config.get("metric_runtime") or {}).get("tts_runtime", "node_local"),
+            timeout_seconds=(self.sure_config.get("metric_runtime") or {}).get("timeout_seconds", 21600),
             cache_dir=self.sure_config.get("cache_dir"),
             validate_env=bool(self.sure_config.get("validate_env", False)),
             metric_gpu=self.sure_config.get("metric_gpu"),
@@ -1131,8 +1133,23 @@ class SureMasterPlayground(BasePlayground):
                 if profile_path.is_file():
                     current_best["actual_model_configuration"] = json.loads(profile_path.read_text())
                     break
+        from .ablation import policy, research_view
+        ablation = policy(self.sure_config)
+        baseline = getattr(self, "_ablation_baseline", {})
+        if not ablation["use_feedback"]:
+            current_best = {"implementation": baseline.get("code", self.initial_code or ""),
+                            "solution_digest": digest(baseline.get("code", self.initial_code or "")),
+                            "model_artifact": {"model_artifact": baseline.get("model_artifact")}}
+            if baseline.get("model_artifact"):
+                current_best["model_manifest"] = load_bundle(baseline["model_artifact"])
+        view = research_view(self.sure_config, current_best, current_best,
+                             self._xlab_history, self._xlab_summary_artifacts, parent_lineage)
+        history_digest = digest(view["prior_rounds"])
+        parent_lineage = view["parent_lineage"]
         xlab_config = self.config_manager.get("xlab", {}) or {}
         generation_policy = {"max_attempts": (xlab_config.get("idea_generation") or {}).get("max_attempts", 8)}
+        if "ablation" in self.sure_config:
+            generation_policy.update(ablation=ablation, allow_partial_batch=True)
         execution_contract = scoped_execution_contract(self.task_adapter.context(), self.sure_config)
         payload = {
             "request_id": request_id,
@@ -1151,8 +1168,8 @@ class SureMasterPlayground(BasePlayground):
             "base_model_profile": base_model,
             "execution_contract": execution_contract,
             "generation_policy": generation_policy,
-            "history_artifacts": list(self._xlab_summary_artifacts),
-            "prior_rounds": list(self._xlab_history),
+            "history_artifacts": view["history_artifacts"],
+            "prior_rounds": view["prior_rounds"],
             "history_digest": history_digest,
             "parent_lineage": parent_lineage,
         }
@@ -1173,8 +1190,8 @@ class SureMasterPlayground(BasePlayground):
             task_card=task_card,
             execution_contract=execution_contract,
             generation_policy=generation_policy,
-            history_artifacts=list(self._xlab_summary_artifacts),
-            prior_rounds=list(self._xlab_history),
+            history_artifacts=view["history_artifacts"],
+            prior_rounds=view["prior_rounds"],
             history_digest=history_digest,
             parent_lineage=parent_lineage,
             base_model_profile=base_model,
@@ -1200,7 +1217,7 @@ class SureMasterPlayground(BasePlayground):
             task_description=task_description,
             search_mode="ordinary",
             round_index=round_index,
-            requested_idea_count=4,
+            requested_idea_count=int((self.sure_config.get("search_budget") or {}).get("ideas_per_round", 4)),
         )
         batch_path = Path(self.session.config.workspace_path) / "artifacts/xlab_batches" / f"{request.request_id}.json"
         if batch_path.exists():
@@ -1389,7 +1406,7 @@ class SureMasterPlayground(BasePlayground):
         self.best_score, self.best_solution = winner["score"], winner["code"]
         self.best_model_artifact = {"model_artifact": winner["model_artifact"]}
         holdout = []
-        if "holdout" in specs:
+        if "holdout" in specs and not self.sure_config.get("defer_holdout", False):
             records = [baseline] if winner["idea_id"] == baseline["idea_id"] else [baseline, winner]
             holdout = [evaluate(r, "holdout") for r in records]
         result = {"selection": selection, "holdout": holdout, "winner": winner["idea_id"]}
@@ -1397,7 +1414,9 @@ class SureMasterPlayground(BasePlayground):
         return result
 
 
-    def run(self, task_description: str, output_file: str | None = None) -> dict:
+    def run(self, task_description: str, output_file: str | None = None, *, ideas_only: bool = False) -> dict:
+        if ideas_only and not self.sure_config.get('initial_baseline_run'):
+            raise ValueError('Ideas-only execution requires a verified imported baseline')
         watchdog = TimeoutWatchdog(int(self.sure_config.get("controller_timeout_seconds", RUN_TIMEOUT_SECONDS)))
         watchdog.start()
         self.logger.info("Watchdog started (%s seconds)", RUN_TIMEOUT_SECONDS)
@@ -1509,6 +1528,9 @@ class SureMasterPlayground(BasePlayground):
                     self.best_solution or "",
                 )
 
+            self._ablation_baseline = dict(baseline_record)
+            from .ablation import policy
+            feedback_enabled = policy(self.sure_config)["use_feedback"]
             search_policy = self.sure_config.get("search_budget") or {}
             minimum_rounds = int(search_policy.get("min_rounds", self.max_research_rounds))
             maximum_rounds = int(search_policy.get("max_rounds", self.max_research_rounds))
@@ -1525,6 +1547,8 @@ class SureMasterPlayground(BasePlayground):
             stale_rounds = state.get("stale_rounds", 0)
             completed_rounds = state.get("completed_rounds", 0)
             checkpoint_controller(completed_rounds, stale_rounds)
+            if self.sure_config.get("baseline_only"):
+                return {"status": "baseline_ready", "baseline": baseline_record}
             if completed_rounds >= minimum_rounds and stale_rounds >= patience:
                 maximum_rounds = completed_rounds
             for research_round in range(completed_rounds, maximum_rounds):
@@ -1532,8 +1556,14 @@ class SureMasterPlayground(BasePlayground):
                 base_solution = self.best_solution or ""
                 round_results: dict[str, dict[tuple, dict]] = {}
 
-                round_model = dict(self.best_model_artifact)
+                round_model = dict(self.best_model_artifact) if feedback_enabled else {"model_artifact": baseline_record["model_artifact"]}
                 research_plan = self._xlab_ordinary_plan(task_description, research_round + 1)
+
+                if ideas_only:
+                    return {'status': 'ideas_ready', 'round': research_round + 1,
+                            'batch_digest': self._xlab_last_batch_digest,
+                            'candidate_count': sum(len(v) for v in research_plan.values()),
+                            'training_performed': False}
 
                 session_config = self.config.session.get("local", {})
                 parallel_config = session_config.get("parallel", {}) or {}
@@ -1574,7 +1604,7 @@ class SureMasterPlayground(BasePlayground):
                         improve_exp.enforce_candidate_type = True
                         improve_exp.candidate_phase = "search"
                         improve_exp.candidate_idea_id = self._xlab_idea_metadata.get(self._idea_result_key(idea), {}).get("idea_id", "")
-                        if entry["candidate_type"] == INFERENCE and round_model.get("model_artifact"):
+                        if (entry["candidate_type"] == INFERENCE or self.sure_config.get("task", {}).get("training", {}).get("recipe") == "diarizen.evolution.v1") and round_model.get("model_artifact"):
                             improve_exp.execution_env["SURE_PARENT_MODEL_ARTIFACT"] = round_model["model_artifact"]
                         else:
                             improve_exp.execution_env.pop("SURE_PARENT_MODEL_ARTIFACT", None)
@@ -1585,7 +1615,7 @@ class SureMasterPlayground(BasePlayground):
                                 improve_exp.run,
                                 task_description=task_description,
                                 data_preview=data_preview,
-                                previous_solution=direction_best_solution or "",
+                                previous_solution=(direction_best_solution if feedback_enabled else baseline_record["code"]) or "",
                                 improve_idea=idea,
                                 role_paths=role_paths,
                                 candidate_type_hint=entry["candidate_type"],
@@ -1670,7 +1700,7 @@ class SureMasterPlayground(BasePlayground):
                         },
                     )
 
-                if self.xlab_provider is not None:
+                if self.xlab_provider is not None and feedback_enabled:
                     candidates = []
                     for direction, records in round_results.items():
                         for idea_key, record in records.items():
@@ -1760,40 +1790,42 @@ class SureMasterPlayground(BasePlayground):
                     if summary.summary_digest not in self._xlab_summary_artifacts:
                         self._xlab_summary_artifacts.append(summary.summary_digest)
 
-                self.research_plan_and_result.append(
-                    json.dumps(research_plan, ensure_ascii=False, indent=2)
-                )
+                if feedback_enabled:
+                    self.research_plan_and_result.append(
+                        json.dumps(research_plan, ensure_ascii=False, indent=2)
+                    )
 
-                knowledge_exp = KnowledgePromotionExp(
-                    self.agents.knowledge_promotion_agent,
-                    self.config,
-                    f"exp_{self.exp_index}_knowledge_promotion",
-                    self.task_card,
-                    self.base_model_profile,
-                )
-                self.exp_index += 1
-                knowledge_result = self.execute_parallel_tasks(
-                    [
-                        partial(
-                            knowledge_exp.run,
-                            task_description=task_description,
-                            data_preview=data_preview,
-                            base_solution=base_solution,
-                            best_solution=self.best_solution or "",
-                            research_plan=research_plan,
-                            research_round_idea_results=round_results,
-                        )
-                    ],
-                    max_workers=1,
-                    workspace_names=[knowledge_exp.exp_name],
-                )[0]
-                if isinstance(knowledge_result, Exception):
-                    raise knowledge_result
-                self.research_plan_and_result.append(knowledge_result)
+                    knowledge_exp = KnowledgePromotionExp(
+                        self.agents.knowledge_promotion_agent,
+                        self.config,
+                        f"exp_{self.exp_index}_knowledge_promotion",
+                        self.task_card,
+                        self.base_model_profile,
+                    )
+                    self.exp_index += 1
+                    knowledge_result = self.execute_parallel_tasks(
+                        [
+                            partial(
+                                knowledge_exp.run,
+                                task_description=task_description,
+                                data_preview=data_preview,
+                                base_solution=base_solution,
+                                best_solution=self.best_solution or "",
+                                research_plan=research_plan,
+                                research_round_idea_results=round_results,
+                            )
+                        ],
+                        max_workers=1,
+                        workspace_names=[knowledge_exp.exp_name],
+                    )[0]
+                    if isinstance(knowledge_result, Exception):
+                        raise knowledge_result
+                    self.research_plan_and_result.append(knowledge_result)
 
                 records = [record for group in round_results.values() for record in group.values()]
-                if any(r.get("failure_category") == "system_failure" for r in records) or not any(r.get("success") for r in records):
+                if any(r.get("failure_category") == "system_failure" for r in records) or (not records and "ablation" not in self.sure_config) or ("ablation" not in self.sure_config and not any(r.get("success") for r in records)):
                     raise RuntimeError("Round incomplete: restore infrastructure/valid experiments before counting stagnation")
+                self._write_run_json(f"ablation_round_{research_round + 1}.json", {"round": research_round + 1, "policy": policy(self.sure_config), "candidates": records})
                 stale_rounds = 0 if self.compare_score(round_start_score, self.best_score) else stale_rounds + 1
                 self._write_run_json("search_progress.json", {"rounds": research_round + 1,
                                     "stale_rounds": stale_rounds, "best_score": self.best_score})

@@ -69,13 +69,13 @@ class IdeaRequest:
             raise ValueError("unsupported idea request schema")
         if self.search_mode not in {"ordinary", "staged_axes"}:
             raise ValueError("unsupported search mode")
-        if self.round_index < 1 or self.requested_idea_count != 4:
-            raise ValueError("research rounds must request exactly four ideas")
+        if self.round_index < 1 or type(self.requested_idea_count) is not int or self.requested_idea_count < 1:
+            raise ValueError("research rounds must request a positive number of ideas")
         if not isinstance(self.generation_policy, dict):
             raise ValueError("generation_policy must be an object")
         attempts = self.generation_policy.get("max_attempts", 8)
-        if type(attempts) is not int or attempts < 4:
-            raise ValueError("generation max_attempts must be an integer >= 4")
+        if type(attempts) is not int or attempts < self.requested_idea_count:
+            raise ValueError("generation max_attempts must cover the requested idea count")
         if self.axis_index is not None and self.axis_index < 0:
             raise ValueError("axis_index must not be negative")
         if not self.phase.strip():
@@ -233,13 +233,14 @@ class RoundSummary:
 
 
 def validate_idea_batch(batch: IdeaBatch, request: IdeaRequest) -> None:
-    if request.requested_idea_count != 4:
-        raise ValueError("research rounds require exactly four ideas")
-    if batch.status != "success":
+    if type(request.requested_idea_count) is not int or request.requested_idea_count < 1:
+        raise ValueError("research rounds require a positive idea count")
+    partial = request.generation_policy.get("allow_partial_batch") is True
+    if batch.status != "success" and not (partial and batch.status == "incomplete"):
         raise ValueError(f"idea batch is not successful: {batch.status}")
     if batch.request_digest != request.input_digest:
         raise ValueError("idea batch request digest does not match request")
-    if len(batch.ideas) != request.requested_idea_count:
+    if len(batch.ideas) != request.requested_idea_count and not (partial and len(batch.ideas) < request.requested_idea_count):
         raise ValueError("idea batch count does not match request")
     portable_path(batch.workspace, ".")
     expected_candidate_type = {

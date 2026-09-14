@@ -511,7 +511,15 @@ class SureMetricRunner:
         validate_env: bool = False,
         metric_gpu: dict[str, Any] | None = None,
         python: str | None = None,
+        tts_runtime: str = "node_local",
+        timeout_seconds: int = 21600,
     ):
+        if type(timeout_seconds) is not int or timeout_seconds < 0:
+            raise ValueError("Metric timeout_seconds must be a nonnegative integer")
+        self.timeout_seconds = timeout_seconds
+        if tts_runtime not in {"node_local", "worker"}:
+            raise ValueError("tts_runtime must be node_local or worker")
+        self.tts_runtime = tts_runtime
         self.worker_python = python
         self.sure_root = Path(sure_root)
         self.pythonpath = Path(pythonpath) if pythonpath else self.sure_root / "src"
@@ -583,7 +591,11 @@ class SureMetricRunner:
                 try:
                     with self._metric_gpu_context(attempt_no, excluded_devices) as allocation:
                         attempts.append({"event": "attempt_start", "metric_gpu": allocation.to_dict()})
-                        summary = run_pipeline_spec(
+                        execute_pipeline = run_pipeline_spec
+                        if task_card.canonical_task == "tts" and self.tts_runtime == "worker":
+                            from ...runtime.tts_metric import run_tts_metric
+                            execute_pipeline = run_tts_metric
+                        summary = execute_pipeline(
                             pipeline,
                             output_dir=str(output_path),
                             device=allocation.device_override or self.device,
@@ -678,6 +690,7 @@ class SureMetricRunner:
         output.mkdir(parents=True, exist_ok=True)
         request = {"sure_root": str(self.sure_root.resolve()), "pythonpath": str(self.pythonpath.resolve()),
                    "device": self.device, "cache_dir": self.cache_dir, "validate_env": self.validate_env,
+                   "tts_runtime": self.tts_runtime,
                    "task_card": task_card.to_dict(), "workspace": str(Path(workspace_path).resolve()),
                    "output": str(output), "roles": role_paths}
         request_path, response_path = output / "score_request.json", output / "score_result.json"
@@ -689,7 +702,7 @@ class SureMetricRunner:
             with (output / "score_worker.log").open("w") as log:
                 from ...runtime.process import run_bounded
                 run_bounded([self.worker_python, str(tool), str(request_path), str(response_path)],
-                            output=log, timeout=21600)
+                            output=log, timeout=self.timeout_seconds or None)
             return SureMetricResult(**json.loads(response_path.read_text()))
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             return SureMetricResult(False, None, task_card.primary_metric, error=f"Scoring worker failed: {exc}; see {output / 'score_worker.log'}")

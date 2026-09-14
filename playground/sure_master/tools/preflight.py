@@ -64,15 +64,23 @@ def check_config(config: dict, *, check_model: bool = True) -> dict:
         env = {**os.environ, **provider.get("environment", {})}
         if not env.get("OPENAI_API_KEY"):
             raise ValueError("XLab worker needs OPENAI_API_KEY via its deployment environment")
-        survey = env.get("XLAB_SURE_SURVEY_PATH")
-        if not survey or not Path(survey).exists():
-            raise FileNotFoundError("XLab needs a real literature survey at XLAB_SURE_SURVEY_PATH")
-        validate_xlab_survey(Path(survey))
+        from playground.sure_master.core.ablation import policy
+        if policy(sure)["use_literature"]:
+            frozen = env.get("XLAB_SURE_EVIDENCE_JSON")
+            if frozen:
+                from playground.sure_master.core.artifacts import file_digest
+                if file_digest(Path(frozen)) != env.get("XLAB_SURE_EVIDENCE_SHA256"):
+                    raise ValueError("Frozen survey evidence changed")
+            else:
+                survey = env.get("XLAB_SURE_SURVEY_PATH")
+                if not survey or not Path(survey).exists():
+                    raise FileNotFoundError("XLab needs a real literature survey at XLAB_SURE_SURVEY_PATH")
+                validate_xlab_survey(Path(survey))
         command = provider.get("command")
         if not isinstance(command, list) or not command:
             raise ValueError("XLab provider command must be an argv list")
         preflight_command = provider.get("preflight_command")
-        if preflight_command:
+        if preflight_command and policy(sure)["use_literature"]:
             if not isinstance(preflight_command, list) or any(not isinstance(arg, str) or not arg for arg in preflight_command):
                 raise ValueError("XLab provider preflight_command must be an argv list")
             checked = subprocess.run(preflight_command, env=env, text=True, capture_output=True, timeout=120)

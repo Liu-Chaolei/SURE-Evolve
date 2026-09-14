@@ -57,49 +57,65 @@ def write_jsonl(path: Path, data: list[dict]) -> None:
     path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in data))
 
 
+def balanced_prompts(rows: list[dict], count: int, seed: int = 42) -> list[dict]:
+    if count == 0:
+        return rows
+    if count < 0 or len(rows) < count:
+        raise ValueError(f"Need {count} evaluation prompts, only {len(rows)} available")
+    buckets = defaultdict(list)
+    for row in sorted(rows, key=lambda r: r["sample_id"]):
+        buckets[row["group_id"]].append(row)
+    rng = random.Random(seed)
+    groups = sorted(buckets)
+    rng.shuffle(groups)
+    for bucket in buckets.values():
+        rng.shuffle(bucket)
+    selected = []
+    while len(selected) < count:
+        for group in groups:
+            if buckets[group]:
+                selected.append(buckets[group].pop())
+                if len(selected) == count:
+                    break
+    return selected
+
+
 def premium_rows(root: Path, groups: Path | None) -> list[dict]:
-    transcripts = sorted(root.glob("**/txts/*.txt"))
+    # Premium has a fixed shard/txts layout; do not recursively stat every WAV.
+    transcripts = sorted([*root.glob("txts/*.txt"), *root.glob("*/txts/*.txt")])
     if not transcripts:
         raise FileNotFoundError(
             f"Premium download/extraction is not ready: no txts/*.txt under {root}"
         )
     mapping = json.loads(groups.read_text()) if groups else {}
     result, seen = [], set()
-    pending: list[tuple[str, str, str, Path]] = []
-    for transcript in transcripts:
-        fields = transcript.read_text().splitlines()[0].split("\t")
+    def read_record(transcript):
+        with transcript.open() as stream:
+            fields = stream.readline().split("\t")
         if len(fields) < 2 or not fields[1].strip():
             raise ValueError(f"Invalid Premium transcript: {transcript}")
         sid, text = fields[0], fields[1].strip()
-        if sid in seen:
-            raise ValueError(f"Duplicate Premium utterance: {sid}")
-        seen.add(sid)
+        group = mapping.get(sid)
         if groups is None:
             match = re.fullmatch(r"(.+)_S\d+(?:-S\d+)?", sid)
             if match:
-                mapping[sid] = match.group(1)
-        if sid not in mapping or not str(mapping[sid]).strip():
+                group = match.group(1)
+        if group is None or not str(group).strip():
             raise ValueError(f"Missing speaker/original-recording group mapping: {sid}")
         audio = transcript.parent.parent / "wavs" / f"{sid}.wav"
-        pending.append((sid, str(mapping[sid]), text, audio))
-    # WAV metadata reads are latency-bound on the shared filesystem. Keep a
-    # bounded pool while preserving transcript order for deterministic splits.
-    with ThreadPoolExecutor(max_workers=32, thread_name_prefix="premium-wav") as pool:
-        durations = list(pool.map(lambda item: audio_duration(item[3]), pending))
-    for (sid, group, text, audio), duration in zip(pending, durations):
-        if 1 <= duration <= 30:
-            result.append(
-                {
-                    "sample_id": sid,
-                    "group_id": "premium:" + group,
-                    # Preserve the logical shared-filesystem prefix. Resolving
-                    # symlinks here can produce a host-only /mnt path that is
-                    # not visible inside VC child containers.
-                    "audio": str(audio.absolute()),
-                    "text": text,
-                    "duration": duration,
-                }
-            )
+        return {"sample_id": sid, "group_id": "premium:" + str(group),
+                "audio": str(audio.absolute()), "text": text, "duration": audio_duration(audio)}
+
+    with ThreadPoolExecutor(max_workers=32, thread_name_prefix="premium-metadata") as pool:
+        for index, row in enumerate(pool.map(read_record, transcripts), 1):
+            sid = row["sample_id"]
+            if sid in seen:
+                raise ValueError(f"Duplicate Premium utterance: {sid}")
+            seen.add(sid)
+            if 1 <= row["duration"] <= 30:
+                result.append(row)
+            if index % 10000 == 0:
+                print(f"Premium metadata: {index}/{len(transcripts)}", file=sys.stderr, flush=True)
     if not result:
         raise ValueError("No usable Premium audio")
     return result
@@ -165,7 +181,10 @@ def prepare_tts(
     output: Path,
     *,
     source_mode: str = "archive_verified",
+    search_count: int = 0,
+    selection_count: int = 0,
 ) -> dict:
+    output.mkdir(parents=True, exist_ok=True)
     from playground.sure_master.tools.training_data_integrity import (
         verify_extracted_premium,
         verify_premium_source,
@@ -194,7 +213,8 @@ def prepare_tts(
                 writer.writerow(["audio_file", "text"])
                 writer.writerows((r["audio"], r["text"]) for r in data)
         else:
-            write_jsonl(directory / "manifest.jsonl", tts_prompts(data))
+            count = search_count if name == "search" else selection_count
+            write_jsonl(directory / "manifest.jsonl", balanced_prompts(tts_prompts(data), count))
         prepared[name] = {"manifest": str((directory / "manifest.jsonl").resolve())}
     write_jsonl(output / "holdout/manifest.jsonl", seed_rows(seed_root, "zh"))
     prepared["holdout"] = {
@@ -294,6 +314,8 @@ def main():
     parser.add_argument("task", choices=["tts", "sd", "seed"])
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--search-count", type=int, default=0)
+    parser.add_argument("--selection-count", type=int, default=0)
     parser.add_argument(
         "--groups",
         type=Path,
@@ -318,6 +340,8 @@ def main():
             args.seed_root,
             args.output,
             source_mode=args.source_mode,
+            search_count=args.search_count,
+            selection_count=args.selection_count,
         )
     elif args.task == "sd":
         if not args.recipe_data:

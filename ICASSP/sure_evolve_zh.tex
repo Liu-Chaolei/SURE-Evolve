@@ -1,0 +1,442 @@
+% 中文讨论稿；使用本目录的 ICASSP spconf 模板。
+% 编译：xelatex -> bibtex -> xelatex -> xelatex，或 tectonic。
+% 蓝色“待填”必须由正式实验或作者信息替换；不得据此生成虚构结果。
+\documentclass{article}
+\usepackage{spconf,amsmath,graphicx}
+\usepackage[UTF8,scheme=plain,fontset=none]{ctex}
+\usepackage{fontspec}
+\setmainfont{texgyretermes-regular.otf}[
+  BoldFont=texgyretermes-bold.otf,
+  ItalicFont=texgyretermes-italic.otf,
+  BoldItalicFont=texgyretermes-bolditalic.otf]
+\setsansfont{texgyreheros-regular.otf}[
+  BoldFont=texgyreheros-bold.otf,
+  ItalicFont=texgyreheros-italic.otf,
+  BoldItalicFont=texgyreheros-bolditalic.otf]
+\setCJKmainfont{Noto Serif CJK SC}[
+  Script=CJK,Language=Chinese Simplified,AutoFakeSlant=.15]
+\setCJKsansfont{Noto Sans CJK SC}[
+  Script=CJK,Language=Chinese Simplified,AutoFakeSlant=.15]
+\usepackage{booktabs,tabularx,array,balance}
+\usepackage{xcolor,tikz,etoolbox}
+\usetikzlibrary{arrows.meta,positioning}
+\usepackage[unicode,hidelinks]{hyperref}
+\hypersetup{pdftitle={SURE-Evolve：文献驱动的语音模型自动研究与统一评测},
+  pdfauthor={作者待填},pdfsubject={ICASSP 中文论文初稿}}
+\newcommand{\pending}[1]{\textcolor{blue!65!black}{【待填：#1】}}
+\newcommand{\resultcell}{\textcolor{blue!65!black}{待填}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\renewenvironment{abstract}{\begin{center}\bfseries 摘要\end{center}}{\par}
+\renewenvironment{keywords}{\vspace{.5em}\noindent\textbf{关键词}：}{\par}
+\makeatletter
+\def\fnum@figure{{\bf 图\ \thefigure}}
+\def\fnum@table{{\bf 表\ \thetable}}
+\patchcmd{\thebibliography}{\section{References}}{\section{参考文献}}{}{}
+\makeatother
+
+\title{SURE-Evolve：文献驱动的语音模型自动研究与统一评测}
+\name{作者姓名待填}
+\address{作者单位待填}
+
+\begin{document}
+\maketitle
+\raggedbottom
+
+\begin{abstract}
+语音模型研发需要将领域知识转化为可执行的改进方案，并通过实验持续修正研究方向。
+本文提出 SURE-Evolve，一个面向语音场景的文献驱动自动研究框架，并以
+自动语音识别（ASR）、语音合成（TTS）和说话人日志化（SD）为例开展验证。
+我们收集了 ASR、TTS 和 SD 各自超过一万篇的研究论文，结合语音任务需求、
+相关文献与历史实验结果提出模型改进假设，并将其转化为可执行的模型修改方案。
+框架自动实现候选方案并开展实验，通过 SURE~Eval 获得可比较的反馈，
+据此筛选候选并生成下一轮研究方案，形成“文献研究—模型改进—实验验证”的
+自进化闭环。我们以三类代表性语音任务为例，评估该框架的自动研究能力及其对模型性能的改进效果。
+\pending{正式结果：填写 ASR WER、TTS CER 和 SD DER
+相对同协议基线的变化，并据此完成结论句。}
+\end{abstract}
+
+\begin{keywords}
+自动化研究，语音处理，文献驱动智能体，模型优化，统一评测
+\end{keywords}
+
+\section{引言}
+\label{sec:intro}
+
+语音技术的进步依赖于持续的模型设计与实验验证。语音研究涉及语言内容、声音
+生成和说话人活动等不同建模对象。例如，自动语音识别需要恢复音频中的语言
+内容，语音合成需要根据文本生成语音，说话人日志化则需要确定不同说话人的
+发言时间。这些任务各自的特点导致它们形成了不同的模型结构、训练配方与评测惯例。
+研究人员通常需要阅读相关工作、提出假设、修改
+模型、完成训练并分析结果，再决定下一步研究方向。随着文献积累和模型复杂度
+增加，连接这些环节本身已成为语音研究中的一项重要工作。
+
+大语言模型的发展为自动执行部分研究活动提供了基础。已有工作探索了自动生成
+研究想法、编写实验程序和分析结果的研究流程\cite{lu2024aiscientist}。
+检索增强生成也提供了利用外部文献支持模型推理的途径\cite{lewis2020rag}。
+将这些研究流程用于语音模型，需要衔接领域文献、模型改动与语音实验之间的
+具体条件。识别、合成和说话人日志化分别涉及声学编码、条件生成与说话人活动
+建模，同一研究思路需要落实到相应模型的结构和训练接口。候选输出也具有不同
+形式与含义：识别输出转写文本，合成输出波形，日志化输出带说话人身份的时间
+区间，其质量分别经由文本比对、生成语音分析和时间标注匹配获得反馈。因此，
+语音场景中的自进化需要将任务目标、可执行的模型改动、训练过程和输出评价
+贯通起来，使文献中的研究思路能够在具体语音模型上形成可验证的改进。（TODO：这边感觉逻辑有点怪，原因是候选输出有不同形式和含义，但结果和原因匹配不上）
+
+本文关注以下问题：如何将语音领域文献与实验反馈转化为可执行的模型改进，
+并支持不同语音任务上的持续迭代？为此，我们提出 SURE-Evolve，构建任务
+约束下的语音模型自进化流程。系统将任务目标、当前方案与实验条件纳入研究
+上下文，结合文献与历史实验自主提出改进假设；随后完成候选实现与相应实验，
+将转写文本、合成音频或说话人时间标注交由
+SURE~Eval 评价，并将得分、执行状态及实际改动反馈至下一轮研究。
+我们以 ASR、TTS 和 SD 作为代表性实例，考察该流程在识别、生成和说话人
+活动建模中的表现。实验观察持续更新研究上下文，推动候选方案在多轮迭代中
+得到修正与筛选。
+
+本文的工作包括三个方面：首先，收集 ASR、TTS 和 SD 各自超过一万篇的
+研究论文，为语音模型研究提供领域知识来源；其次，构建面向语音场景的自动
+研究闭环，将任务与模型约束纳入方案生成，并将模型改动、实际训练、语音
+预测产物和任务反馈连接起来；最后，以三个代表性语音任务为例，通过同协议基线对照呈现
+完整系统的性能、研究轨迹与运行成本。
+
+\section{相关工作}
+\label{sec:related}
+
+\textbf{自动化研究与文献利用。}
+The AI Scientist 将研究想法生成、实验实施和论文撰写组织为自动化流程，
+展示了语言模型参与机器学习研究的可能性\cite{lu2024aiscientist}。
+检索增强生成将外部知识检索与文本生成结合，为研究过程中调用文献提供了
+通用技术基础\cite{lewis2020rag}。本文在这些研究方向的基础上，聚焦语音
+模型的实际改进。语音研究需要将方法描述落实为模型及其训练、推理流程的改动，
+并处理转写文本、合成音频及说话人时间标注等不同预测产物。评测还涉及文本
+归一化、音频转写后端和说话人计分边界等任务条件。我们围绕这些需求建立
+文献驱动的方案生成、受控实验执行与统一评测流程，使研究假设能够接受语音
+任务指标的实际检验。
+
+\textbf{语音模型与任务差异。}
+Zipformer 通过多时间分辨率编码器等设计进行语音识别\cite{yao2024zipformer}；
+F5-TTS 基于流匹配进行语音生成\cite{chen2024f5tts}；DiariZen 所采用的
+自监督语音表示与日志化网络支持说话人活动建模\cite{han2025leveraging}。
+这些模型提供了不同的结构改进空间，也对应不同的输出形式。我们以它们为
+实例，保留各模型家族的任务特性，通过任务定义、候选执行接口和 SURE~Eval
+评测管理组织实验。框架以任务定义描述输入输出、允许的模型改动和评价目标，
+由执行接口适配具体模型的训练与推理过程，使不同语音任务能够沿用同一研究
+流程，并保留自身的数据与评价指标。
+
+\section{SURE-Evolve 框架}
+\label{sec:method}
+
+\subsection{问题定义与研究闭环}
+
+我们将语音模型的自进化视为由领域知识与实验观察共同驱动的方案搜索。
+对于任务 $\tau$，候选方案 $c$ 描述模型及其训练、推理方法。框架从初始
+方案 $c_0$ 出发，利用文献集合 $\mathcal{P}_{\tau}$ 形成研究假设，再通过
+真实实验更新对候选的判断。方案生成由当前研究问题引导，可涉及模型结构、
+训练方法或推理策略；实验条件 $\mathcal{C}_{\tau}$ 则提供可比的验证基准。
+图~\ref{fig:framework} 展示了这一过程在不同语音任务中的统一组织方式。
+
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+  font=\fontsize{9}{11}\selectfont,
+  box/.style={draw=black!70,rounded corners=2pt,align=center,
+    text width=3.45cm,minimum height=1.65cm,inner sep=5pt},
+  flow/.style={-{Stealth[length=2mm]},line width=.7pt}]
+\node[box,fill=black!4] (library) at (0,0)
+  {\textbf{语音文献与任务定义}\\[3pt]
+   各自超过一万篇论文\\
+   基础模型与实验约束};
+\node[box,fill=blue!6] (research) at (4.15,0)
+  {\textbf{语音研究方案生成}\\[3pt]
+   相关文献与历史实验\\
+   假设、机制与实现规格};
+\node[box,fill=orange!9] (execute) at (8.3,0)
+  {\textbf{候选实现与实验}\\[3pt]
+   模型、训练或推理改进\\
+   控制变量、验证候选};
+\node[box,fill=green!7] (evaluate) at (12.45,0)
+  {\textbf{SURE~Eval 统一评测}\\[3pt]
+   ASR WER / TTS CER\\
+   SD DER 等任务指标};
+\draw[flow] (library) -- (research);
+\draw[flow] (research) -- (execute);
+\draw[flow] (execute) -- (evaluate);
+\draw[flow] (evaluate.south) -- ++(0,-.65) -|
+  node[pos=.25,below,align=center] {候选得分、执行结果与研究总结：指导下一轮方案} (research.south);
+\node[draw=black!60,align=center,inner sep=5pt,fill=white]
+  (final) at (8.3,-2.25) {搜索结束：独立选择集选优 $\longrightarrow$ 冻结模型 $\longrightarrow$ 保留测试集评测};
+\draw[flow,dashed] (evaluate.east) -- ++(.28,0) |- (final.east);
+\end{tikzpicture}
+\caption{SURE-Evolve 面向语音场景的研究闭环，以 ASR、TTS 和 SD 为例。
+上方为搜索阶段，反馈来自实际实验；下方为搜索结束后的模型选择与最终评测，
+保留测试集结果不进入后续研究反馈。}
+\label{fig:framework}
+\end{figure*}
+
+闭环的核心是研究假设与实验反馈的相互作用。文献为候选提供方法依据，历史
+实验则揭示这些思路在当前语音任务中的适用性。每轮研究据此形成一组候选，
+其实际表现经 SURE~Eval 转化为后续推理的依据。候选实现、预测产物与评分
+之间的对应关系，使跨轮研究能够建立在已经观察到的结果之上。
+
+\subsection{语音文献驱动的研究方案生成}
+
+我们收集了 ASR、TTS 和 SD 各自超过一万篇的研究论文，为语音模型改进
+提供领域知识。相关文献中的方法与实验发现构成研究先验，其在目标任务中的
+适用性由本地实验进一步检验。
+
+研究模块结合当前方案与历史结果检索相关文献，分析已有方法能够解释或改进
+的具体问题。候选围绕文献依据、研究假设和可实施的改动展开，将抽象的研究
+思路转化为待验证的方案。例如，针对声学上下文建模的不足，可以形成关于
+模型表示、训练方式或解码策略的不同假设，具体方向由文献与已有实验共同
+决定。
+
+以 $\mathcal{H}_{t-1}$ 表示此前实验历史，第 $t$ 轮研究过程可记为
+\begin{equation}
+\mathcal{I}_t=\mathcal{R}_{\mathrm{speech}}
+ (\mathcal{P}_{\tau},\mathcal{C}_{\tau},c^*_{t-1},\mathcal{H}_{t-1}),
+\end{equation}
+其中 $\mathcal{R}_{\mathrm{speech}}$ 表示语音研究方案生成过程，
+$\mathcal{I}_t$ 为本轮候选方案集合，$c^*_{t-1}$ 为当前最佳方案。
+
+\subsection{候选实现与控制变量实验}
+
+研究方案的自由探索与实验比较的可控性分别作用于候选提出和验证阶段。
+前者允许根据研究问题选择改进方向，后者以候选明确提出的干预为比较对象，
+保持其余条件可比。对于模型结构或训练方法的改进，需要在共同实验基准下
+完成相应训练；对于推理策略的改进，则复用对应模型权重，以区分推理变化
+与重新训练的影响。
+
+候选实现将研究假设落实为代码或配置修改，并记录相对于参照方案的干预
+$\Delta_{t,j}$。若一个方案包含相互依赖的多项改动，则将其作为完整候选
+进行比较，并保留各项变化。对于需要训练的候选 $c_{t,j}$，模型参数由
+候选的训练方法和共同实验条件确定：
+\begin{equation}
+\theta_{t,j}=\operatorname{Train}
+ (c_{t,j},\mathcal{D}_{\mathrm{tr}};\mathcal{C}_{\tau}).
+\end{equation}
+仅调整推理流程时，$\theta_{t,j}$ 取自对应的已训练模型。干预之外的数据、
+初始化和资源条件沿用实验基准；由方案引入的参数规模、计算量或推理耗时
+变化与性能一并记录。执行失败与有效实验分别进入历史记录，避免将运行
+故障等同于研究假设的负结果。
+
+候选通过任务对应的推理过程生成转写文本、合成音频或说话人时间标注。
+这些语音产物将不同类型的研究改动连接到可观测的任务表现，构成统一研究
+流程与具体语音任务之间的评价接口。
+
+\subsection{结果反馈与模型选择}
+
+设 $F_{\tau}$ 为任务 $\tau$ 的推理过程，其行为由候选方案与模型参数共同
+确定。搜索阶段候选得分为
+\begin{equation}
+s_{t,j}=\operatorname{SURE\,Eval}_{\tau}
+ \bigl(F_{\tau}(c_{t,j},\theta_{t,j};\mathcal{D}_{\mathrm{search}})\bigr).
+\end{equation}
+本文三个任务的搜索主指标均为误差率，数值越低越好。本轮结果包含候选得分、
+执行状态、具体改动和相关模型记录。研究模块结合这些结果更新研究总结，记录
+已有实验观察、未解决的问题和下一轮研究方向。执行失败与性能未改善分别
+记录，以免将环境或程序故障误解为研究假设不成立。
+
+搜索结束后，独立选择集用于在基线与入围候选之间确定最终方案。最终评价
+使用保留测试集，并冻结各方案的模型权重与推理配置，以考察研究结果在
+未参与迭代的数据上的表现。测试结果不再进入研究反馈。
+
+\subsection{统一评测与实验可比性}
+\label{sec:evaluation}
+
+为使候选比较反映研究干预的效果，我们固定任务数据划分和 SURE~Eval
+评分链，并在实验记录中明确干预因素与其余控制条件。语音数据按原始录音
+或会话分组；训练及训练验证数据用于参数学习与训练过程中的模型选择，
+搜索集提供迭代反馈，选择集和保留测试集分别承担最终选优与独立评价。
+不同任务保留各自的指标含义，结果以任务为单位报告。
+
+\textbf{ASR。}
+英语识别采用词错误率（WER），在固定的 Whisper 英语文本归一化后，
+使用 SURE~Eval 的 WeNet 兼容评分链计算替换、删除和插入错误。解码方法
+属于候选方案，文本归一化与计分规则在候选之间保持一致。
+
+\textbf{TTS。}
+中文合成采用字符错误率（CER）评价可懂度：先用固定的 Paraformer
+转写后端识别合成音频，再通过 SURE~Eval 的标点处理与字符评分链比较转写和
+目标文本。该指标刻画合成语音的内容可懂度，自然度与说话人相似度属于
+另行评价的质量维度。
+
+\textbf{SD。}
+说话人日志化采用 DER，包含漏检、误检与说话人混淆。当前协议使用
+$0.25$ 秒 collar，按指定评测时间区域（UEM）裁剪参考和预测标注，并
+采用会话误差率的算术平均。\pending{冻结并填写重叠语音计分选项及评分后端版本。}
+基线与候选均在该协议下评分，保证说话人时间区间的比较具有相同计分口径。
+
+\section{实验与结果}
+\label{sec:experiments}
+
+\subsection{任务、模型与数据}
+
+我们选择三种不同类型的语音任务作为框架的验证实例。ASR 使用 Zipformer 和 TED-LIUM 3
+英语语音数据\cite{yao2024zipformer,hernandez2018tedlium}；TTS 使用
+F5TTS\_v1\_Base，在 WenetSpeech4TTS-Premium 的训练划分上进行微调，
+并保留 Seed-zh 作为最终测试数据\cite{chen2024f5tts,ma2024wenetspeech4tts}；
+SD 使用 DiariZen 的 WavLM-updated 路线，在 AMI 单通道会议语音上训练
+和评测\cite{han2025leveraging,carletta2006ami}。各任务的文献规模与
+实验对象概括于表~\ref{tab:tasks}。
+
+\begin{table}[t]
+\centering
+\caption{领域文献与语音实验对象。文献规模为各领域独立计数。}
+\label{tab:tasks}
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\columnwidth}{l c Y}
+\toprule
+任务 & 文献数量 & 基础模型与主要数据 \\
+\midrule
+ASR & $>10{,}000$ & Zipformer；TED-LIUM 3 \\
+TTS & $>10{,}000$ & F5-TTS；WenetSpeech4TTS-Premium、Seed-zh \\
+SD & $>10{,}000$ & DiariZen；AMI \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+ASR 的搜索和选择数据由开发数据按演讲分组划分，官方测试数据仅用于
+最终评测。TTS 的训练与开发划分按原始录音分组，固定参考语音、参考文本
+和目标文本。SD 按会议分组，统一输入通道和评测时间区域。
+\pending{填写每个划分的样本数、时长与清单版本；补充 Seed-zh 数据来源引用。}
+
+\subsection{基线与研究设置}
+
+以下配置构成三个任务的基线配方。ASR 使用完整训练划分，从头训练
+30 个 epoch，采用 RNN-T 目标、随机种子 42 和贪心解码。
+TTS 从 F5-TTS 官方预训练权重初始化，使用 AdamW、学习率 $10^{-5}$、
+随机种子 42，微调 100 个 epoch，最终采用 EMA 权重。SD 使用
+WavLM-Base+ 自监督权重初始化主干，其余网络从头初始化；主干与其余网络
+学习率分别为 $2\times10^{-5}$ 和 $10^{-3}$，随机种子为 3407，最多
+训练 100 个 epoch，训练验证损失连续 10 次不改善时早停，并平均验证损失
+最好的五个检查点。
+
+基线采用 FP32 计算；TTS 的流匹配采样步数为 32，SD 使用 8 秒片段
+及相应聚类配置。候选从研究问题出发提出改动，非干预条件沿用上述基准，
+具体变化随最终方案报告。每轮产生预设数量的候选，研究在给定轮数与资源
+预算内进行。\pending{核对正式基线配方，填写研究轮数、每轮候选数与资源预算、
+研究及代码智能体的 LLM 配置，以及最终候选相对基线的改动。}
+
+\subsection{对照与报告方式}
+
+每个任务比较初始基线与 SURE-Evolve 最终选出的方案，在控制非干预条件
+的基础上衡量整体改进。主结果取自保留测试集；搜索过程的分数用于描述开发集
+上的研究轨迹。误差率相对变化定义为
+\begin{equation}
+\Delta_{\mathrm{rel}}=
+\frac{e_{\mathrm{base}}-e_{\mathrm{final}}}{e_{\mathrm{base}}}\times100\%,
+\end{equation}
+其中 $e_{\mathrm{base}}>0$。正值表示误差率下降，负值表示误差率上升。
+同时保留原始误差率，以便区分绝对百分点变化和相对变化。
+\pending{填写独立运行次数；如有重复实验，报告均值与标准差，并说明搜索与训练种子。}
+
+\subsection{三个任务上的最终表现}
+\label{sec:results}
+
+表~\ref{tab:results} 给出最终测试结果的统一报告形式。每个任务先报告
+基线与最终模型的绝对误差率，再给出相对变化。三个任务的指标分别解释，
+以呈现同一研究流程在不同模型与数据条件下的完整系统表现。
+
+\begin{table}[t]
+\centering
+\caption{保留测试集上的主结果。所有误差率以百分比表示；待填项将在正式
+实验完成后补入。}
+\label{tab:results}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}l l c c c@{}}
+\toprule
+任务 & 指标 $\downarrow$ & 基线 & 最终方案 & 相对变化 \\
+\midrule
+ASR & WER & \resultcell & \resultcell & \resultcell \\
+TTS & CER & \resultcell & \resultcell & \resultcell \\
+SD & DER & \resultcell & \resultcell & \resultcell \\
+\bottomrule
+\end{tabular*}
+\end{table}
+
+\pending{ASR 结果段：填写基线与最终方案的 WER、主要改动及模型或计算成本变化，
+说明测试集与开发集表现的关系。}
+
+\pending{TTS 结果段：填写 CER 的变化及最终方案，结论限定为合成语音的
+可懂度；若补充相似度或听测，再分别描述这些维度的结果。}
+
+\pending{SD 结果段：填写 DER 的变化及最终方案，并注明本表使用的 collar、
+重叠处理和会话聚合协议；只有存在错误分解数据时才解释漏检、误检或混淆变化。}
+
+\subsection{研究过程与实验成本}
+
+研究过程以逐轮候选表现和历史最优轨迹呈现，结合实验成本描述最终方案的
+获得过程。第~\ref{sec:case} 节进一步分析代表性候选的研究依据与语音机制。
+\pending{补入真实运行的候选轨迹及关键改动，标注有效实验与失败尝试。}
+
+实验成本以表~\ref{tab:cost} 汇总。候选数同时记录尝试和成功数量，训练
+设备时包含失败尝试所消耗的计算；LLM 用量覆盖研究、实现和调试阶段。
+各模型的推理耗时在同任务、同硬件和同批处理设置下测量。设备时与实际
+运行时间分别记录，以区分累计资源消耗和并行执行后的墙钟时间。
+
+\begin{table}[t]
+\centering
+\caption{完整研究运行的规模与资源记录。不同任务的硬件型号另行注明，
+不直接将异构设备时解释为等价计算量。}
+\label{tab:cost}
+\setlength{\tabcolsep}{3pt}
+\begin{tabularx}{\columnwidth}{Y c c c}
+\toprule
+记录项 & ASR & TTS & SD \\
+\midrule
+研究轮数 & \resultcell & \resultcell & \resultcell \\
+候选数（尝试/成功） & \resultcell & \resultcell & \resultcell \\
+训练设备时（小时） & \resultcell & \resultcell & \resultcell \\
+LLM 用量（百万 token） & \resultcell & \resultcell & \resultcell \\
+总运行时间（小时） & \resultcell & \resultcell & \resultcell \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{讨论}
+
+本文的实验评价完整研究流程在给定数据与资源条件下获得的最终方案。
+开放的方案生成可能同时涉及多项相关改动，因此整体性能变化与某一模块
+的独立作用需要区分。候选引入的模型规模、训练成本和推理开销也应纳入
+结果解释。TTS 的自动转写误差率主要反映可懂度，后续可结合自然度与
+说话人保持评价扩展质量分析。
+
+\section{案例分析：候选方案的语音机制}
+\label{sec:case}
+
+本节围绕一个代表性候选，分析其研究动机、干预机制及实验表现，建立
+自动生成的方案与语音建模问题之间的联系。
+
+\subsection{研究假设与候选方案}
+
+\pending{选定一个真实候选，交代目标语音任务、基线面临的问题与具体改动，
+结合引用的论文说明研究假设如何形成。}
+
+\subsection{语音理论与作用机制}
+
+\pending{选择与实际候选直接相关的语音理论，建立“具体改动—作用机制—
+预期现象”的解释。结合模型结构图、必要公式或文献说明其可能有效的原因。}
+
+\subsection{实验观察与适用范围}
+
+\pending{结合该候选与基线的已有实验结果、代表性语音样例或错误分布，
+讨论观测是否与机制解释一致，并说明适用条件。将实测结果与尚待验证的
+解释明确区分。}
+
+\section{结论}
+\label{sec:conclusion}
+
+本文提出面向语音场景的自动研究框架 SURE-Evolve，以 ASR、TTS 和 SD
+为代表性实例，收集各自超过一万篇的研究论文，建立了从文献分析、模型改进
+假设、实验执行到 SURE~Eval 反馈的迭代闭环。框架以文献和实验观察引导
+研究方向，通过控制非干预条件比较候选，并在独立数据上评价最终方案。
+三个任务的实验与代表性候选分析共同呈现该流程在语音模型研发中的表现。
+\pending{依据表~\ref{tab:results} 填写最终结论：明确哪些任务取得提升、
+幅度及对应成本；不预设所有任务提升或达到最优水平。}
+
+\clearpage
+\balance
+\begingroup
+\interlinepenalty=10000
+\bibliographystyle{IEEEbib}
+\bibliography{sure_evolve_refs}
+\endgroup
+\end{document}

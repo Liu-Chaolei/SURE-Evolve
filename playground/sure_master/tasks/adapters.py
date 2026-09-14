@@ -149,6 +149,16 @@ class BaseAdapter:
             report = require_completion(evidence / "training_completion.json")
             if report["contract"]["adapter"] != self.name:
                 raise ValueError("Training evidence belongs to another task")
+            if self.name == "tts.f5tts":
+                from ..core.artifacts import file_digest
+                if file_digest(Path(payload["resources"]["checkpoint"])) != report["checkpoints"]["final"]["sha256"]:
+                    raise ValueError("F5 inference weights differ from the completed checkpoint")
+                if report["contract"]["training"]["recipe"] in {"f5tts.evolution.v1.ddp8", "f5tts.evolution.v1.ddp8.bf16"}:
+                    source = Path(payload["resources"]["source"])
+                    for name, sha in report["contract"]["source_files"].items():
+                        if name.startswith("src/f5_tts/model/") or name == "src/f5_tts/sure_candidate.py":
+                            if file_digest(source / name) != sha:
+                                raise ValueError("F5 model/training source differs from the completed model")
         except (ValueError, OSError, KeyError) as exc:
             return [f"Full training proof rejected: {exc}"]
         return []
@@ -282,7 +292,8 @@ class AsrAdapter(BaseAdapter):
         if sure.get("execution_mode") == "slurm":
             preparation = json.loads((data / "preparation.json").read_text())
             expected_hours = float(sure.get("execution_contract", {}).get("training_hours", 100))
-            if (not preparation.get("features_ready") or preparation.get("seed") != 42
+            if sure.get("training_mode") != "full_during_search" and (
+                    not preparation.get("features_ready") or preparation.get("seed") != 42
                     or abs(float(preparation.get("hours", 0)) - expected_hours) > 0.02):
                 raise ValueError("Search subset must match the fixed duration and seed=42")
             import tempfile
@@ -360,6 +371,8 @@ class AsrAdapter(BaseAdapter):
             {
                 "checkpoint": legacy / manifest["checkpoint"],
                 "tokenizer": legacy / manifest["bpe_model"],
+                **({"inference_checkpoint": legacy / manifest["inference_checkpoint"]}
+                   if manifest.get("inference_checkpoint") else {}),
             },
             model_config=payload.get("arch_config"),
             inference_config=payload.get("inference_config"),
@@ -404,7 +417,7 @@ class TtsAdapter(BaseAdapter):
 
         return {
             **super().context(),
-            "initialization": "Baseline and architecture candidates fine-tune the same official F5 checkpoint for the full official budget; fresh optimizer per candidate.",
+            "initialization": "All weight-updating candidates fine-tune the same official F5 checkpoint for the full configured epoch budget; fresh optimizer per candidate. Inference inherits the frozen round parent.",
             "candidate_parameters": {
                 "inference": sorted(INFERENCE_KEYS),
                 "training": sorted(TRAIN_KEYS),
@@ -430,8 +443,15 @@ class TtsAdapter(BaseAdapter):
 
     def validate_outputs(self, exp: Any, roles: dict) -> list[str]:
         from .guards import TtsGuards
-
-        return self.training_proof_errors(exp) + TtsGuards(exp).validate(roles)
+        errors = self.training_proof_errors(exp) + TtsGuards(exp).validate(roles)
+        manifest = exp.execution_env.get("SURE_EVAL_MANIFEST")
+        if manifest:
+            from .tts_outputs import validate_samples
+            try:
+                validate_samples(Path(manifest), Path(exp.workspace_path) / "artifacts/samples.jsonl")
+            except (ValueError, OSError, KeyError, TypeError) as exc:
+                errors.append(str(exc))
+        return errors
 
 
 class SdAdapter(BaseAdapter):

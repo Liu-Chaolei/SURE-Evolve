@@ -46,6 +46,10 @@ def training_source_identity(adapter: str, root: Path) -> dict:
         "tasks/training_jobs.py",
     ):
         identity["sure:" + name] = file_digest(PACKAGE / name)
+    if adapter == "tts.f5tts":
+        for name in ("f5_evolution", "f5_performance", "f5_precision", "f5_validation", "f5_dataloader"):
+            relative = f"runtime/{name}.py"
+            identity["sure:" + relative] = file_digest(PACKAGE / relative)
     return identity
 
 
@@ -88,12 +92,13 @@ def run_training(
                     "SURE_TRAIN_WORLD_SIZE", settings["training"]["world_size"]
                 )
             ),
-            "precision": os.environ.get("SURE_PRECISION", "fp32"),
+            "precision": os.environ.get("SURE_TRAIN_PRECISION", os.environ.get("SURE_PRECISION", "fp32")),
         },
     )
     manifests = {"train": Path(os.environ["SURE_TRAIN_MANIFEST"])}
     if adapter == "tts.f5tts":
         manifests["train_csv"] = Path(settings["training"]["manifest"])
+        manifests["train_validation"] = Path(os.environ["SURE_TRAIN_VALIDATION_MANIFEST"])
         initial = Path(settings["resources"]["checkpoint"])
     else:
         manifests["train_validation"] = Path(
@@ -126,10 +131,17 @@ def run_training(
         raise RuntimeError(
             "Not enough allocated devices for the fixed official training batch"
         )
-    identities = training_source_identity(
-        adapter, Path(settings["resources"]["source"])
-    )
+    identities = training_source_identity(adapter, source)
+    if adapter == "tts.f5tts":
+        from ..runtime.f5_evolution import executable_identity
+        identities.update(executable_identity(source))
+        identities["sure:runtime/f5_evolution.py"] = file_digest(PACKAGE / "runtime/f5_evolution.py")
+        identities["sure:runtime/f5_validation.py"] = file_digest(PACKAGE / "runtime/f5_validation.py")
+        identities["sure:runtime/f5_dataloader.py"] = file_digest(PACKAGE / "runtime/f5_dataloader.py")
     if adapter == "sd.diarizen":
+        from ..runtime.sd_evolution import executable_identity
+        identities.update(executable_identity(source))
+        identities["sure:runtime/sd_evolution.py"] = file_digest(PACKAGE / "runtime/sd_evolution.py")
         identities["wavlm_provenance"] = file_digest(
             initial.with_suffix(initial.suffix + ".provenance.json")
         )

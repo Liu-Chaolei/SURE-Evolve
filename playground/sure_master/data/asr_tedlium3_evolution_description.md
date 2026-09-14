@@ -8,7 +8,7 @@ retraining. Keep the shared 500-token BPE, FP32, seed 42 and allocated world siz
 SURE evaluates English WER on the regular dev tier. Never read selection/test
 transcripts or optimize against their scores.
 
-XLab proposes exactly four distinct evidence-backed architecture-only hypotheses
+XLab proposes exactly three distinct evidence-backed architecture-only hypotheses
 per round, with explicit ablations. Keep the optimizer, loss, augmentation, data
 sampling and inference/decoding settings fixed. Training each changed architecture
 is required execution, not a training-strategy optimization. All candidates train

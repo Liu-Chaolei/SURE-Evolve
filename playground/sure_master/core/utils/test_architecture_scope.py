@@ -62,7 +62,7 @@ class ArchitectureScopeTests(unittest.TestCase):
                 self.assertNotIn("inference", contract["candidate_parameters"])
                 self.assertNotIn("training", contract["candidate_parameters"])
                 self.assertEqual(contract["fixed_training"]["max_steps"], 1000)
-                self.assertIn("exactly four", contract["research_guidance"])
+                self.assertIn("requested number", contract["research_guidance"])
         request = self.request()
         self.assertIsNone(request.axis)
         self.assertEqual(request.search_mode, "ordinary")

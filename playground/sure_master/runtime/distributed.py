@@ -43,3 +43,25 @@ def backend_digest() -> str:
         digest.update(name.encode())
         digest.update((root / name).read_bytes())
     return digest.hexdigest()
+
+
+def claim_job_port(workspace):
+    """Lease a rendezvous port for this job while sharing a host with another job."""
+    import fcntl
+    import socket
+    from pathlib import Path
+
+    directory = Path(workspace).parent / 'model_artifacts' / '.ports'
+    directory.mkdir(parents=True, exist_ok=True)
+    first = 20000 + int(os.environ['SLURM_JOB_ID']) % 30000
+    for offset in range(128):
+        port = 20000 + (first - 20000 + offset) % 30000
+        lease = (directory / str(port)).open('a')
+        try:
+            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with socket.socket() as sock:
+                sock.bind(('127.0.0.1', port))
+            return lease, port
+        except (BlockingIOError, OSError):
+            lease.close()
+    raise RuntimeError('No free rendezvous port available for the allocated job')

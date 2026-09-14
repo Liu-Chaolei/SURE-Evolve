@@ -55,6 +55,15 @@ def rows(path: Path) -> list[dict]:
     return data
 
 
+def write_session_rttm(annotation, row: dict, stream) -> None:
+    """Remove pipeline window padding outside the physical recording."""
+    from pyannote.core import Segment
+
+    bounded = annotation.crop(Segment(0.0, float(row["duration"])), mode="intersection")
+    bounded.uri = row["session_id"]
+    bounded.write_rttm(stream)
+
+
 def read_rttm(path: Path) -> list[list[str]]:
     result = []
     for number, line in enumerate(path.read_text().splitlines(), 1):
@@ -166,10 +175,22 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
 
     if set(parameters) - {"inference", "training", "architecture"}:
         raise ValueError("Expected inference/training/architecture parameter sections")
-    if parameters.get("training"):
+    from copy import deepcopy
+    from ..runtime.sd_evolution import RECIPE, VARIABLE, prepare_source, validate_source
+    evolution = settings["training"].get("recipe") == RECIPE
+    settings = deepcopy(settings)
+    if evolution:
+        overrides = parameters.get("training", {})
+        if set(overrides) - VARIABLE:
+            raise ValueError("SD candidate changes fixed training controls")
+        settings["training"].update(overrides)
+        validate_training_config("sd.diarizen", settings["training"])
+    if action == "infer" and parameters.get("training"):
+        raise ValueError("Inference cannot change training parameters")
+    if parameters.get("training") and not evolution:
         raise ValueError("Official DiariZen training settings are fixed")
     arch = parameters.get("architecture", {})
-    if not isinstance(arch, dict) or set(arch) - set(ARCH_VALUES):
+    if not isinstance(arch, dict) or (not evolution and set(arch) - set(ARCH_VALUES)):
         raise ValueError("Unsupported SD architecture parameters")
     if action in {"baseline", "infer", "fine_tune"} and arch:
         raise ValueError("Structural changes require arch action")
@@ -177,7 +198,16 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
         key: Path(value).resolve() for key, value in settings["resources"].items()
     }
     resources.update(saved)
-    root = snapshot_source(resources["source"], Path("working/diarizen_source"))
+    source_changes = {}
+    candidate_source = os.environ.get("SURE_SD_CANDIDATE_SOURCE")
+    if candidate_source:
+        if not evolution:
+            raise ValueError("SD source editing requires the evolution recipe")
+        pristine = prepare_source(resources["source"], Path("working/sd_pristine"))
+        source_changes = validate_source(Path(candidate_source), pristine, requires_training=action != "infer")
+        root = snapshot_source(Path(candidate_source), Path("working/diarizen_source"))
+    else:
+        root = snapshot_source(resources["source"], Path("working/diarizen_source"))
     prepare_diarizen_inference_source(root)
     pipeline_file = root / "diarizen/pipelines/inference.py"
     text = pipeline_file.read_text()
@@ -213,7 +243,7 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
         config = toml.load(root / "recipes/diar_ssl/conf/wavlm_updated_conformer.toml")
         architecture = dict(config["model"]["args"])
         architecture.pop("wavlm_src", None)
-        if action == "arch" and (
+        if action == "arch" and not source_changes and (
             not arch
             or all(
                 architecture.get(k, 31 if k == "kernel_size" else None) == v
@@ -222,7 +252,7 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
         ):
             raise ValueError("SD arch action requires an actual structure change")
         for key, value in arch.items():
-            if value not in ARCH_VALUES[key]:
+            if not evolution and value not in ARCH_VALUES[key]:
                 raise ValueError(f"Unsupported {key}: {value}")
         architecture.update(arch)
         completion, evidence = run_training(
@@ -282,6 +312,11 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
             resources["training_evidence"] / "training_completion.json"
         )
         config = toml.load(resources["model"] / "config.toml")
+    config["inference"]["args"].update({key: inference[key] for key in
+        ("seg_duration", "segmentation_step", "batch_size", "apply_median_filtering")})
+    config["clustering"]["args"].update({"method": inference["clustering_method"],
+        **{key: value for key, value in inference.items() if key not in
+           {"seg_duration", "segmentation_step", "batch_size", "apply_median_filtering", "clustering_method"}}})
     # Keep the immutable bundle untouched; only the local inference copy gets relocated paths.
     local = Path("working/diarizen_inference").resolve()
     local.mkdir(parents=True, exist_ok=True)
@@ -312,8 +347,7 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
     with (output / "hyp.rttm").open("w") as stream:
         for row in rows(manifest_path):
             annotation = pipeline(row["audio"], sess_name=row["session_id"])
-            annotation.uri = row["session_id"]
-            annotation.write_rttm(stream)
+            write_session_rttm(annotation, row, stream)
             processed.append(row["session_id"])
     (output / "processed_sessions.json").write_text(json.dumps(processed))
     validate_rttm_outputs(output / "hyp.rttm", manifest_path)
@@ -328,7 +362,8 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
     record = {
         "candidate_type": kind,
         "idea_text": json.dumps(parameters),
-        "changed_fields": [f"arch_config.{k}" for k in arch],
+        "changed_fields": [*[f"arch_config.{k}" for k in arch], *[f"source.{k}" for k in source_changes], *[f"training.{k}" for k in parameters.get("training", {})], *[f"inference.{k}" for k in parameters.get("inference", {})]],
+        "source_changes": source_changes,
         "inference_config": inference,
         "arch_config": config["model"]["args"],
         "training_config": completion,

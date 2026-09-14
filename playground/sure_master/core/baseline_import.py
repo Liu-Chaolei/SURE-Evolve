@@ -33,6 +33,12 @@ def import_baseline(
     previous_run: Path, sure: dict, workspace: Path
 ) -> tuple[dict, dict]:
     previous_run = previous_run.resolve()
+    if sure.get("adapter") == "sd.diarizen":
+        from .sd_baseline_import import import_sd_baseline
+        return import_sd_baseline(previous_run, sure, workspace)
+    if sure.get('adapter') == 'tts.f5tts':
+        from .tts_baseline_import import import_tts_baseline
+        return import_tts_baseline(previous_run, sure, workspace)
     state_path = previous_run / "search/workspace/metric/controller_state.json"
     state = json.loads(state_path.read_text())
     if state.get("completed_rounds") != 0 or state.get("candidates"):

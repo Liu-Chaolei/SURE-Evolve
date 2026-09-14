@@ -36,7 +36,7 @@ Write a corrected single-file `run_sure.py`.
 
 Requirements:
 - Keep all writes inside the experiment workspace.
-- Preserve the required candidate type. `inference` must not train or create checkpoints. `fine_tune` may fine-tune or train weights but must not change model structure or parameter count. `arch` must change model structure or parameter count, not merely learning rate, epoch, batch size, decoding, thresholds, normalization, or post-processing.
+- For non-free execution, preserve the required candidate type. `inference` must not train or create checkpoints. `fine_tune` may fine-tune or train weights but must not change model structure or parameter count. `arch` must change model structure or parameter count, not merely learning rate, epoch, batch size, decoding, thresholds, normalization, or post-processing.
 - Honor the configured SURE role paths. Required input roles are also copied to their task-card default `input/` paths for compatibility, but absolute configured paths remain valid read-only inputs.
 - Read-only input paths may be symlinks whose `Path.resolve()` target is outside the experiment workspace, especially `base_model/root`, `base_model/eval_data`, checkpoint files, vocab files, and configured role inputs. Do not reject these reads for being outside the workspace. Apply the inside-workspace restriction only to writes.
 - Read execution environment variables listed above when choosing training/decode limits.
@@ -46,8 +46,7 @@ Requirements:
 - If the base model profile has `usage_policy: required`, keep using that model/recipe through its workspace-relative `required_paths`.
 - Do not switch to an unrelated pretrained model family when a required base model is configured.
 - Generate every required artifact from the task card.
-- For F5-TTS, model-structure changes are allowed only through `SURE_TTS_ARCH_WRAPPER`; do not patch raw F5-TTS model source or call raw F5-TTS training entrypoints directly.
-- For F5-TTS `arch`, call `SURE_TTS_ARCH_WRAPPER` with `action=arch_finetune_short` and change at least one of `depth`, `ff_mult`, `conv_layers`, or `qk_norm`.
+- For F5-TTS use SURE_TASK_WRAPPER. If SURE_SEARCH_SCOPE=all and the recipe is f5tts.evolution.v1.ddp8 or f5tts.evolution.v1.ddp8.bf16, freely combine model, training and inference changes: prepare a workspace copy with --action prepare_source --candidate-source working/f5_candidate, edit it, then call --action candidate --candidate-source working/f5_candidate --parameters-json with requires_training and the desired inference/training/architecture objects. The candidate type is execution metadata, not a quota or mutually exclusive research domain. Never edit the external source. The framework owns the full configured epoch budget, data traversal and scoring; optimizer/scheduler/augmentation extensions use f5_tts/sure_candidate.py hooks. For architecture_only profiles only use registered parameters.
 - For F5-TTS, write `artifacts/candidate_changes.json` with candidate_type, idea_text, changed_fields, defaults, diff_from_defaults, produced_artifacts, and the actual arch/training/inference configs used.
 - Do not edit `/hpc_stor03/sjtu_home/chaolei.liu/sure`.
 - Do not write to the external source directories behind the base model symlinks.

@@ -78,7 +78,11 @@ def resource_profile(settings: dict, candidate_type: str, *, adapter: str = "asr
     if adapter not in counts:
         raise ValueError(f"No training allocation for {adapter}")
     count = counts[adapter] if training else 1
-    defaults = (dict(npu=count, cpu=20*count, memory="1000G" if adapter == "asr.zipformer" else "256G", temporary="1T", shm="128g")
+    if adapter in {"asr.zipformer", "tts.f5tts"} and training:
+        count = int(settings.get("training_devices", count))
+        if count < 1:
+            raise ValueError("training_devices must be positive")
+    defaults = (dict(npu=count, cpu=20*count, memory="1000G" if adapter == "asr.zipformer" or count == 8 else "256G", temporary="1T", shm="128g")
                 if training else dict(npu=1, cpu=20, memory="128G", temporary="100G", shm="32g"))
     defaults.update(settings.get("resource_profiles", {}).get("training" if training else "inference", {}))
     if int(defaults["npu"]) != count:
@@ -174,7 +178,7 @@ def run_candidate(exp) -> dict:
                SURE_WORKER_PYTHON="python", SURE_CANDIDATE_PYTHON="python",
                SURE_CPU_THREADS="8", OMP_NUM_THREADS="8", MKL_NUM_THREADS="8")
     if adapter == "asr.zipformer":
-        env.update(ASR_WORLD_SIZE=str(profile["npu"]), SURE_BASELINE_WORLD_SIZE=str(profile["npu"]), SURE_ICEFALL_PYTHON="python")
+        env.update(ASR_WORLD_SIZE=str(profile["npu"]), SURE_BASELINE_WORLD_SIZE=str(profile["npu"]), SURE_REQUIRED_TRAIN_WORLD_SIZE=str(profile["npu"]), SURE_ICEFALL_PYTHON="python")
     elif adapter == "tts.f5tts":
         env["SURE_TTS_PYTHON"] = "python"
     # No controller LLM settings or credentials in the worker request.
@@ -210,6 +214,15 @@ def run_candidate(exp) -> dict:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if result.is_file():
             return read_result(result)
+        if settings.get("existing_allocations") and not receipt.exists():
+            from .slurm_allocations import run_in_allocations
+
+            atomic_json(request, payload)
+            argv = shlex.split(batch_script(settings, request, workspace, profile).splitlines()[-1])
+            if run_in_allocations(settings, argv, root, result):
+                return read_result(result)
+        if settings.get("sd_restricted_pool"):
+            raise RuntimeError("Authorized SD allocation interrupted; resume this candidate within the restricted pool")
         if receipt.exists():
             record = json.loads(receipt.read_text())
             if not record.get("job_id") or record.get("next_submission_pending"):

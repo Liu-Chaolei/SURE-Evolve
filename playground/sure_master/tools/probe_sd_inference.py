@@ -17,7 +17,7 @@ from playground.sure_master.core.utils.task_cards import resolve_task_card
 from playground.sure_master.runtime.accelerator import RuntimeBackend
 from playground.sure_master.runtime.model_source import snapshot_source, prepare_audio_io, prepare_diarizen_inference_source
 from playground.sure_master.runtime.training_state import atomic_json
-from playground.sure_master.tasks.diarization import clip_rttm, validate_rttm_outputs
+from playground.sure_master.tasks.diarization import clip_rttm, validate_rttm_outputs, write_session_rttm
 from playground.sure_master.tools.probe_task import expand
 
 
@@ -81,9 +81,8 @@ def main():
     start = time.monotonic()
     annotation = pipeline(row["audio"], sess_name=row["session_id"])
     elapsed = time.monotonic() - start
-    annotation.uri = row["session_id"]
     with (work / "hyp.rttm").open("w") as stream:
-        annotation.write_rttm(stream)
+        write_session_rttm(annotation, row, stream)
     (work / "processed_sessions.json").write_text(json.dumps([row["session_id"]]))
     validate_rttm_outputs(work / "hyp.rttm", manifest)
     clip_rttm(work / "hyp.rttm", manifest, work / "scoring_hyp.rttm")

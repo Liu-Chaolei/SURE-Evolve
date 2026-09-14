@@ -57,8 +57,23 @@ def main():
                 raise RuntimeError(
                     "Framework source changed after submission; reconcile this request before running it"
                 )
-        check_accelerator(env["SURE_ACCELERATOR"])
+        if sure.get("startup_mode") != "direct_formal":
+            check_accelerator(env["SURE_ACCELERATOR"])
+        if env.get("SURE_ASR_PROTOCOL"):
+            from playground.sure_master.runtime.asr_monitor import start_usage_monitor
+            start_usage_monitor(workspace / "metric/resource_usage.jsonl")
         import torch
+        if env["SURE_ACCELERATOR"] == "npu":
+            import torch_npu  # registers the allocated devices; no probe computation
+        port_lease = None
+        if int(env.get("SURE_ALLOCATED_DEVICES", "1")) > 1:
+            from playground.sure_master.runtime.distributed import claim_job_port
+            port_lease, port = claim_job_port(workspace)
+            env.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
+            os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
+            atomic_json(workspace / "metric/runtime_allocation.json", {
+                "job_id": os.environ.get("SLURM_JOB_ID"), "devices": int(env["SURE_ALLOCATED_DEVICES"]),
+                "master_addr": "127.0.0.1", "master_port": port})
 
         backend = env["SURE_ACCELERATOR"]
         expected_devices = int(env.get("SURE_ALLOCATED_DEVICES", env.get("ASR_WORLD_SIZE", "1")))
@@ -101,6 +116,9 @@ def main():
             base_model_profile=profile,
             metric_runner=SureMetricRunner(
                 sure["root"], sure.get("pythonpath"), device="cpu",
+                cache_dir=sure.get("cache_dir"),
+                tts_runtime=(sure.get("metric_runtime") or {}).get("tts_runtime", "node_local"),
+                timeout_seconds=(sure.get("metric_runtime") or {}).get("timeout_seconds", 21600),
                 python=(sure.get("metric_runtime") or {}).get("python"),
             ),
             execution_env=env,

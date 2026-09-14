@@ -1,0 +1,10 @@
+# LaTeX build intermediates; keep the manuscript PDF reviewable.
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.xdv
+*.synctex.gz
+*.fdb_latexmk
+*.fls

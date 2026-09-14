@@ -181,8 +181,22 @@ class XlabIdeaClient:
             self._save_operation(operation_id, operation, payload, status="incomplete", error=str(exc))
             raise XlabIdeaClientError(f"unable to start XLab provider: {exc}") from exc
         if completed.returncode != 0:
-            self._save_operation(operation_id, operation, payload, status="incomplete", exit_code=completed.returncode)
-            raise XlabIdeaClientError(f"XLab provider failed with exit code {completed.returncode}")
+            diagnostic = (completed.stdout + "\n" + completed.stderr).strip()
+            for key, value in {**os.environ, **self.environment}.items():
+                if value and any(part in key.upper() for part in ("KEY", "TOKEN", "SECRET", "PASSWORD")):
+                    diagnostic = diagnostic.replace(value, "[REDACTED]")
+            log_path = None
+            if self.receipt_path:
+                log_path = self.receipt_path.parent / ("xlab-error-" + request_digest.split(":")[-1] + ".log")
+                fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(diagnostic)
+            if len(diagnostic) > 8000:
+                diagnostic = diagnostic[:4000] + "\n[... see diagnostic log ...]\n" + diagnostic[-4000:]
+            self._save_operation(operation_id, operation, payload, status="incomplete",
+                                 exit_code=completed.returncode, error=diagnostic,
+                                 diagnostic_log=str(log_path) if log_path else None)
+            raise XlabIdeaClientError(f"XLab provider failed with exit code {completed.returncode}: {diagnostic}")
 
         frames = [line for line in completed.stdout.splitlines() if line.strip()]
         if len(frames) != 1:

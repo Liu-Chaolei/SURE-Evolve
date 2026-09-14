@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 
 from playground.sure_master.tools.freeze_tedlium_run import freeze
+from playground.sure_master.tools.with_api_profile import apply_api_routing
 
 PROJECT = Path(__file__).resolve().parents[3]
 PERSONAL = PROJECT.parent
@@ -21,6 +22,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True)
     parser.add_argument("--output", type=Path, default=PROJECT / "runs/sd_ami_official")
+    parser.add_argument("--env-file", type=Path, default=PROJECT / ".env")
     args = parser.parse_args()
     if "@sha256:" not in args.image:
         parser.error("--image must be an immutable registry digest")
@@ -61,6 +63,9 @@ def main():
     config["session"]["local"]["working_dir"] = str(output / "search/workspace")
     config["session"]["local"]["timeout"] = 0
     config["xlab"]["idea_provider"]["environment"]["XLAB_SURE_RUN_ROOT"] = str(output / "xlab_ideas")
+    python = PERSONAL / "data/sure_asr_controller/bin/python"
+    config = apply_api_routing(config, args.env_file, str(python),
+                               PROJECT / "playground/sure_master/tools/with_api_profile.py")
     candidate = output / "source-config.yaml"
     candidate.write_text(yaml.safe_dump(config, sort_keys=False))
     snapshot, deployment = freeze(candidate, output)
@@ -74,8 +79,8 @@ def main():
     environment.chmod(0o600)
     python = PERSONAL / "data/sure_asr_controller/bin/python"
     launch = output / "launch.sh"
-    argv = [str(python), "-m", "playground.sure_master.tools.with_xlab_environment",
-            "--agent-dir", str(PERSONAL / ".pi/agent"), "--", str(python), str(snapshot / "run.py"),
+    argv = [str(python), "-m", "playground.sure_master.tools.with_api_profile",
+            "--env-file", str(args.env_file.resolve()), "--role", "controller", "--", str(python), str(snapshot / "run.py"),
             "--agent", "sure_master", "--config", str(deployment), "--run-dir", str(output / "search"),
             "--task", "使用官方 WavLM-updated 固定训练预算，在 AMI 上进行两轮结构自进化，以 SURE DER 选优。"]
     launch.write_text("#!/usr/bin/env bash\nset -euo pipefail\ncd " + shlex.quote(str(snapshot))

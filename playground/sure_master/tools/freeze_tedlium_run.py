@@ -56,9 +56,37 @@ def freeze(config_path: Path, output: Path) -> tuple[Path, Path]:
         return value
 
     config = relocate(config)
+    frozen_icefall = None
+    if config["sure"].get("execution_env", {}).get("SURE_ASR_PROTOCOL"):
+        from playground.sure_master.runtime.asr_protocol import validate_resources
+        env = config["sure"]["execution_env"]
+        marker = Path(env["SURE_ASR_PREPARATION"])
+        prepared = json.loads(marker.read_text())
+        env["SURE_ASR_DATA_FINGERPRINT"] = prepared["fingerprint"]
+        validate_resources(env)
+        config["sure"]["execution_contract"]["data_fingerprint"] = prepared["fingerprint"]
+        sources = config["sure"]["base_models"][config["sure"]["task_id"]]["source_paths"]
+        frozen_icefall = output / "icefall_source"
+        recipe = frozen_icefall / "egs/tedlium3/ASR/zipformer"
+        if not frozen_icefall.exists():
+            shutil.copytree(Path(sources["root"]) / "icefall", frozen_icefall / "icefall",
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            shutil.copytree(sources["recipe"], recipe, symlinks=False,
+                            ignore=shutil.ignore_patterns("__pycache__", "exp", "log"))
+            files = {str(p.relative_to(frozen_icefall)): hashlib.sha256(p.read_bytes()).hexdigest()
+                     for p in frozen_icefall.rglob("*") if p.is_file()}
+            atomic_json(frozen_icefall / "source_manifest.json", files)
+        manifest_path = frozen_icefall / "source_manifest.json"
+        if not manifest_path.is_file():
+            raise ValueError("Incomplete frozen Icefall source; choose a new run directory")
+        for relative, sha in json.loads(manifest_path.read_text()).items():
+            if hashlib.sha256((frozen_icefall / relative).read_bytes()).hexdigest() != sha:
+                raise ValueError("Frozen Icefall source changed")
+        sources.update(root=str(frozen_icefall), recipe=str(recipe))
+        config["sure"]["execution_contract"]["icefall_source_digest"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     config["sure"]["execution_env"]["PYTHONPATH"] = str(snapshot)
     if config["sure"].get("task_id", "").startswith("asr_"):
-        config["sure"]["execution_env"]["PYTHONPATH"] += ":/shared/chaolei.liu/ASR/icefall"
+        config["sure"]["execution_env"]["PYTHONPATH"] += ":" + str(frozen_icefall or "/shared/chaolei.liu/ASR/icefall")
     config["sure"]["slurm"]["shared_root"] = "/shared/chaolei.liu"
     target = output / "deployment.yaml"
     if target.exists() and yaml.safe_load(target.read_text()) != config:

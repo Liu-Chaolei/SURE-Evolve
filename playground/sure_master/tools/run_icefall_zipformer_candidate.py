@@ -326,9 +326,10 @@ def validate_candidate_args(
     action: str,
     train_extra_args: list[str],
     decode_extra_args: list[str],
+    frozen_replay: bool = False,
 ) -> None:
     from playground.sure_master.core.search_scope import restricted_search, validate_structure_args
-    if restricted_search(os.environ):
+    if restricted_search(os.environ) and not frozen_replay:
         if candidate_type != ARCH or action != "train_decode":
             raise ValueError("Architecture-only search requires arch training with the fixed recipe")
         if train_extra_args:
@@ -536,8 +537,8 @@ def train_command(
         str(train_duration),
         *remove_cli_arg(final_train_args, "--max-duration"),
     ]
-    if os.environ.get("SURE_ENABLE_MUSAN", "0").strip() == "0" and "--enable-musan" not in arg_names(final_train_args):
-        command.extend(["--enable-musan", "0"])
+    if "--enable-musan" not in arg_names(final_train_args):
+        command.extend(["--enable-musan", os.environ.get("SURE_ENABLE_MUSAN", "0").strip()])
     from playground.sure_master.runtime.resume import resume_command
     return resume_command(command, exp_dir)
 
@@ -551,6 +552,11 @@ def run_training(
     staged_resume: dict[str, Any] | None = None,
 ) -> tuple[int, int, list[dict[str, Any]]]:
     duration = selected_train_duration(final_train_args)
+    if os.environ.get("SURE_ASR_PROTOCOL") and os.environ.get("SURE_SLURM_RESUME") == "1":
+        from playground.sure_master.runtime.resume import complete_epoch
+        if complete_epoch(exp_dir, train_epochs):
+            print(f"[zipformer-wrapper] epoch {train_epochs} complete; continuing with decode", flush=True)
+            return train_epochs, duration, [{"status": "reused_complete_training", "epoch": train_epochs}]
     attempts: list[dict[str, Any]] = []
     timeout = baseline.timeout_env("SURE_BASELINE_TRAIN_TIMEOUT", 43200)
     retry_sequence = baseline.duration_retry_sequence(duration)
@@ -659,6 +665,7 @@ def write_candidate_record(
 ) -> None:
     from playground.sure_master.runtime.icefall import recipe_changes
     train_config = args_to_config(final_train_args)
+    train_config.setdefault("enable_musan", os.environ.get("SURE_ENABLE_MUSAN", "0"))
     decode_config = args_to_config(final_decode_args)
     train_bpe_sha256 = bpe_sha256_if_available(train_bpe_model)
     decode_bpe_sha256 = bpe_sha256_if_available(decode_bpe_model)
@@ -683,7 +690,7 @@ def write_candidate_record(
         "changed_fields": changed_fields or sorted(set(inferred_changed)),
         "arch_config": {
             key: value
-            for key, value in train_config.items()
+            for key, value in (decode_config if os.environ.get("SURE_ASR_PROTOCOL") and trained_epoch is None else train_config).items()
             if "--" + key.replace("_", "-") in STRUCTURE_ARGS
         },
         "training_config": {
@@ -726,13 +733,27 @@ def write_candidate_record(
         "elapsed_seconds": elapsed_seconds,
         "timestamp": time.time(),
     }
+    if os.environ.get("SURE_ASR_CPU_AVERAGING") == "1":
+        from playground.sure_master.runtime.asr_averaging import averaged_paths
+        averaged, receipt = averaged_paths(exp_dir, int(decode_epoch), decode_avg)
+        if not averaged.is_file() or not receipt.is_file():
+            raise ValueError("No completed averaged inference checkpoint")
+        payload["inference_config"]["averaging"] = json.loads(receipt.read_text())
+        payload["produced_artifacts"]["inference_checkpoint"] = str(averaged)
+        payload["runtime"]["data_fingerprint"] = os.environ.get("SURE_ASR_DATA_FINGERPRINT")
     write_candidate_changes(Path("artifacts") / "candidate_changes.json", payload)
 
 
 def main() -> int:
     args = parse_args()
+    from playground.sure_master.runtime.asr_protocol import validate_resources
+    prepared = validate_resources(os.environ)
+    frozen = os.environ.get("SURE_FROZEN_MODEL_ARTIFACT")
+    frozen_replay = bool(args.model_artifact and frozen
+                         and Path(args.model_artifact).resolve() == Path(frozen).resolve()
+                         and args.action == "decode_only" and args.candidate_type == INFERENCE)
     from playground.sure_master.core.search_scope import restricted_search
-    if restricted_search(os.environ):
+    if restricted_search(os.environ) and not frozen_replay:
         fixed = {"train_epochs": os.environ.get("SURE_MAX_TRAIN_EPOCHS", "1"),
                  "decode_method": os.environ.get("SURE_DECODE_METHOD", "modified_beam_search"),
                  "decode_avg": os.environ.get("SURE_BASELINE_AVG", "1"),
@@ -744,7 +765,7 @@ def main() -> int:
                 raise ValueError(f"Architecture-only search fixes {key} to {expected}")
     if os.environ.get("SURE_ASR_FIXED_BUDGET") == "1":
         if args.action == "train_decode" and int(os.environ.get("SURE_REQUIRED_TRAIN_WORLD_SIZE", "8")) != current_world_size():
-            raise ValueError("Training action does not match the allocated eight-card resource profile")
+            raise ValueError("Training action does not match the allocated training resource profile")
         if args.action == "train_decode" and int(args.train_epochs) != int(os.environ["SURE_MAX_TRAIN_EPOCHS"]):
             raise ValueError("Training candidate must use exactly the common epoch budget")
         if os.environ.get("SURE_ACCELERATOR") == "npu" and args.decode_method != "greedy_search":
@@ -773,6 +794,11 @@ def main() -> int:
         if args.model_artifact or not args.decode_epoch:
             args.decode_epoch = str(epoch)
         inference = metadata.get("inference_config", {})
+        if prepared and (metadata.get("runtime", {}).get("data_fingerprint") != prepared["fingerprint"]
+                         or inference.get("actual_bpe_sha256") != prepared["identity"]["tokenizer_sha256"]):
+            raise ValueError("Retained model belongs to a different data/tokenizer protocol")
+        if prepared and (int(inference.get("decode_avg", 0)) != 10 or not inference.get("use_averaged_model")):
+            raise ValueError("Corrected frozen evaluation requires the declared last-10-epoch average")
         if args.model_artifact:
             args.decode_method = inference.get("decoding_method", os.environ.get("SURE_DECODE_METHOD", "modified_beam_search"))
             args.decode_avg = str(inference.get("decode_avg", "1"))
@@ -803,6 +829,7 @@ def main() -> int:
         action=args.action,
         train_extra_args=train_extra_args,
         decode_extra_args=decode_extra_args,
+        frozen_replay=frozen_replay,
     )
     if args.action == "train_decode":
         os.environ["SURE_BASELINE_USE_PRETRAINED"] = "0"
@@ -876,6 +903,8 @@ def main() -> int:
         trained_epoch or baseline.int_env("SURE_BASELINE_EPOCH", baseline.BASELINE_EPOCH),
     )
     avg = max(1, parse_int(args.decode_avg, 1))
+    if os.environ.get("SURE_ASR_CPU_AVERAGING") == "1":
+        os.environ["SURE_ASR_AVERAGING_TOKENIZER"] = str(decode_bpe_model.resolve())
     decode_max_duration = max(1, parse_int(args.decode_max_duration, baseline.BASELINE_DECODE_MAX_DURATION))
     baseline.validate_decode_checkpoints(epoch)
     decode_cmd = decode_command(

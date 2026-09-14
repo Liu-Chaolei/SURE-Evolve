@@ -62,6 +62,7 @@ class F5TrainingSession:
         self.store = TrainingStateStore(output / "state", contract, trainer.accelerator)
         self.progress = new_progress()
         self.pending_rng = None
+        self.restored = False
 
     def configure_loader(self, loader) -> None:
         if (
@@ -83,9 +84,10 @@ class F5TrainingSession:
             t.model,
             {"optimizer": t.optimizer},
             {"scheduler": t.scheduler},
-            ema=t.ema_model,
+            ema=getattr(t, "ema_model", None),
         )
         if restored:
+            self.restored = True
             progress, rank = restored
             if progress["batches_per_epoch"] != self.batches:
                 raise ValueError("F5 DataLoader length changed across resume")
@@ -108,12 +110,37 @@ class F5TrainingSession:
             self.pending_rng = None
 
     def after_update(self, epoch: int, batch: int, updates: int):
+        if hasattr(self.trainer, "sure_precision_verified") and not self.trainer.sure_precision_verified:
+            raise RuntimeError("No forward computation matching the declared precision was observed")
         self.progress.update(epoch=epoch, batch=batch, updates=updates)
+        if self.trainer.accelerator.optimizer_step_was_skipped:
+            raise RuntimeError("F5 optimizer skipped a required update")
+        if self.contract.get("component_test") and updates >= int(os.environ["SURE_F5_PROBE_UPDATES"]):
+            import torch
+            t = self.trainer
+            parameter = next(t.accelerator.unwrap_model(t.model).parameters()).detach()
+            values = t.accelerator.gather(parameter.float().sum().reshape(1))
+            if not torch.isfinite(values).all() or not torch.allclose(values, values[0].expand_as(values)):
+                raise RuntimeError("F5 probe parameters differ across ranks")
+            self.save()
+            validation = t.sure_validation() if hasattr(t, "sure_validation") else None
+            if t.accelerator.is_main_process:
+                atomic_json(self.output / "probe_result.json", {
+                    "status": "passed", "component_test": True, "restored": self.restored,
+                    "updates": updates, "world_size": t.accelerator.num_processes,
+                    "rank_parameter_sums": values.cpu().tolist(),
+                    "validation": validation,
+                    "contract_digest": canonical_digest(self.contract),
+                })
+            t.accelerator.wait_for_everyone()
+            raise F5ComponentComplete()
 
     def epoch_end(self, epoch: int):
         if self.progress["batch"] != self.batches:
             raise ValueError("F5 epoch ended before consuming its planned batches")
         self.progress.update(epoch=epoch, batch=0)
+        if hasattr(self.trainer, "sure_validation"):
+            self.progress["validation_history"].append({"epoch": epoch, **self.trainer.sure_validation()})
         self.save()
 
     def save(self):
@@ -125,12 +152,17 @@ class F5TrainingSession:
             {"optimizer": t.optimizer},
             {"scheduler": t.scheduler},
             self.progress,
-            ema=t.ema_model,
+            ema=getattr(t, "ema_model", None),
         )
 
     def finish(self) -> dict:
         t = self.trainer
         evidence = self.output / "evidence"
+        t.accelerator.wait_for_everyone()
+        if not t.accelerator.is_main_process:
+            t.accelerator.wait_for_everyone()
+            from ..core.training import require_completion
+            return require_completion(evidence / "training_completion.json", self.contract)
         checkpoint = evidence / "final_checkpoint.pt"
         atomic_torch_save(
             {
@@ -150,10 +182,12 @@ class F5TrainingSession:
             "batches_per_epoch": self.batches,
             "stop_reason": "max_epochs",
             "checkpoint_selection": "final_ema",
+            "validation_history": self.progress["validation_history"],
             "checkpoints": {"final": checkpoint_identity(evidence, checkpoint)},
         }
         validate_completion(report, self.contract, evidence)
         atomic_json(evidence / "training_completion.json", report)
+        t.accelerator.wait_for_everyone()
         return report
 
 
@@ -166,8 +200,15 @@ def f5_trainer_class(native):
             if update != self.sure_training.progress["updates"]:
                 raise ValueError("F5 native and durable update counters disagree")
             self.sure_training.save()
+            # Keep official periodic exports in addition to the two atomic resume states.
+            if self.keep_last_n_checkpoints == -1:
+                native.save_checkpoint(self, update, last=last)
 
     return DurableF5Trainer
+
+
+class F5ComponentComplete(Exception):
+    """Bounded probe finished without publishing a full-training proof."""
 
 
 def broadcast_value(value, accelerator):
@@ -203,6 +244,12 @@ def sd_trainer_class(native):
     class DurableSdTrainer(native):
         # Native loss, dual optimizers, clipping, validation and early-stop comparison
         # are retained. State persistence and loop cursors are owned by this class.
+        def training_step(self, batch, batch_idx):
+            if self.sure_contract["training"].get("recipe") == "diarizen.evolution.v1":
+                from .sd_evolution import training_step
+                return training_step(self, batch, batch_idx, native.training_step)
+            return super().training_step(batch, batch_idx)
+
         def _save_checkpoint(self, epoch, is_best_epoch):
             pass  # Save all ranks atomically below, after validation state is consistent.
 
@@ -234,7 +281,7 @@ def sd_trainer_class(native):
             restored = self.sure_store.restore(
                 self.model,
                 {"wavlm": self.optimizer_small, "network": self.optimizer_big},
-                {},
+                getattr(self, "sure_schedulers", {}),
             )
             pending_rng = None
             if restored:
@@ -262,7 +309,7 @@ def sd_trainer_class(native):
                 self.sure_store.save(
                     self.model,
                     {"wavlm": self.optimizer_small, "network": self.optimizer_big},
-                    {},
+                    getattr(self, "sure_schedulers", {}),
                     progress,
                     extra={"grad_history": self.grad_history},
                 )
@@ -331,6 +378,8 @@ def sd_trainer_class(native):
                         raise RuntimeError(
                             "Optimizer skipped an update under the fixed FP32 protocol"
                         )
+                    for scheduler in getattr(self, "sure_schedulers", {}).values():
+                        scheduler.step()
                     progress.update(
                         epoch=epoch, batch=index + 1, updates=progress["updates"] + 1
                     )

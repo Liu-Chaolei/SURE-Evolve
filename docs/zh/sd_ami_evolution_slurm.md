@@ -20,7 +20,16 @@ DER 使用 SURE 的 collar=0.25 秒、会话平均和 UEM 裁剪。
 4. 按 `docker/sure-master-diarizen/README.md` 构建、推送镜像。
    评分使用独立 `/opt/sure-metrics/bin/python`，镜像包含 md-eval-22.pl，不在运行时下载评分程序。
 5. SD survey 使用已校验的 `XLab/.xlab/runs/20260910-survey-sd-v2/artifacts/survey.json`。
-   LLM 凭据通过现有 `.pi/agent` 私有配置加载，不写入镜像、部署 YAML 或模型 worker 请求。
+   LLM 凭据从仓库根目录 `.env` 按阶段加载，不写入镜像、部署 YAML 或模型 worker 请求。
+
+| 阶段 | 模型 | 配置来源 |
+|---|---|---|
+| S1–S5：prefetch、improve、debug、knowledge/wisdom promotion，以及备用 draft/reseach | glm-5.3-flash | ZAI_API_KEY / ZAI_BASE_URL |
+| X1–X4：agent、generation、evaluation、fusion（含 candidate review） | gpt-6-astra | XI_API_KEY / XI_BASE_URL |
+
+`with_api_profile --role controller|xlab --env-file ... -- COMMAND` 在进程边界隔离两套凭据。
+裸域名形式的 BASE_URL 补 `/v1`；已有 API 路径保持不变。XLab 使用显式 `User-Agent: XLab/1.0`，
+避免默认 Python urllib User-Agent 被网关拒绝。
 
 ## 验证和启动
 

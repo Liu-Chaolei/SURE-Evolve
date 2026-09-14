@@ -51,7 +51,7 @@ class TrainingController(smoke._CpuFakeSureMaster):
 
 
 class FreeIdeaControllerTests(unittest.TestCase):
-    def test_two_rounds_execute_all_four_and_restore_parent_feedback(self):
+    def test_two_rounds_execute_all_three_and_restore_parent_feedback(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             baseline, ref = root / "baseline.py", root / "ref.txt"
@@ -62,6 +62,7 @@ class FreeIdeaControllerTests(unittest.TestCase):
             config["sure"].pop("staged_axes")
             config["sure"].update(search_strategy="ordinary", require_training_candidate=True,
                                   candidate_types={"max_fine_tune_per_round": 1})
+            config["sure"].update(search_scope="all", search_budget={"ideas_per_round": 3})
             config.update(max_research_rounds=2, max_ideas_per_direction=1)
             config["xlab"]["idea_generation"] = {"max_attempts": 6}
             config_path.write_text(yaml.safe_dump(config))
@@ -71,8 +72,8 @@ class FreeIdeaControllerTests(unittest.TestCase):
             with patch("playground.sure_master.core.playground.KnowledgePromotionExp.run", return_value="test findings"):
                 result = controller.run("Explicitly synthetic feedback replay, no ASR training")
             self.assertEqual(result["status"], "completed", result)
-            self.assertEqual(result["successful_training_candidates"], 8)
-            self.assertEqual([len(item.candidates) for item in provider.summarized_results], [4, 4])
+            self.assertEqual(result["successful_training_candidates"], 6)
+            self.assertEqual([len(item.candidates) for item in provider.summarized_results], [3, 3])
             first, second = provider.generated_requests
             self.assertNotIn("native_idea", first.current_best)
             self.assertEqual(second.generation_policy, {"max_attempts": 6})
@@ -85,12 +86,13 @@ class FreeIdeaControllerTests(unittest.TestCase):
             journal = XlabHistoryJournal(workspace / "artifacts/xlab_history.json")
             controller._xlab_history = journal.round_history()
             restored = controller._xlab_request(task_description="restarted", search_mode="ordinary",
-                                                round_index=3, requested_idea_count=4)
+                                                round_index=3, requested_idea_count=3)
             self.assertEqual(restored.current_best["native_idea_digest"], digest(restored.current_best["native_idea"]))
             self.assertEqual(len(list((workspace / "artifacts/xlab_batches").glob("*.json"))), 2)
 
     def test_metadata_candidates_bypass_remote_type_cap(self):
         controller = object.__new__(TrainingController)
+        controller.sure_config = {"search_scope": "all"}
         ideas = [(str(i), "instructions") for i in range(4)]
         controller._xlab_idea_metadata = {idea: {"candidate_type": "fine_tune"} for idea in ideas}
         entries = controller._filter_and_order_ideas(ideas, mixed_enabled=True,

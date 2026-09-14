@@ -110,10 +110,14 @@ def main():
     p.add_argument("--output", type=Path, default=PROJECT / "runs/tedlium3_evolution")
     args = p.parse_args()
     args.output = args.output.resolve()
+    if (args.output / "SUPERSEDED.json").is_file():
+        raise SystemExit("This ASR workflow was superseded; use the current ASR run pointer")
     args.output.mkdir(parents=True, exist_ok=True)
     global ACTIVE_OUTPUT
     ACTIVE_OUTPUT = args.output
     driver_lock = None
+    global_driver_lock = None
+    active_registry = None
     if args.stage in ("all", "search"):
         driver_lock = (args.output / "workflow.lock").open("a")
         fcntl.flock(driver_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -128,12 +132,24 @@ def main():
                 "updated_at": time.time(),
             },
         )
+        if active_registry is not None:
+            atomic_json(active_registry, {"run_dir": str(args.output), "phase": phase,
+                                         "status": state, "pid": os.getpid(), "updated_at": time.time()})
 
     status(args.stage)
     config = yaml.safe_load(args.config.read_text())
+    if config["sure"].get("active_registry") and args.stage == "search":
+        active_registry = Path(config["sure"]["active_registry"])
+        active_registry.parent.mkdir(parents=True, exist_ok=True)
+        global_driver_lock = active_registry.with_suffix(".lock").open("a")
+        fcntl.flock(global_driver_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        status(args.stage)
     from playground.sure_master.core.full_training import promote_full_training_to_search
     config["sure"] = promote_full_training_to_search(config["sure"])
     data = config["sure"]["base_models"][config["sure"]["task_id"]]["source_paths"]["data"]
+    direct_formal = config["sure"].get("startup_mode") == "direct_formal"
+    if direct_formal and args.stage != "search":
+        raise ValueError("direct_formal starts with --stage search; no preparation/probe/benchmark jobs")
     if args.stage in ("prepare", "all"):
         status("prepare")
         job = submit_gate(
@@ -225,42 +241,47 @@ def main():
         wait_job(job, args.output / "benchmark/job.json")
     if args.stage in ("search", "all"):
         status("search")
-        if not (args.output / "probe-8/probe_result.json").is_file():
-            raise RuntimeError("Pass the eight-card probe before starting evolution")
-        report = json.loads((args.output / "benchmark/benchmark.json").read_text())
-        if report.get("status") != "passed":
-            raise RuntimeError("Common training duration has not passed calibration")
-        from playground.sure_master.tools.benchmark_tedlium import training_signature
-        if report.get("training_signature") != training_signature(config["sure"]):
-            raise RuntimeError("Calibration is from another training data/budget; rerun benchmark for full-budget search")
+        if not direct_formal:
+            if not (args.output / "probe-8/probe_result.json").is_file():
+                raise RuntimeError("Pass the eight-card probe before starting evolution")
+            report = json.loads((args.output / "benchmark/benchmark.json").read_text())
+            if report.get("status") != "passed":
+                raise RuntimeError("Common training duration has not passed calibration")
+            from playground.sure_master.tools.benchmark_tedlium import training_signature
+            if report.get("training_signature") != training_signature(config["sure"]):
+                raise RuntimeError("Calibration is from another training data/budget; rerun benchmark for full-budget search")
         from playground.sure_master.tools.with_xlab_environment import xlab_environment, zai_environment
 
         api_profile = config.get("api_profile") or {}
-        if api_profile.get("provider") == "zai":
+        if api_profile.get("provider") == "zai_controller_xi_xlab":
+            from playground.sure_master.tools.with_api_profile import profile_environment
+            os.environ.update(profile_environment(Path(api_profile["env_file"]), "controller"))
+        elif api_profile.get("provider") == "zai":
             env = zai_environment(Path(api_profile["env_file"]))
             os.environ.update(env)
-            from playground.sure_master.tools.zai_preflight import check_zai_api
-            api_result = check_zai_api(env)
-            atomic_json(args.output / "api_preflight.json", api_result)
-            if api_result["status"] != "passed":
-                raise RuntimeError("ZAI model access/compatibility check failed; see api_preflight.json")
+            if not direct_formal:
+                from playground.sure_master.tools.zai_preflight import check_zai_api
+                api_result = check_zai_api(env)
+                atomic_json(args.output / "api_preflight.json", api_result)
+                if api_result["status"] != "passed":
+                    raise RuntimeError("ZAI model access/compatibility check failed; see api_preflight.json")
         else:
             os.environ.update(xlab_environment(Path("/shared/chaolei.liu/.pi/agent")))
         from playground.sure_master.core.playground import SureMasterPlayground
 
         # Freeze the measured batch budget in a run-local config before any LLM call.
-        for key in ("SURE_MAX_DURATION", "SURE_BASELINE_TRAIN_MAX_DURATION"):
-            config["sure"]["execution_env"][key] = str(report["max_duration"])
-        config["sure"]["execution_contract"]["max_duration"] = report["max_duration"]
+        if not direct_formal:
+            for key in ("SURE_MAX_DURATION", "SURE_BASELINE_TRAIN_MAX_DURATION"):
+                config["sure"]["execution_env"][key] = str(report["max_duration"])
+            config["sure"]["execution_contract"]["max_duration"] = report["max_duration"]
         resolved = args.output / "execution.yaml"
         # Write the original credential placeholders, never expanded key values.
         resolved.write_text(yaml.safe_dump(config, sort_keys=False))
         playground = SureMasterPlayground(config_path=resolved)
         playground.set_run_dir(args.output / "search")
-        task = (
-            PROJECT
-            / "playground/sure_master/data/asr_tedlium3_evolution_description.md"
-        ).read_text()
+        task = Path(config["sure"].get("task_description_path") or (
+            PROJECT / "playground/sure_master/data/asr_tedlium3_evolution_description.md"
+        )).read_text()
         result = playground.run(task)
         atomic_json(args.output / "result.json", result)
         if result.get("status") != "completed":

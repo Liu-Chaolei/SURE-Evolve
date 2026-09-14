@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tarfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from playground.sure_master.core.artifacts import file_digest
@@ -135,10 +136,13 @@ def verify_premium_source(root: Path, receipt: Path) -> dict:
                 },
             )
         directory = root / name.removesuffix(".tar.gz")
-        for relative, size in inventory.items():
+        def check_member(item):
+            relative, size = item
             target = directory / relative
             if not target.is_file() or target.stat().st_size != size:
                 raise ValueError(f"Premium archive extraction is incomplete: {target}")
+        with ThreadPoolExecutor(max_workers=32) as pool:
+            list(pool.map(check_member, inventory.items()))
         texts = {p.stem for p in (directory / "txts").glob("*.txt")}
         waves = {p.stem for p in (directory / "wavs").glob("*.wav")}
         if not texts or texts != waves:

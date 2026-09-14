@@ -14,9 +14,34 @@ def replace_once(text: str, old: str, new: str) -> str:
 
 
 def prepare_f5_training_source(root: Path) -> None:
+    dataset = root / "src/f5_tts/model/dataset.py"
+    data_text = dataset.read_text()
+    if "# SURE complete distributed batches" not in data_text:
+        data_text = replace_once(data_text, "        self.batches = batches", """        # SURE complete distributed batches: retain all samples and pad the final rank group.
+        import os
+        world = int(os.environ.get("WORLD_SIZE", "1"))
+        if batches and len(batches) % world:
+            batches += [batches[i % len(batches)] for i in range(world - len(batches) % world)]
+        self.batches = batches""")
+        data_text = replace_once(data_text,
+            "                    batch = []\n                    batch_frames = 0",
+            "                    batches.append([idx])  # Never silently drop long training samples\n"
+            "                    batch = []\n                    batch_frames = 0")
+        dataset.write_text(data_text)
     path = root / "src/f5_tts/model/trainer.py"
-    text = path.read_text()
+    text = path.read_text().replace("persistent_workers=True", "persistent_workers=num_workers > 0")
+    if "from playground.sure_master.runtime.f5_dataloader import" not in text:
+        text = text.replace(
+            "from torch.utils.data import",
+            "from playground.sure_master.runtime.f5_dataloader import dataloader_options\nfrom torch.utils.data import",
+            1,
+        )
+        needle = "                num_workers=num_workers,"
+        if text.count(needle) != 2:
+            raise ValueError("Expected both F5 sample and frame DataLoaders")
+        text = text.replace(needle, needle + "\n                **dataloader_options(num_workers),")
     if "self.sure_training.configure_loader" in text:
+        path.write_text(text.replace("        self.accelerator.end_training()", "        # Worker closes the process group after publishing completion."))
         return
     text = replace_once(
         text,
@@ -59,7 +84,7 @@ def prepare_f5_training_source(root: Path) -> None:
     text = replace_once(
         text,
         "        self.save_checkpoint(global_update, last=True)\n\n        self.accelerator.end_training()",
-        "            self.sure_training.epoch_end(epoch + 1)\n\n        self.save_checkpoint(global_update, last=True)\n\n        self.accelerator.end_training()",
+        "            self.sure_training.epoch_end(epoch + 1)\n\n        self.save_checkpoint(global_update, last=True)\n\n        # Worker closes the process group after publishing completion.",
     )
     ast.parse(text)
     path.write_text(text)

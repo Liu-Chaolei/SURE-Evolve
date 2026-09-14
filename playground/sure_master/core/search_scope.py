@@ -15,7 +15,7 @@ STRUCTURE_ARGUMENTS = {
     "--encoder-unmasked-dim",
 }
 GUIDANCE = (
-    "Generate exactly four distinct architecture-only research candidates. "
+    "Generate the requested number of distinct architecture-only research candidates. "
     "Every candidate must have candidate_type=arch, change_domains=[arch], and requires_training=true. "
     "Change model structure only. Keep optimizer, learning rate, loss/objective, augmentation, "
     "sampling, training data, seed, training budget, and inference/decoding settings fixed. "
@@ -37,6 +37,47 @@ def execution_contract(context: dict, sure: dict) -> dict:
     scope = search_scope(sure)
     contract["search_scope"] = scope
     if scope == ALL:
+        if (sure.get("task") or {}).get("training", {}).get("recipe") == "diarizen.evolution.v1":
+            from ..runtime.sd_evolution import VARIABLE
+            contract.update(
+                candidate_entrypoint="SURE_TASK_WRAPPER --action candidate --candidate-source working/sd_candidate --parameters-json",
+                research_guidance=("Freely propose structure, training or inference changes and combinations, without quotas. "
+                    "Use prepare_source to create working/sd_candidate; model and inference source are editable. "
+                    "Use diarizen/sure_candidate.py build_optimizers(model, training), build_schedulers(optimizers, training, total_updates), "
+                    "transform_batch(batch), training_loss(model, batch, training) hooks. build_optimizers returns wavlm/network optimizers. "
+                    "Framework dataset traversal, validation and trainer loops are fixed; preserve output powerset/RTTM interfaces, "
+                    "SSL initialization, seed 3407, four ranks, FP32, 100 epochs or patience 10 and best5 validation averaging. "
+                    "All model/weight/training changes require full training; pure inference reuses the provided parent. "
+                    "Do not launch extra experiments or component ablations."),
+                candidate_parameters={"requires_training": "boolean", "training": sorted(VARIABLE),
+                    "architecture": "DiariZen model constructor parameters, including source-defined extensions",
+                    "inference": context.get("candidate_parameters", {}).get("inference", [])})
+        if (sure.get("task") or {}).get("training", {}).get("recipe") in {"f5tts.evolution.v1.ddp8", "f5tts.evolution.v1.ddp8.bf16"}:
+            from .training import F5_VARIABLE_TRAINING, training_precision
+            precision = training_precision("tts.f5tts", sure["task"]["training"]).upper()
+            epochs = sure["task"]["training"]["epochs"]
+            contract.update(
+                candidate_entrypoint="SURE_TASK_WRAPPER --action candidate --parameters-json",
+                research_guidance=(
+                    "Freely propose the requested number of distinct evidence-backed complete solutions. "
+                    "No architecture/training/inference quotas; coordinated changes are permitted. "
+                    "Declare requires_training; any weight update or model source change requires full training. "
+                    "Use --action prepare_source --candidate-source working/f5_candidate, then edit that workspace source "
+                    "and call --action candidate --candidate-source working/f5_candidate. "
+                    "Model/loss/inference source is editable. The framework owns the trainer loop and dataset traversal; "
+                    "use optional f5_tts/sure_candidate.py build_optimizer(parameters, training), "
+                    "build_scheduler(optimizer, total_updates, training), transform_batch(batch) hooks. "
+                    f"Preserve {epochs} epochs, fixed data splits, official initialization, 8 ranks, {precision} training and final EMA. "
+                    "Master parameters, optimizer state and inference remain FP32."
+                ),
+                candidate_parameters={
+                    "requires_training": "boolean",
+                    "training": sorted(F5_VARIABLE_TRAINING),
+                    "architecture": "F5 DiT constructor parameters, including workspace-defined extensions",
+                    "inference": context.get("candidate_parameters", {}).get("inference", []),
+                    "candidate_source": "workspace F5 source supplied through --candidate-source",
+                },
+            )
         return contract
     contract.update(
         candidate_types=["arch"],

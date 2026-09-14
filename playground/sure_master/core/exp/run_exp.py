@@ -184,7 +184,13 @@ class SureRunExp(BaseExp):
         if used_initial_solution and not self._debug_initial_solution_enabled():
             return result[0], result[1], self.uid, self.code, result[2]
 
-        for _ in range(3):
+        debug_marker = Path(self.workspace_path) / "metric/debug_attempts.json"
+        ablation_run = "ablation" in sure_config_from(self.config)
+        used_debug = json.loads(debug_marker.read_text())["attempts"] if ablation_run and debug_marker.exists() else 0
+        for attempt in range(used_debug, 3):
+            if ablation_run:
+                from ..utils.slurm import atomic_json
+                atomic_json(debug_marker, {"attempts": attempt + 1, "maximum": 3})
             response = self._run_debug_agent(
                 task_description,
                 data_preview,

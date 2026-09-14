@@ -13,6 +13,8 @@ from .artifacts import file_digest, safe_relative
 
 F5_RECIPE = "f5tts.finetune_cli.v1"
 F5_DDP8_RECIPE = "f5tts.finetune_cli.v1.ddp8"
+F5_EVOLUTION_RECIPE = "f5tts.evolution.v1.ddp8"
+F5_BF16_RECIPE = "f5tts.evolution.v1.ddp8.bf16"
 SD_RECIPE = "diarizen.wavlm_updated.v1"
 REPORT_SCHEMA = "sure.training_completion.v1"
 
@@ -37,6 +39,14 @@ F5_TRAINING = {
     "initialization": "official_pretrained_weights",
 }
 F5_DDP8_TRAINING = {**F5_TRAINING, "recipe": F5_DDP8_RECIPE, "world_size": 8}
+F5_EVOLUTION_TRAINING = {**F5_DDP8_TRAINING, "recipe": F5_EVOLUTION_RECIPE,
+                         "keep_last_n_checkpoints": -1}
+F5_BF16_TRAINING = {**F5_EVOLUTION_TRAINING, "recipe": F5_BF16_RECIPE,
+                    "batch_size_per_gpu": 25600, "epochs": 50}
+F5_VARIABLE_TRAINING = {
+    "learning_rate", "batch_size_per_gpu", "max_samples",
+    "grad_accumulation_steps", "num_warmup_updates", "max_grad_norm",
+}
 SD_TRAINING = {
     "recipe": SD_RECIPE,
     "epochs": 100,
@@ -81,7 +91,31 @@ def official_training(adapter: str) -> dict:
 def validate_training_config(
     adapter: str, config: dict, runtime: dict | None = None
 ) -> dict:
-    if adapter == "tts.f5tts" and config.get("recipe") == F5_DDP8_RECIPE:
+    evolution = adapter == "tts.f5tts" and config.get("recipe") in {F5_EVOLUTION_RECIPE, F5_BF16_RECIPE}
+    if evolution:
+        expected = deepcopy(F5_BF16_TRAINING if config["recipe"] == F5_BF16_RECIPE else F5_EVOLUTION_TRAINING)
+        for key in F5_VARIABLE_TRAINING:
+            value = config.get(key)
+            if key in {"learning_rate", "max_grad_norm"}:
+                if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                    raise ValueError(f"Invalid F5 training value: {key}")
+            elif type(value) is not int or value < (0 if key == "num_warmup_updates" else 1):
+                raise ValueError(f"Invalid F5 training value: {key}")
+            expected[key] = value
+    elif adapter == "sd.diarizen" and config.get("recipe") == "diarizen.evolution.v1":
+        from ..runtime.sd_evolution import VARIABLE
+        expected = deepcopy(SD_TRAINING)
+        expected["recipe"] = "diarizen.evolution.v1"
+        for key in VARIABLE:
+            value = config.get(key, {} if key == "candidate_options" else expected.get(key))
+            if key.startswith("learning_rate") and (type(value) not in (int, float) or not math.isfinite(value) or value <= 0):
+                raise ValueError(f"Invalid SD learning rate: {key}")
+            if key == "freeze_wavlm" and type(value) is not bool:
+                raise ValueError("freeze_wavlm must be boolean")
+            if key == "candidate_options" and not isinstance(value, dict):
+                raise ValueError("candidate_options must be an object")
+            expected[key] = value
+    elif adapter == "tts.f5tts" and config.get("recipe") == F5_DDP8_RECIPE:
         expected = deepcopy(F5_DDP8_TRAINING)
     else:
         expected = official_training(adapter)
@@ -100,9 +134,26 @@ def validate_training_config(
             raise ValueError(
                 "Allocated training world_size does not match the official recipe"
             )
-        if runtime.get("precision", "fp32") != "fp32":
-            raise ValueError("The paired CUDA/NPU training profiles require FP32")
+        precision = training_precision(adapter, config)
+        if runtime.get("training_precision", runtime.get("precision", "fp32")) != precision:
+            raise ValueError(f"The selected training recipe requires {precision}")
     return expected
+
+
+def training_precision(adapter: str, training: dict) -> str:
+    return "bf16" if adapter == "tts.f5tts" and training.get("recipe") == F5_BF16_RECIPE else "fp32"
+
+
+def validate_contract_precision(contract: dict) -> None:
+    expected = training_precision(contract.get("adapter"), contract.get("training", {}))
+    # Legacy FP32 completion records did not always include this field.
+    if contract.get("precision", "fp32") != expected:
+        raise ValueError("Training precision differs from its recipe")
+    if expected == "bf16" and (
+        contract.get("master_parameter_precision") != "fp32"
+        or contract.get("precision_mode") != "autocast"
+    ):
+        raise ValueError("BF16 training requires FP32 master parameters and autocast")
 
 
 def source_identity(root: Path, files: list[str]) -> dict[str, str]:
@@ -121,7 +172,8 @@ def build_training_contract(
     component_test: bool = False,
 ) -> dict:
     """Physical device IDs and ephemeral paths are excluded; all scientific controls are pinned."""
-    return {
+    precision = training_precision(adapter, training)
+    contract = {
         "schema_version": "sure.training_contract.v1",
         "adapter": adapter,
         "training": {k: v for k, v in training.items() if k != "manifest"},
@@ -130,9 +182,12 @@ def build_training_contract(
         "initial_checkpoint_sha256": file_digest(initial),
         "source_files": source_files,
         "backend": backend,
-        "precision": "fp32",
+        "precision": precision,
         "component_test": component_test,
     }
+    if precision == "bf16":
+        contract.update(master_parameter_precision="fp32", precision_mode="autocast")
+    return contract
 
 
 def validation_state(
@@ -186,6 +241,7 @@ def validate_completion(
     training = validate_training_config(
         recorded.get("adapter"), recorded.get("training", {})
     )
+    validate_contract_precision(recorded)
     completed = report.get("epochs_completed")
     updates = report.get("optimizer_updates")
     batches = report.get("batches_per_epoch")
@@ -202,7 +258,7 @@ def validate_completion(
         )
     if recorded["adapter"] == "tts.f5tts":
         if completed != training["epochs"] or report.get("stop_reason") != "max_epochs":
-            raise ValueError("F5 must finish all 100 epochs before scoring")
+            raise ValueError(f"F5 must finish all {training['epochs']} epochs before scoring")
         if report.get("checkpoint_selection") != "final_ema":
             raise ValueError("F5 inference must use the final EMA checkpoint")
     else:

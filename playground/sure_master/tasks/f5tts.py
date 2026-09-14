@@ -6,9 +6,11 @@ import json
 import os
 import subprocess
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 from ..runtime.model_source import snapshot_source, prepare_f5_source
+from ..core.training import F5_EVOLUTION_RECIPE, F5_BF16_RECIPE, F5_VARIABLE_TRAINING
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 INFERENCE_KEYS = {
@@ -43,27 +45,39 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
 
     if set(parameters) - {"inference", "training", "architecture"}:
         raise ValueError("Expected inference/training/architecture parameter sections")
+    free = settings.get("training", {}).get("recipe") in {F5_EVOLUTION_RECIPE, F5_BF16_RECIPE}
     for section, allowed in (
         ("inference", INFERENCE_KEYS),
-        ("training", TRAIN_KEYS),
+        ("training", F5_VARIABLE_TRAINING if free else TRAIN_KEYS),
         ("architecture", ARCH_KEYS),
     ):
         if (
             not isinstance(parameters.get(section, {}), dict)
-            or set(parameters.get(section, {})) - allowed
+            or (set(parameters.get(section, {})) - allowed and not (free and section == "architecture"))
         ):
             raise ValueError(f"Unsupported {section} parameters")
     if action in {"baseline", "infer"} and (
         parameters.get("training") or parameters.get("architecture")
     ):
         raise ValueError("Inference cannot request training or structural changes")
-    if action == "fine_tune" and parameters.get("architecture"):
+    if not free and action == "fine_tune" and parameters.get("architecture"):
         raise ValueError("Structural changes require arch action")
     resources = {k: Path(v).resolve() for k, v in settings["resources"].items()}
     if saved:
         resources.update(saved)
-    root = snapshot_source(resources["source"], Path("working/f5_source"))
-    prepare_f5_source(root)
+    source_changes = {}
+    if free:
+        from ..runtime.f5_evolution import prepare_source, validate_source
+        pristine = prepare_source(resources["source"], Path("working/f5_pristine"))
+        candidate = os.environ.get("SURE_F5_CANDIDATE_SOURCE")
+        if candidate:
+            if action == "baseline":
+                raise ValueError("The baseline cannot override its source")
+            source_changes = validate_source(Path(candidate), pristine, requires_training=action != "infer")
+        root = snapshot_source(Path(candidate) if candidate else pristine, Path("working/f5_source"))
+    else:
+        root = snapshot_source(resources["source"], Path("working/f5_source"))
+        prepare_f5_source(root)
     model_cfg = resources.get(
         "model_cfg", root / "src/f5_tts/configs/F5TTS_v1_Base.yaml"
     )
@@ -77,8 +91,11 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
             f"Unsupported F5 inference configuration: {sorted(set(inference) - INFERENCE_KEYS)}"
         )
     train = dict(settings.get("training", {}))
-    if parameters.get("training"):
+    if parameters.get("training") and not free:
         raise ValueError("Official full-training settings are fixed across candidates")
+    train.update(parameters.get("training", {}))
+    settings = deepcopy(settings)
+    settings["training"] = train
     env = os.environ.copy()
     env.update(
         SURE_TTS_TRAIN_SEED=str(train.get("seed", 42)), SURE_TTS_PYTHON=sys.executable
@@ -93,14 +110,14 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
         defaults = yaml.safe_load(model_cfg.read_text())
         model_config = yaml.safe_load(model_cfg.read_text())
         changes = parameters.get("architecture", {})
-        if action == "arch" and (
+        if action == "arch" and not source_changes and (
             not changes
             or all(
                 model_config["model"]["arch"].get(k) == v for k, v in changes.items()
             )
         ):
             raise ValueError("Architecture candidate must change model structure")
-        if set(changes) - ARCH_KEYS:
+        if not free and set(changes) - ARCH_KEYS:
             raise ValueError("Unsupported F5 architecture parameter")
         from ..core.search_scope import execution_contract
         from .adapters import TtsAdapter
@@ -109,7 +126,7 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
             "candidate_parameters"
         ]["architecture"]
         for key, value in changes.items():
-            if key not in allowed or value not in allowed[key]:
+            if not free and (key not in allowed or value not in allowed[key]):
                 raise ValueError(f"Unsupported F5 structure setting: {key}={value}")
             model_config["model"]["arch"][key] = (
                 None if key == "qk_norm" and value == "none" else value
@@ -122,7 +139,7 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
             root,
             backend,
             Path("models/f5tts_training"),
-            structural=action == "arch",
+            structural=action == "arch" or bool(source_changes) or bool(changes),
         )
         resources["checkpoint"] = evidence / "final_checkpoint.pt"
         model_cfg = evidence / "model_cfg.yaml"
@@ -156,6 +173,14 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
             },
             "produced_artifacts": {"final_checkpoint": str(resources["checkpoint"])},
         }
+        if free:
+            record["training_config"]["requires_training"] = True
+            record["source_changes"] = source_changes
+            record["changed_fields"] += [f"training_config.{key}" for key in parameters.get("training", {})]
+            if source_changes:
+                record["arch_config"]["source_changes"] = source_changes
+                record["diff_from_defaults"]["arch_config"]["source_changes"] = source_changes
+                record["changed_fields"].append("arch_config.source_changes")
         atomic_json(Path("artifacts/candidate_changes.json"), record)
     elif saved:
         from ..core.training import require_completion
@@ -218,6 +243,12 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
             ]
         )
     subprocess.run(command, env=env, check=True)
+    if completion and action in {"baseline", "fine_tune", "arch"}:
+        # Batch inference also emits diagnostics; preserve authoritative training/source evidence.
+        inferred = json.loads(Path("artifacts/candidate_changes.json").read_text())
+        record["produced_artifacts"].update(inferred.get("produced_artifacts", {}))
+        record["inference_config"] = {**inferred.get("inference_config", {}), **inference}
+        atomic_json(Path("artifacts/candidate_changes.json"), record)
     resources.update(source=root, model_cfg=model_cfg)
     report = {
         "resources": {k: str(v) for k, v in resources.items()},

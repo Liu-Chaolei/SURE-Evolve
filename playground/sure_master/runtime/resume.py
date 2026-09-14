@@ -6,6 +6,21 @@ import pickle
 from pathlib import Path
 
 
+def complete_epoch(directory: Path, epoch: int) -> bool:
+    """A decode retry must not restart an already completed formal trainer."""
+    checkpoint = directory / f"epoch-{epoch}.pt"
+    if not checkpoint.is_file():
+        return False
+    import torch
+    try:
+        state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        return (int(state.get("cur_epoch", 0)) == epoch
+                and int(state.get("batch_idx_train", 0)) > 0
+                and all(name in state for name in ("model", "optimizer", "scheduler")))
+    except (OSError, RuntimeError, EOFError, ValueError, pickle.UnpicklingError):
+        return False
+
+
 def resume_command(command: list[str], directory: Path) -> list[str]:
     if os.environ.get("SURE_SLURM_RESUME") != "1":
         return command

@@ -22,6 +22,11 @@ def runtime_environment(config: dict[str, Any]) -> dict[str, str]:
         raise ValueError("Unsupported precision")
     env = {"SURE_ACCELERATOR": backend, "SURE_PRECISION": precision,
            "SURE_CPU_THREADS": str(max(1, min(32, int(config.get("cpu_threads", 4)))))}
+    if config.get("training_precision"):
+        training_precision = str(config["training_precision"])
+        if training_precision not in {"fp32", "bf16"}:
+            raise ValueError("Unsupported training precision")
+        env["SURE_TRAIN_PRECISION"] = training_precision
     if config.get("python"):
         env["SURE_WORKER_PYTHON"] = str(config["python"])
     if backend == "npu":

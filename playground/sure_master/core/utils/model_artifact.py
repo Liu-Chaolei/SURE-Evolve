@@ -32,7 +32,16 @@ def retain_model_artifact(workspace: str | Path) -> dict[str, Any]:
         baseline_record = root / "artifacts/official_baseline.json"
         metadata = json.loads(changes.read_text()) if changes.is_file() else (
             json.loads(baseline_record.read_text()) if baseline_record.is_file() else {})
-        shutil.copytree(models, pending / "models", symlinks=False)
+        averaging = metadata.get("inference_config", {}).get("averaging")
+        keep_epochs = set(averaging["binding"]["source_checkpoints"]) if averaging else None
+
+        def completed_weight_filter(_directory, names):
+            if keep_epochs is None:
+                return []
+            return [name for name in names if name.endswith('.pt')
+                    and name.startswith(('epoch-', 'checkpoint-')) and name not in keep_epochs]
+
+        shutil.copytree(models, pending / "models", symlinks=False, ignore=completed_weight_filter)
         recipe = Path(metadata.get("runtime", {}).get("recipe_source") or "base_model/recipe")
         recipe = recipe if recipe.is_absolute() else root / recipe
         if recipe.is_dir():
@@ -71,13 +80,26 @@ def retain_model_artifact(workspace: str | Path) -> dict[str, Any]:
                     "runtime": metadata.get("runtime", {}),
                     "checkpoint_sha256": file_digest(pending / relative),
                     "bpe_sha256": file_digest(pending / bpe_relative) if bpe.is_file() else None}
+        inference_relative = None
+        if averaging:
+            inference = Path(metadata['produced_artifacts']['inference_checkpoint'])
+            inference = inference if inference.is_absolute() else root / inference
+            inference_relative = inference.resolve().relative_to(root)
+            if file_digest(pending / inference_relative) != averaging['sha256']:
+                raise ValueError('Averaged inference weights do not match the scored artifact')
+            for name, sha in averaging['binding']['source_checkpoints'].items():
+                if Path(name).name != name or file_digest(pending / relative.parent / name) != sha:
+                    raise ValueError('Missing or changed averaging source checkpoint')
+            manifest.update(inference_checkpoint=str(inference_relative),
+                            inference_checkpoint_sha256=averaging['sha256'], averaging=averaging)
         (pending / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         if retained.exists():
             shutil.rmtree(retained)
         pending.rename(retained)
         return {"candidate_checkpoint": str(retained / relative),
                 "checkpoint_dir": str((retained / relative).parent),
-                "model_artifact": str(retained / "manifest.json")}
+                "model_artifact": str(retained / "manifest.json"),
+                **({"inference_checkpoint": str(retained / inference_relative)} if inference_relative else {})}
     except Exception:
         shutil.rmtree(pending, ignore_errors=True)
         raise
@@ -99,6 +121,16 @@ def restore_model_artifact(manifest_path: str | Path, exp_dir: Path, *, workspac
     bpe = root / payload["bpe_model"]
     if payload.get("bpe_sha256") and file_digest(bpe) != payload["bpe_sha256"]:
         raise ValueError("Retained tokenizer digest mismatch")
+    if payload.get('averaging'):
+        averaging = payload['averaging']
+        relative_inference = Path(payload['inference_checkpoint'])
+        if relative_inference.is_absolute() or '..' in relative_inference.parts:
+            raise ValueError('Invalid averaged model path')
+        if file_digest(root / relative_inference) != averaging['sha256']:
+            raise ValueError('Retained averaged model digest mismatch')
+        for name, sha in averaging['binding']['source_checkpoints'].items():
+            if Path(name).name != name or file_digest(checkpoint.parent / name) != sha:
+                raise ValueError('Retained averaging source checkpoint mismatch')
     exp_dir.mkdir(parents=True, exist_ok=True)
     if workspace is not None:
         workspace = workspace.resolve()
