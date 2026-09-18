@@ -1,6 +1,6 @@
 FROM registry.cluster.local:5000/users/chaolei-liu/sure-diarizen@sha256:a414f32bf5be92d773639555403573ee4da1d87458c2103e581ad85b66c0a8de
-LABEL org.sure.sd.protocol="diarizen.evolution.v1" \
+LABEL org.sure.sd.protocol="diarizen.evolution.v1.bf16" \
       org.sure.sd.experiment="literature-feedback-factorial-v1"
-ENV SURE_SD_EVOLUTION_PROTOCOL=diarizen.evolution.v1
+ENV SURE_SD_EVOLUTION_PROTOCOL=diarizen.evolution.v1.bf16
 # Controller and candidate code are supplied as a checksummed, read-only snapshot.
 # The proven Torch/Torch-NPU/CANN and CPU metric environments remain pinned above.

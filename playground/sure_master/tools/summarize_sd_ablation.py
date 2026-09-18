@@ -11,6 +11,8 @@ from playground.sure_master.core.utils.slurm import atomic_json
 
 def summarize(root: Path):
     rows, candidates, curves = [], [], []
+    control = root / "control.json"
+    active = json.loads(control.read_text())["active_groups"] if control.exists() else list("ABCD")
     baseline_file = root / "baseline/result.json"
     baseline = json.loads(baseline_file.read_text())["baseline"] if baseline_file.exists() else None
     for group in "ABCD":
@@ -70,7 +72,7 @@ def summarize(root: Path):
                         total = sum(item[name] for name in names)
                         values.append(item[key] * item["error_rate"] / total if total else 0.0)
                     components[key + "_rate"] = sum(values) / len(values) if values else None
-        rows.append({"group": group, "status": "completed" if winner else "pending",
+        rows.append({"group": group, "status": "cancelled" if group not in active else "completed" if winner else "pending",
             "selection_der": result.get("best_score"), "holdout_der": winner.get("score"),
             "baseline_holdout_der": base_test.get("score"), "relative_error_reduction": relative,
             "attempted_candidates": actual, "valid_candidates": valid,

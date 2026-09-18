@@ -176,8 +176,8 @@ def execute(action, parameters, settings, manifest, saved, backend, parent):
     if set(parameters) - {"inference", "training", "architecture"}:
         raise ValueError("Expected inference/training/architecture parameter sections")
     from copy import deepcopy
-    from ..runtime.sd_evolution import RECIPE, VARIABLE, prepare_source, validate_source
-    evolution = settings["training"].get("recipe") == RECIPE
+    from ..runtime.sd_evolution import RECIPES, VARIABLE, prepare_source, validate_source
+    evolution = settings["training"].get("recipe") in RECIPES
     settings = deepcopy(settings)
     if evolution:
         overrides = parameters.get("training", {})

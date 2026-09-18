@@ -13,6 +13,8 @@ from ..core.artifacts import file_digest
 from .model_source import snapshot_source, prepare_diarizen_inference_source
 
 RECIPE = "diarizen.evolution.v1"
+BF16_RECIPE = "diarizen.evolution.v1.bf16"
+RECIPES = {RECIPE, BF16_RECIPE}
 VARIABLE = {"learning_rate_wavlm", "learning_rate_network", "freeze_wavlm", "candidate_options"}
 PROTECTED = (
     "recipes/diar_ssl/dataset.py",

@@ -164,43 +164,19 @@ def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--freeze-evidence":
         atomic_json(Path(sys.argv[2]), evidence_context(True, xlab))
         return
-    from research_idea_lib.config import load_runtime_config
-    from research_idea_lib.providers.contracts import ProviderRequest
-    from research_idea_lib.providers.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProvider
+    sys.path.insert(0, str(xlab / "xlab/skills/sure_master/scripts"))
+    from xlab_idea_client import dispatch
+    if sys.argv[1:] == ["--check-native"]:
+        from xlab_idea_client import main as native_main
+        raise SystemExit(native_main())
     envelope = json.loads(sys.stdin.readline())
     if envelope.get("protocol") != "xlab.sure.jsonl.v1":
         raise ValueError("Unsupported bridge protocol")
-    payload = envelope["payload"]
-    root = Path(os.environ["XLAB_SURE_RUN_ROOT"]) / digest(envelope["operation_id"]).split(":")[1]
+    if envelope["operation"] == "generate" and envelope["payload"].get("generation_policy", {}).get("engine") != "native":
+        raise ValueError("SD generation now requires an explicit native research policy")
     with contextlib.redirect_stdout(sys.stderr):
-        if envelope["operation"] == "summarize":
-            sys.path.insert(0, str(xlab / "xlab/skills/sure_master/scripts"))
-            from xlab_idea_client import summarize
-            result = summarize(payload, envelope["operation_id"])
-        elif envelope["operation"] == "generate":
-            runtime = load_runtime_config()
-            provider = OpenAICompatibleProvider(api_key=os.environ["OPENAI_API_KEY"],
-                endpoint=runtime.chat_completions_url, config=OpenAICompatibleConfig(
-                timeout_seconds=runtime.request_timeout_seconds, max_attempts=runtime.max_retries + 1))
-            def call(stage, path, context, prompt):
-                signature = digest({"stage": stage, "context": context, "prompt": prompt,
-                                    "model": getattr(runtime, stage + "_model")})
-                if path.exists():
-                    cached = json.loads(path.read_text())
-                    if cached["signature"] != signature:
-                        raise ValueError("Provider cache identity changed")
-                    return cached["result"]
-                response = provider.complete(ProviderRequest(
-                    operation="xlab.sure.sd_ablation." + stage,
-                    model=getattr(runtime, stage + "_model"), structured_input=context,
-                    system_prompt=prompt, user_prompt=json.dumps(context, ensure_ascii=False), output_kind="json"))
-                atomic_json(path, {"signature": signature, "result": response.json_value,
-                    "usage": asdict(response.usage), "trace": response.trace.to_dict()})
-                return response.json_value
-            result = generate(payload, root, xlab, call)
-        else:
-            raise ValueError("Unsupported bridge operation")
-    print(json.dumps({**envelope, "status": "success", "payload": result}, ensure_ascii=False))
+        response = dispatch(envelope)
+    print(json.dumps(response, ensure_ascii=False))
 
 
 if __name__ == "__main__":

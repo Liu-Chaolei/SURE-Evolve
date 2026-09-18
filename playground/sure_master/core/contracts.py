@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any, Literal
 
 from .utils.fingerprints import digest, portable_path
@@ -24,6 +25,26 @@ def _required(value: str, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must not be empty")
     return value
+
+
+def validate_generation_policy(value: dict[str, Any]) -> None:
+    if "engine" not in value:
+        return
+    if value["engine"] != "native":
+        raise ValueError("Unsupported explicit idea generation engine")
+    if (value.get("feedback_kind", "candidate_outcome") != "candidate_outcome"
+            or value.get("refinement", "current_best") != "current_best"
+            or value.get("allow_auxiliary_experiments", False) is not False):
+        raise ValueError("Native research requires current-best refinement without auxiliary experiments")
+    mcts = value.get("mcts", {})
+    if not isinstance(mcts, dict) or set(mcts) - {"max_iterations", "max_depth", "branching_factor", "exploration_constant"}:
+        raise ValueError("Unsupported native MCTS configuration")
+    for name, limit in mcts.items():
+        if name == "exploration_constant":
+            if isinstance(limit, bool) or not isinstance(limit, (int, float)) or not isfinite(limit) or limit < 0:
+                raise ValueError("MCTS exploration constant must be finite and nonnegative")
+        elif type(limit) is not int or limit < 1:
+            raise ValueError("MCTS iteration, depth and branching limits must be positive integers")
 
 
 @dataclass(frozen=True)
@@ -73,6 +94,7 @@ class IdeaRequest:
             raise ValueError("research rounds must request a positive number of ideas")
         if not isinstance(self.generation_policy, dict):
             raise ValueError("generation_policy must be an object")
+        validate_generation_policy(self.generation_policy)
         attempts = self.generation_policy.get("max_attempts", 8)
         if type(attempts) is not int or attempts < self.requested_idea_count:
             raise ValueError("generation max_attempts must cover the requested idea count")
@@ -209,6 +231,8 @@ class RoundResult:
 
     metric: dict[str, str] = field(default_factory=dict)
     baseline_score: float | None = None
+    parent_snapshot: dict[str, Any] = field(default_factory=dict)
+    evaluation_context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -230,6 +254,7 @@ class RoundSummary:
     phase: str = "research"
     schema_version: str = SCHEMA_VERSIONS["round_summary"]
     axis: Axis | None = None
+    symbolic_memory: list[dict[str, Any]] = field(default_factory=list)
 
 
 def validate_idea_batch(batch: IdeaBatch, request: IdeaRequest) -> None:
@@ -249,6 +274,25 @@ def validate_idea_batch(batch: IdeaBatch, request: IdeaRequest) -> None:
         "inference": "inference",
     }
     for idea in batch.ideas:
+        if request.generation_policy.get("engine") == "native":
+            if idea.spec.ablation:
+                raise ValueError("Native SURE forbids auxiliary ablation experiments")
+            native = idea.native_artifact
+            if native.get("research_policy", {}).get("profile") != "xlab.sure.native.v1":
+                raise ValueError("Native SURE candidate is missing the required research profile")
+            expected_evidence_mode = ("task_only" if request.generation_policy.get("ablation", {}).get("use_literature") is False
+                                      else "local_literature")
+            if native["research_policy"].get("evidence_mode") != expected_evidence_mode:
+                raise ValueError("Native SURE candidate changed the evidence policy")
+            modes = {"moonshot_inventor", "bridge_builder", "steady_engineer", "ambitious_realist", "evidence_first"}
+            evolution = native.get("mcts_evolution", {})
+            if (set(native.get("source_modes", [])) != modes or native.get("idea_source") != "fused"
+                    or not evolution.get("iterations") or any(
+                        evolution.get("counters", {}).get(mode, {}).get("iterations", 0) <= 0 for mode in modes)):
+                raise ValueError("Native SURE requires completed five-mode MCTS and fusion provenance")
+            if request.generation_policy.get("ablation", {}).get("use_literature") is False:
+                if idea.evidence_refs or native.get("reference_papers") != []:
+                    raise ValueError("Task-only candidate contains literature references")
         if request.execution_contract.get("allowed_change_domains") == ["arch"]:
             if (idea.candidate_type != "arch" or idea.spec.requires_training is not True
                     or set(idea.spec.change_domains) != {"arch"}

@@ -18,6 +18,24 @@ from playground.sure_master.runtime.training_state import TrainingStateStore
 
 @unittest.skipIf(torch is None, "Requires the pinned worker Torch environment")
 class SdEvolutionRuntimeTests(unittest.TestCase):
+    def test_bf16_autocast_audit_observes_real_linear_outputs(self):
+        from playground.sure_master.runtime.f5_precision import install_precision_audit
+        accelerator = SimpleNamespace(mixed_precision="bf16", scaler=None,
+            unwrap_model=lambda m: m, process_index=0)
+        model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.ReLU(), torch.nn.Linear(4, 1))
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+        trainer = SimpleNamespace(model=model, accelerator=accelerator)
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            install_precision_audit(trainer, output, {"precision": "bf16", "backend": "cpu"})
+            with torch.autocast("cpu", dtype=torch.bfloat16):
+                loss = model(torch.ones(48, 4)).square().mean()
+            loss.backward()
+            optimizer.step()
+            self.assertTrue(trainer.sure_precision_verified)
+            self.assertTrue((output / "precision-rank-0.json").exists())
+            self.assertTrue(all(p.dtype == torch.float32 for p in model.parameters()))
+
     def test_custom_loss_updates_weights_and_exactly_restores_scheduler(self):
         class Model(torch.nn.Module):
             def __init__(self):

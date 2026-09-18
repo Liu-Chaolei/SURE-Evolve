@@ -142,6 +142,7 @@ def run_training(
         from ..runtime.sd_evolution import executable_identity
         identities.update(executable_identity(source))
         identities["sure:runtime/sd_evolution.py"] = file_digest(PACKAGE / "runtime/sd_evolution.py")
+        identities["sure:runtime/f5_precision.py"] = file_digest(PACKAGE / "runtime/f5_precision.py")
         identities["wavlm_provenance"] = file_digest(
             initial.with_suffix(initial.suffix + ".provenance.json")
         )

@@ -98,9 +98,23 @@ class AblationTests(unittest.TestCase):
         self.assertEqual(sure["search_scope"], "all")
         self.assertEqual(sure["search_budget"]["max_rounds"], 6)
         self.assertEqual(sure["search_budget"]["ideas_per_round"], 4)
+        self.assertEqual(sure["runtime"]["training_precision"], "bf16")
+        self.assertEqual(sure["task"]["training"]["batch_size"], 48)
+        validate_training_config("sd.diarizen", sure["task"]["training"], sure["runtime"])
         validate_jobs(sure["slurm"])
-        self.assertEqual(sure["slurm"]["resource_profiles"]["training"]["cpu"], 64)
-        self.assertEqual(sure["slurm"]["resource_profiles"]["training"]["temporary"], "100G")
+        self.assertEqual(sure["slurm"]["resource_profiles"]["training"]["cpu"], 32)
+        self.assertEqual(sure["slurm"]["resource_profiles"]["training"]["temporary"], "40G")
+
+    def test_bf16_recipe_rejects_old_precision_and_batch(self):
+        from playground.sure_master.core.training import training_precision
+        training = {**deepcopy(SD_TRAINING), "recipe": "diarizen.evolution.v1.bf16",
+                    "batch_size": 48, "candidate_options": {}}
+        self.assertEqual(training_precision("sd.diarizen", training), "bf16")
+        validate_training_config("sd.diarizen", training, {"world_size": 4, "training_precision": "bf16"})
+        with self.assertRaises(ValueError):
+            validate_training_config("sd.diarizen", {**training, "batch_size": 16})
+        with self.assertRaises(ValueError):
+            validate_training_config("sd.diarizen", training, {"world_size": 4, "precision": "fp32"})
 
     def test_two_round_controller_keeps_feedback_out_and_archives_results(self):
         with tempfile.TemporaryDirectory() as temporary:

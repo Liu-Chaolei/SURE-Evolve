@@ -261,9 +261,14 @@ def sd_train(job):
         use_one_cycle_lr=False,
         gradient_accumulation_steps=1,
     )
+    config["train_dataset"]["dataloader"]["batch_size"] = training["batch_size"]
+    config["validate_dataset"]["dataloader"]["batch_size"] = training["validation_batch_size"]
+    config["optimizer_small"]["args"]["lr"] = training["learning_rate_wavlm"]
+    config["optimizer_big"]["args"]["lr"] = training["learning_rate_network"]
+    config["meta"]["training_precision"] = job["contract"]["precision"]
     config_path = output / "resolved_training.toml"
     accelerator = Accelerator(
-        mixed_precision="no",
+        mixed_precision="bf16" if job["contract"]["precision"] == "bf16" else "no",
         gradient_accumulation_steps=1,
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)],
         dataloader_config=DataLoaderConfiguration(
@@ -289,7 +294,7 @@ def sd_train(job):
     optimizer_big = torch.optim.AdamW(
         model.non_wavlm_parameters(), lr=training["learning_rate_network"]
     )
-    evolution = training.get("recipe") == "diarizen.evolution.v1"
+    evolution = training.get("recipe") in {"diarizen.evolution.v1", "diarizen.evolution.v1.bf16"}
     if evolution:
         from playground.sure_master.runtime.sd_evolution import optimizers
         if training["freeze_wavlm"]:
@@ -377,6 +382,8 @@ def sd_train(job):
         trainer.sure_schedulers = schedulers(
             {"wavlm": optimizer_small, "network": optimizer_big}, training,
             len(train_loader) * training["epochs"])
+    from playground.sure_master.runtime.f5_precision import install_precision_audit
+    install_precision_audit(trainer, output, job["contract"])
     trainer.train_full(train_loader, val_loader, output, job["contract"])
 
 

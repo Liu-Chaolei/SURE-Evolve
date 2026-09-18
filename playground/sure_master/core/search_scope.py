@@ -37,7 +37,7 @@ def execution_contract(context: dict, sure: dict) -> dict:
     scope = search_scope(sure)
     contract["search_scope"] = scope
     if scope == ALL:
-        if (sure.get("task") or {}).get("training", {}).get("recipe") == "diarizen.evolution.v1":
+        if (sure.get("task") or {}).get("training", {}).get("recipe") in {"diarizen.evolution.v1", "diarizen.evolution.v1.bf16"}:
             from ..runtime.sd_evolution import VARIABLE
             contract.update(
                 candidate_entrypoint="SURE_TASK_WRAPPER --action candidate --candidate-source working/sd_candidate --parameters-json",
@@ -46,7 +46,8 @@ def execution_contract(context: dict, sure: dict) -> dict:
                     "Use diarizen/sure_candidate.py build_optimizers(model, training), build_schedulers(optimizers, training, total_updates), "
                     "transform_batch(batch), training_loss(model, batch, training) hooks. build_optimizers returns wavlm/network optimizers. "
                     "Framework dataset traversal, validation and trainer loops are fixed; preserve output powerset/RTTM interfaces, "
-                    "SSL initialization, seed 3407, four ranks, FP32, 100 epochs or patience 10 and best5 validation averaging. "
+                    f"SSL initialization, seed 3407, four ranks, {sure['runtime'].get('training_precision', sure['runtime'].get('precision', 'fp32'))} training, "
+                    f"per-rank batch {sure['task']['training']['batch_size']}, 100 epochs or patience 10 and best5 validation averaging. "
                     "All model/weight/training changes require full training; pure inference reuses the provided parent. "
                     "Do not launch extra experiments or component ablations."),
                 candidate_parameters={"requires_training": "boolean", "training": sorted(VARIABLE),

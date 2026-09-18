@@ -177,6 +177,10 @@ def run_candidate(exp) -> dict:
     env.update(SURE_ALLOCATED_DEVICES=str(profile["npu"]),
                SURE_WORKER_PYTHON="python", SURE_CANDIDATE_PYTHON="python",
                SURE_CPU_THREADS="8", OMP_NUM_THREADS="8", MKL_NUM_THREADS="8")
+    if adapter == "sd.diarizen" and settings.get("allocation_slots_per_job", 1) == 2:
+        scratch = "/local/job/sd/" + hashlib.sha256(str(workspace).encode()).hexdigest()[:16]
+        env.update(SURE_CPU_THREADS="4", OMP_NUM_THREADS="4", MKL_NUM_THREADS="4",
+                   ASCEND_WORK_PATH=scratch + "/ascend/work", ASCEND_PROCESS_LOG_PATH=scratch + "/ascend/log")
     if adapter == "asr.zipformer":
         env.update(ASR_WORLD_SIZE=str(profile["npu"]), SURE_BASELINE_WORLD_SIZE=str(profile["npu"]), SURE_REQUIRED_TRAIN_WORLD_SIZE=str(profile["npu"]), SURE_ICEFALL_PYTHON="python")
     elif adapter == "tts.f5tts":

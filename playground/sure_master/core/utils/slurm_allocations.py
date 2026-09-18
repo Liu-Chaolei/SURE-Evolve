@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -79,14 +80,18 @@ def run_in_allocations(settings: dict, argv: list[str], root: Path, result: Path
                 if not acquire(job, pool):
                     continue
             active = True
-            if slots > 1:
-                with (pool / f"{job}.lock").open("a") as legacy:
+            with ExitStack() as leases:
+                inherited = []
+                if slots > 1:
+                    legacy = leases.enter_context((pool / f"{job}.lock").open("a"))
                     try:
-                        fcntl.flock(legacy, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(legacy, fcntl.LOCK_SH | fcntl.LOCK_NB)
                     except BlockingIOError:
                         continue
-            lock_name = f"{job}.lock" if slots == 1 else f"{job}.slot-{slot}.lock"
-            with (pool / lock_name).open("a") as lock:
+                    inherited.append(legacy.fileno())
+                lock_name = f"{job}.lock" if slots == 1 else f"{job}.slot-{slot}.lock"
+                lock = leases.enter_context((pool / lock_name).open("a"))
+                inherited.append(lock.fileno())
                 try:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
@@ -105,7 +110,7 @@ def run_in_allocations(settings: dict, argv: list[str], root: Path, result: Path
                 with (root / f"allocation-{job}.log").open("ab") as log:
                     proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
                                             stderr=subprocess.STDOUT, start_new_session=True,
-                                            pass_fds=(lock.fileno(),))
+                                            pass_fds=tuple(inherited))
                 record.update(pid=proc.pid, process_identity=process_identity(proc.pid), status="running")
                 atomic_json(receipt, record)
                 rc = proc.wait()

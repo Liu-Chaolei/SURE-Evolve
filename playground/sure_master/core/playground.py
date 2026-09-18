@@ -66,7 +66,7 @@ from .utils.fingerprints import digest
 from ..runtime.accelerator import runtime_environment
 from ..tasks import get_adapter
 from .datasets import split_specs
-from .artifacts import load_bundle
+from .artifacts import file_digest, load_bundle
 from .search_scope import execution_contract as scoped_execution_contract
 from ..runtime.training_budget import TrainingBudgetPaused, check_run_pause
 
@@ -1058,6 +1058,11 @@ class SureMasterPlayground(BasePlayground):
             environment={str(k): str(v) for k, v in (provider_config.get("environment") or {}).items()},
         )
         self._xlab_client_owned = True
+        generation_policy = dict(xlab_config.get("idea_generation") or {})
+        if generation_policy.get("engine") == "native":
+            from .ablation import policy
+            generation_policy["ablation"] = policy(self.sure_config)
+            self._xlab_native_identity = self.xlab_provider.bind_native_policy(generation_policy)
 
     def _close_xlab_provider(self) -> None:
         if self._xlab_client_owned and self.xlab_provider is not None:
@@ -1147,10 +1152,35 @@ class SureMasterPlayground(BasePlayground):
         history_digest = digest(view["prior_rounds"])
         parent_lineage = view["parent_lineage"]
         xlab_config = self.config_manager.get("xlab", {}) or {}
-        generation_policy = {"max_attempts": (xlab_config.get("idea_generation") or {}).get("max_attempts", 8)}
+        generation_policy = dict(xlab_config.get("idea_generation") or {})
+        generation_policy.setdefault("max_attempts", 8)
         if "ablation" in self.sure_config:
             generation_policy.update(ablation=ablation, allow_partial_batch=True)
         execution_contract = scoped_execution_contract(self.task_adapter.context(), self.sure_config)
+        if generation_policy.get("engine") == "native":
+            # Native topic is published; implementation instructions belong to
+            # the private task context, which may include local source paths.
+            base_model = {**base_model, "implementation_task": task_description}
+            task_description = str(self.sure_config.get("research_topic") or
+                                   f"Improve {self.task_card.task_id} using measured {metric_name} feedback.")
+            if getattr(self, "_xlab_native_identity", None):
+                generation_policy["native_identity"] = self._xlab_native_identity
+            generation_policy.setdefault("feedback_kind", "candidate_outcome")
+            generation_policy.setdefault("refinement", "current_best")
+            generation_policy.setdefault("allow_auxiliary_experiments", False)
+            generation_policy["ablation"] = ablation
+            generation_policy.setdefault("mcts", {"max_iterations": 64, "max_depth": 3,
+                                                  "branching_factor": 3, "exploration_constant": 1.2})
+            evaluation_manifest = self._execution_env().get("SURE_EVAL_MANIFEST")
+            evaluation_identity = (file_digest(Path(evaluation_manifest))
+                                   if evaluation_manifest and Path(evaluation_manifest).is_file() else None)
+            memory_scope = {"sure_run_id": run_id, "task_id": self.task_card.task_id,
+                            "evaluation_digest": digest({"contract": execution_contract,
+                                "evaluation_manifest_digest": evaluation_identity,
+                                "evaluation": current_best.get("evaluation_scope", {}),
+                                "metric": {"name": metric_name, "direction": metric_direction}})}
+            generation_policy["memory_scope"] = memory_scope
+            current_best["memory_scope"] = memory_scope
         payload = {
             "request_id": request_id,
             "sure_run_id": run_id,
@@ -1220,6 +1250,7 @@ class SureMasterPlayground(BasePlayground):
             requested_idea_count=int((self.sure_config.get("search_budget") or {}).get("ideas_per_round", 4)),
         )
         batch_path = Path(self.session.config.workspace_path) / "artifacts/xlab_batches" / f"{request.request_id}.json"
+        self._xlab_round_parent = json.loads(json.dumps(request.current_best))
         if batch_path.exists():
             from .contracts import IdeaBatch, IdeaItem, IdeaSpec, validate_idea_batch
             payload = json.loads(batch_path.read_text())
@@ -1469,17 +1500,18 @@ class SureMasterPlayground(BasePlayground):
             else:
                 data_knowledge = ""
                 model_knowledge = ""
-                prefetch_exp = self._create_prefetch_exp(self.exp_index)
-                self.exp_index += 1
-                prefetch_result = self.execute_parallel_tasks(
-                    [partial(prefetch_exp.run, task_description=task_description)],
-                    max_workers=1,
-                    workspace_names=[prefetch_exp.exp_name],
-                )[0]
-                if isinstance(prefetch_result, Exception):
-                    self.logger.warning("SURE prefetch failed non-fatally: %s", prefetch_result)
-                else:
-                    data_knowledge, model_knowledge, self.prefetch_descriptor = prefetch_result
+                if not self.sure_config.get("baseline_only"):
+                    prefetch_exp = self._create_prefetch_exp(self.exp_index)
+                    self.exp_index += 1
+                    prefetch_result = self.execute_parallel_tasks(
+                        [partial(prefetch_exp.run, task_description=task_description)],
+                        max_workers=1,
+                        workspace_names=[prefetch_exp.exp_name],
+                    )[0]
+                    if isinstance(prefetch_result, Exception):
+                        self.logger.warning("SURE prefetch failed non-fatally: %s", prefetch_result)
+                    else:
+                        data_knowledge, model_knowledge, self.prefetch_descriptor = prefetch_result
 
                 draft_exp = self._create_run_exp("draft", self.exp_index)
                 draft_candidate_type = self._draft_candidate_type_hint()
@@ -1604,7 +1636,7 @@ class SureMasterPlayground(BasePlayground):
                         improve_exp.enforce_candidate_type = True
                         improve_exp.candidate_phase = "search"
                         improve_exp.candidate_idea_id = self._xlab_idea_metadata.get(self._idea_result_key(idea), {}).get("idea_id", "")
-                        if (entry["candidate_type"] == INFERENCE or self.sure_config.get("task", {}).get("training", {}).get("recipe") == "diarizen.evolution.v1") and round_model.get("model_artifact"):
+                        if (entry["candidate_type"] == INFERENCE or self.sure_config.get("task", {}).get("training", {}).get("recipe") in {"diarizen.evolution.v1", "diarizen.evolution.v1.bf16"}) and round_model.get("model_artifact"):
                             improve_exp.execution_env["SURE_PARENT_MODEL_ARTIFACT"] = round_model["model_artifact"]
                         else:
                             improve_exp.execution_env.pop("SURE_PARENT_MODEL_ARTIFACT", None)
@@ -1742,6 +1774,8 @@ class SureMasterPlayground(BasePlayground):
                         ),
                         metric={"name": self.task_card.primary_metric, "direction": "lower" if self.task_card.is_lower_better else "higher"},
                         baseline_score=self.baseline_score,
+                        parent_snapshot=getattr(self, "_xlab_round_parent", {}),
+                        evaluation_context={"memory_scope": getattr(self, "_xlab_round_parent", {}).get("memory_scope", {})},
                         rung_names=sorted({rung.name for candidate in candidates for rung in candidate.rungs}),
                         current_best={
                             "score": self.best_score,
@@ -1758,6 +1792,8 @@ class SureMasterPlayground(BasePlayground):
                         "summary_digest": summary.summary_digest,
                         "summary": asdict(summary),
                         "baseline_score": round_result.baseline_score,
+                        "parent_snapshot": round_result.parent_snapshot,
+                        "evaluation_context": round_result.evaluation_context,
                         "metric": round_result.metric,
                         "execution_contract": dict(self.sure_config.get("execution_contract") or {}),
                         "evaluation_scope": {"search": self._role_paths(), "manifest": self._execution_env().get("SURE_EVAL_MANIFEST")},

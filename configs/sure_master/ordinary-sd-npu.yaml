@@ -247,6 +247,15 @@ xlab:
   enabled: true
   idea_generation:
     max_attempts: 8
+    engine: native
+    feedback_kind: candidate_outcome
+    refinement: current_best
+    allow_auxiliary_experiments: false
+    mcts:
+      max_iterations: 64
+      max_depth: 3
+      branching_factor: 3
+      exploration_constant: 1.2
   idea_provider:
     enabled: true
     preflight_command:

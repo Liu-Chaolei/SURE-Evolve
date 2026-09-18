@@ -245,7 +245,7 @@ def sd_trainer_class(native):
         # Native loss, dual optimizers, clipping, validation and early-stop comparison
         # are retained. State persistence and loop cursors are owned by this class.
         def training_step(self, batch, batch_idx):
-            if self.sure_contract["training"].get("recipe") == "diarizen.evolution.v1":
+            if self.sure_contract["training"].get("recipe") in {"diarizen.evolution.v1", "diarizen.evolution.v1.bf16"}:
                 from .sd_evolution import training_step
                 return training_step(self, batch, batch_idx, native.training_step)
             return super().training_step(batch, batch_idx)
@@ -374,9 +374,18 @@ def sd_trainer_class(native):
                         loss = self.training_step(batch, index)
                     if loss is None or not torch.isfinite(loss["Loss"]).all():
                         raise FloatingPointError("Nonfinite DiariZen training loss")
+                    if contract.get("precision") == "bf16" and not getattr(self, "sure_precision_verified", False):
+                        raise RuntimeError("SD BF16 autocast did not produce a BF16 linear output")
+                    if self.accelerator.is_main_process and (index == 0 or (progress["updates"] + 1) % 20 == 0):
+                        atomic_json(output / "live_progress.json", {
+                            "epoch": epoch + 1, "batch": index + 1, "updates": progress["updates"] + 1,
+                            "batch_size_per_rank": int(batch["xs"].shape[0]),
+                            "global_batch_size": int(batch["xs"].shape[0]) * self.accelerator.num_processes,
+                            "precision": contract["precision"], "loss": float(loss["Loss"].item()),
+                            "time": time.time()})
                     if self.accelerator.optimizer_step_was_skipped:
                         raise RuntimeError(
-                            "Optimizer skipped an update under the fixed FP32 protocol"
+                            "Optimizer skipped an update under the fixed FP32/BF16 protocol"
                         )
                     for scheduler in getattr(self, "sure_schedulers", {}).values():
                         scheduler.step()

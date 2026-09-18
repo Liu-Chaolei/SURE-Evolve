@@ -60,8 +60,15 @@ def check_config(config: dict, *, check_model: bool = True) -> dict:
     report = adapter.preflight(sure)
     xlab = config.get("xlab", {})
     if xlab.get("enabled"):
+        from playground.sure_master.core.contracts import validate_generation_policy
+        validate_generation_policy(xlab.get("idea_generation", {}))
         provider = xlab["idea_provider"]
         env = {**os.environ, **provider.get("environment", {})}
+        native = xlab.get("idea_generation", {}).get("engine") == "native"
+        if native and env.get("XLAB_SURE_FLOW_FIRST") == "1":
+            raise ValueError("native engine conflicts with XLAB_SURE_FLOW_FIRST=1")
+        if native and env.get("XLAB_SURE_EVIDENCE_JSON"):
+            raise ValueError("native retrieval requires the complete survey resource bundle, not frozen evidence excerpts")
         if not env.get("OPENAI_API_KEY"):
             raise ValueError("XLab worker needs OPENAI_API_KEY via its deployment environment")
         from playground.sure_master.core.ablation import policy

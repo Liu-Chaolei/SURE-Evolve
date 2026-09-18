@@ -102,10 +102,12 @@ def validate_training_config(
             elif type(value) is not int or value < (0 if key == "num_warmup_updates" else 1):
                 raise ValueError(f"Invalid F5 training value: {key}")
             expected[key] = value
-    elif adapter == "sd.diarizen" and config.get("recipe") == "diarizen.evolution.v1":
+    elif adapter == "sd.diarizen" and config.get("recipe") in {"diarizen.evolution.v1", "diarizen.evolution.v1.bf16"}:
         from ..runtime.sd_evolution import VARIABLE
         expected = deepcopy(SD_TRAINING)
-        expected["recipe"] = "diarizen.evolution.v1"
+        expected["recipe"] = config["recipe"]
+        if config["recipe"] == "diarizen.evolution.v1.bf16":
+            expected["batch_size"] = 48
         for key in VARIABLE:
             value = config.get(key, {} if key == "candidate_options" else expected.get(key))
             if key.startswith("learning_rate") and (type(value) not in (int, float) or not math.isfinite(value) or value <= 0):
@@ -141,7 +143,9 @@ def validate_training_config(
 
 
 def training_precision(adapter: str, training: dict) -> str:
-    return "bf16" if adapter == "tts.f5tts" and training.get("recipe") == F5_BF16_RECIPE else "fp32"
+    bf16 = (adapter == "tts.f5tts" and training.get("recipe") == F5_BF16_RECIPE) or (
+        adapter == "sd.diarizen" and training.get("recipe") == "diarizen.evolution.v1.bf16")
+    return "bf16" if bf16 else "fp32"
 
 
 def validate_contract_precision(contract: dict) -> None:

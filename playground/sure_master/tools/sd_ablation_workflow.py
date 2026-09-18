@@ -16,7 +16,17 @@ from playground.sure_master.core.utils.slurm import atomic_json
 from playground.sure_master.core.utils.slurm_allocations import process_identity
 
 
+def active_groups(root: Path) -> list[str]:
+    control = root / "control.json"
+    groups = json.loads(control.read_text()).get("active_groups", list("ABCD")) if control.exists() else list("ABCD")
+    if not isinstance(groups, list) or not groups or len(groups) != len(set(groups)) or any(g not in "ABCD" or len(g) != 1 for g in groups):
+        raise ValueError("active_groups must be a nonempty unique subset of A/B/C/D")
+    return groups
+
+
 def run_arm(root: Path, stage: str) -> None:
+    if stage != "baseline" and stage not in active_groups(root):
+        raise RuntimeError(f"SD arm {stage} has been cancelled")
     from playground.sure_master.core.playground import SureMasterPlayground
     directory = root / stage
     configuration = directory / "deployment.yaml"
@@ -62,17 +72,19 @@ def run_arm(root: Path, stage: str) -> None:
                                "workspace": exp.workspace_path})
     task = (root / "task.md").read_text()
     result = playground.run(task)
+    atomic_json(directory / "last_result.json", result)
     expected = "baseline_ready" if stage == "baseline" else "completed"
     if result.get("status") != expected:
-        raise RuntimeError(f"SD {stage} did not complete: {result.get('status')}")
+        raise RuntimeError(f"SD {stage} did not complete: {result.get('status')}: {result.get('error', result.get('reason', ''))}")
     atomic_json(directory / "result.json", result)
 
 
 def holdout(root: Path):
     from playground.sure_master.core.playground import SureMasterPlayground
-    if not all((root / group / "result.json").is_file() for group in "ABCD"):
-        raise ValueError("All four groups must freeze selection before holdout")
-    for group in "ABCD":
+    groups = active_groups(root)
+    if not all((root / group / "result.json").is_file() for group in groups):
+        raise ValueError("All active groups must freeze selection before holdout")
+    for group in groups:
         target = root / group / "holdout.json"
         if target.exists():
             continue
@@ -112,7 +124,7 @@ def supervise(root: Path):
         state = json.loads(state_path.read_text()) if state_path.exists() else {"stages": {}}
         def launch(stage):
             entry = state["stages"].get(stage, {})
-            done = all((root / g / "holdout.json").exists() for g in "ABCD") if stage == "holdout" else (root / stage / "result.json").exists()
+            done = all((root / g / "holdout.json").exists() for g in active_groups(root)) if stage == "holdout" else (root / stage / "result.json").exists()
             if done:
                 entry["status"] = "completed"
             elif entry.get("pid") and process_identity(entry["pid"]) == entry.get("identity"):
@@ -133,11 +145,13 @@ def supervise(root: Path):
             atomic_json(state_path, state)
             return entry["status"]
         while True:
+            for group in set("ABCD") - set(active_groups(root)):
+                state["stages"][group] = {"status": "cancelled", "reason": "disabled in control.json"}
             baseline = launch("baseline")
             if baseline == "failed":
                 raise RuntimeError("Baseline controller failed; inspect baseline/controller.log")
             if baseline == "completed":
-                statuses = [launch(group) for group in "ABCD"]
+                statuses = [launch(group) for group in active_groups(root)]
                 if "failed" in statuses:
                     raise RuntimeError("An SD arm failed; inspect workflow.json and its controller.log")
                 if all(status == "completed" for status in statuses):

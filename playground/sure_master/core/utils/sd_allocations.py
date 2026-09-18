@@ -15,8 +15,23 @@ def validate_jobs(settings: dict) -> list[str]:
     jobs = [str(job) for job in settings.get("existing_allocations", [])]
     if not jobs or len(jobs) != len(set(jobs)) or not set(jobs) <= AUTHORIZED:
         raise ValueError("SD allocation pool contains a job outside the authorized whitelist")
-    if settings.get("allocation_slots_per_job", 1) != 1 or settings.get("allocation_overlap", False):
-        raise ValueError("SD requires one exclusive candidate per allocation")
+    slots = settings.get("allocation_slots_per_job", 1)
+    if type(slots) is not int or slots not in {1, 2} or settings.get("allocation_overlap", False):
+        raise ValueError("SD supports one or two exclusive four-card slots per allocation")
+    if slots == 2:
+        if len(jobs) > 4:
+            raise ValueError("Eight-way SD execution is limited to four allocations")
+        if type(settings.get("allocation_cpus")) is not int or not 1 <= settings["allocation_cpus"] <= 32:
+            raise ValueError("Two SD slots require at most 32 CPUs per step")
+        memory = str(settings.get("allocation_step_memory", ""))
+        match = re.fullmatch(r"([1-9][0-9]*)G", memory, re.IGNORECASE)
+        if not match or int(match[1]) > 128:
+            raise ValueError("Two SD slots require at most 128G per step")
+        for profile in settings.get("resource_profiles", {}).values():
+            if int(profile.get("cpu", 0)) > 32:
+                raise ValueError("Candidate CPU profile exceeds its slot")
+            if profile.get("memory") != memory:
+                raise ValueError("Candidate memory profile must match its slot")
     return jobs
 
 

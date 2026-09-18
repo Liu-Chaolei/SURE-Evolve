@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import json
 import shutil
 from pathlib import Path
 import yaml
@@ -66,7 +67,8 @@ def freeze(config_path: Path, output: Path) -> tuple[Path, Path]:
         validate_resources(env)
         config["sure"]["execution_contract"]["data_fingerprint"] = prepared["fingerprint"]
         sources = config["sure"]["base_models"][config["sure"]["task_id"]]["source_paths"]
-        frozen_icefall = output / "icefall_source"
+        frozen_icefall = (Path(sources["root"]) if config.get("freeze", {}).get("reuse_icefall")
+                          else output / "icefall_source")
         recipe = frozen_icefall / "egs/tedlium3/ASR/zipformer"
         if not frozen_icefall.exists():
             shutil.copytree(Path(sources["root"]) / "icefall", frozen_icefall / "icefall",

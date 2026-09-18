@@ -58,6 +58,31 @@ class XlabIdeaClient:
         relative = portable_path(receipt_path, self.workspace_root)
         return self.workspace_root / relative
 
+    def bind_native_policy(self, generation_policy: dict[str, Any]) -> str:
+        """Bind local replay to the same native code, models and immutable resources."""
+        checked = subprocess.run(
+            [*self.command, "--check-native"], input=canonical_json({"generation_policy": generation_policy}) + "\n",
+            capture_output=True, text=True, check=False, timeout=min(self.timeout_seconds, 300),
+            env={**os.environ, **self.environment},
+        )
+        if checked.returncode:
+            raise XlabIdeaClientError("Native XLab preflight failed: " + checked.stdout[-2000:])
+        result = json.loads(checked.stdout)
+        identity = result.get("identity")
+        if (result.get("status") != "ready" or result.get("profile") != "xlab.sure.native.v1"
+                or not isinstance(identity, str) or not identity.startswith("sha256:")):
+            raise XlabIdeaClientError("Native XLab preflight returned invalid identity")
+        if self.workspace_root is None:
+            raise XlabIdeaClientError("Native identity requires a persistent workspace")
+        path = self.workspace_root / "artifacts/xlab_native_identity.json"
+        if path.exists():
+            if json.loads(path.read_text()).get("identity") != identity:
+                raise XlabIdeaClientError("Native code, model or resource identity changed; use a new deployment")
+        else:
+            from .utils.slurm import atomic_json
+            atomic_json(path, {"profile": result["profile"], "identity": identity})
+        return identity
+
     @staticmethod
     def _validate_operation(operation_id: str, value: Any) -> dict[str, Any]:
         if not isinstance(value, dict):
