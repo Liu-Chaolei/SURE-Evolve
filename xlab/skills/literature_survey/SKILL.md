@@ -5,6 +5,24 @@ description: Generate a readable, structured, and citation-traceable literature 
 
 # Literature survey
 
+## Local tiered-corpus mode
+
+`run_survey_phase.py corpus-synthesize --pipeline-dir <corpus-pipeline-run>`
+is an explicit local-only full-survey path. It reads validated basic/deep
+extractions and the frozen core selection, retrieves bounded evidence per
+section, and runs outline, drafting, two review/revision rounds and citation
+audit. Its manifest identifies `mode: corpus_grounded_local`; it does not claim
+to be the original integrated engine. `--pilot` produces two validated sections
+per domain for deployment acceptance, not completed full surveys.
+
+This mode uses the same authenticated local corpus service for every role and
+the service's actual tokenizer/context budget. It has no external model or
+Semantic Scholar fallback. Full surveys target 8,000–12,000 English body words;
+basic evidence supports background and taxonomy, while numerical comparisons
+require deep evidence. All cited IDs and exact quotes must resolve to supplied
+extractions. The original workflow and its configuration below remain available
+for their separately selected inputs.
+
 Use this skill to turn a research topic plus a `knowledge_graph` run into durable survey artifacts for downstream research planning. The canonical command is `/xlab write-literature-survey`. The runtime is self-contained in this package under `scripts/`; do not call an external Xcientist checkout or write outside the project/run workspace.
 
 Product path: `/xlab collect-papers` gathers papers, `/xlab build-knowledge-graph` builds the current graph, `/xlab write-literature-survey` produces the survey and citation trace, `/xlab generate-research-ideas` consumes the current survey, and `/xlab check-idea-novelty` checks proposed ideas. Use `/xlab run-research-workflow` for the composed end-to-end path.

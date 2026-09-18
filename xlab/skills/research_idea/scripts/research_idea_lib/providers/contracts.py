@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
-from typing import Literal, Protocol, TypeAlias
+from copy import deepcopy
+from dataclasses import dataclass, field, fields
+from typing import Callable, Literal, Protocol, TypeAlias
 
 
 JsonValue: TypeAlias = (
@@ -21,6 +22,19 @@ class ProviderRequest:
     user_prompt: str = field(repr=False)
     output_kind: OutputKind = "json"
     temperature: float | None = None
+    validation_profile: str | None = None
+    response_validator: Callable[["ProviderResult"], object] | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.response_validator is not None and (
+            not callable(self.response_validator) or not isinstance(self.validation_profile, str) or not self.validation_profile.strip()
+        ):
+            raise ValueError("A response validator requires a stable validation_profile")
+
+    def cache_payload(self) -> dict[str, object]:
+        return {item.name: deepcopy(getattr(self, item.name)) for item in fields(self)
+                if item.name != "response_validator"
+                and not (item.name == "validation_profile" and self.validation_profile is None)}
 
     @property
     def input_digest(self) -> str:
@@ -44,9 +58,10 @@ class ProviderTrace:
     attempts: int
     status: Literal["success", "error"]
     error_code: str | None = None
+    routing: dict[str, JsonValue] | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result = {
             "provider": self.provider,
             "operation": self.operation,
             "input_digest": self.input_digest,
@@ -56,6 +71,9 @@ class ProviderTrace:
             "status": self.status,
             "error_code": self.error_code,
         }
+        if self.routing is not None:
+            result["routing"] = deepcopy(self.routing)
+        return result
 
 
 @dataclass(frozen=True)
@@ -78,6 +96,19 @@ class ProviderError(RuntimeError):
 
 class ProviderExhaustedError(ProviderError):
     pass
+
+
+class ProviderRecoveryBlockedError(ValueError):
+    """Recovery needs reconciliation; never a scientific branch rejection."""
+
+
+class ProviderContractError(ProviderExhaustedError, ValueError):
+    """No route returned a usable response; retain semantic repair feedback."""
+
+    def __init__(self, message: str, *, trace: ProviderTrace, previous_draft=None, validation_issues=None) -> None:
+        super().__init__(message, trace=trace)
+        self.previous_draft = deepcopy(previous_draft)
+        self.validation_issues = deepcopy(validation_issues or [])
 
 
 def structured_input_digest(value: JsonValue) -> str:

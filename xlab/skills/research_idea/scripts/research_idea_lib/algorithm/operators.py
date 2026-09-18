@@ -14,7 +14,6 @@ from .skills import OperatorSkill, load_operator_skill_catalog
 from .tastes import Taste
 
 MIN_COMPONENTS = 1
-MAX_COMPONENTS = 5
 MAX_EDITS = 6
 PRODUCTION_ADAPTIVE_SUCCESS_THRESHOLD = 0.7
 ScopeKind = Literal[
@@ -278,9 +277,13 @@ class OperatorPlanner:
         taste: Taste,
         rng: random.Random,
     ) -> tuple[EditPlan, ...]:
-        candidates = self.select(defects, limit=limit, profile=profile, taste=taste, rng=rng)
+        requested = tuple(defects) or ("unexplored_gap",)
+        candidates = self.select(requested, limit=limit, profile=profile, taste=taste, rng=rng)
         return tuple(
-            candidate.operator.plan(tuple(defects), exploratory=candidate.exploratory)
+            candidate.operator.plan(
+                requested,
+                exploratory=candidate.exploratory or candidate.defect_score == 0,
+            )
             for candidate in candidates
         )
 

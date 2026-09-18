@@ -22,6 +22,7 @@ import {
 } from "./command-completions.ts";
 import { formatXlabDashboard } from "./dashboard.ts";
 import { prepareXlabEnvironment } from "./environment.ts";
+import { handleNativeAsrCommand } from "./experiment/asr-commands.ts";
 import { createExperimentStageDrivers, type ExperimentDriverPublication } from "./experiment/drivers.ts";
 import { bindXlabExperimentIdea, type XlabIdeaBinding } from "./experiment/idea-binding.ts";
 import {
@@ -2348,6 +2349,12 @@ export function createXlabExtension(): ExtensionFactory {
 				const first = splitFirstArgument(args);
 				const subcommand = first.token ?? "show-help";
 				const remainder = first.rest;
+				try {
+					if (await handleNativeAsrCommand(subcommand, remainder, ctx)) return;
+				} catch (error) {
+					ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+					return;
+				}
 				const remainderTokens = parseXlabArgumentTokens(remainder);
 				const requireArity = (minimum: number, maximum: number, usage: string): boolean => {
 					if (!remainderTokens || remainderTokens.length < minimum || remainderTokens.length > maximum) {

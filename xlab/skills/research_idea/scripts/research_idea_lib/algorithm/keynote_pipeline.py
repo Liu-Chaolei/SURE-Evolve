@@ -17,6 +17,7 @@ from ..providers.contracts import (
     ProviderUsage,
 )
 from ..resources.retrieval import CitationRegistry, OutcomeHit
+from ..providers.routing import trace_matches_requested_model
 from .prompts.keynote_ops import (
     KEYNOTE_GROUP_SUMMARY_PROMPT,
     KEYNOTE_SCORING_PROMPT,
@@ -413,6 +414,15 @@ def _complete(
     prompt: str,
     temperature: float,
 ) -> ProviderResult:
+    def validate_response(result: ProviderResult) -> None:
+        if operation == KEYNOTE_SCORE_OPERATION:
+            _score_output(result)
+        else:
+            fields = {"summary", "insight"} if operation == KEYNOTE_COMPRESSION_OPERATION else {"summary"}
+            value = _exact_output(result, fields)
+            for name in fields:
+                _nonempty_text(value[name], name)
+
     request = ProviderRequest(
         operation=operation,
         model=model,
@@ -426,6 +436,8 @@ def _complete(
         ),
         output_kind="json",
         temperature=temperature,
+        validation_profile="xlab.keynote.response.v1:" + operation,
+        response_validator=validate_response,
     )
     result = provider.complete(request)
     if not isinstance(result, ProviderResult):
@@ -438,7 +450,7 @@ def _complete(
         or trace.operation != operation
         or trace.input_digest != request.input_digest
         or trace.output_kind != "json"
-        or trace.model != model
+        or not trace_matches_requested_model(trace, model)
         or trace.status != "success"
         or isinstance(trace.attempts, bool)
         or not isinstance(trace.attempts, int)
@@ -453,13 +465,139 @@ def _complete(
 def _score_output(result: ProviderResult) -> int:
     payload = _exact_output(result, {"score"})
     score = payload["score"]
+    if getattr(getattr(result, "trace", None), "model", "").startswith("glm-") and isinstance(score, str):
+        try:
+            score = json.loads(score)
+        except json.JSONDecodeError as error:
+            raise KeynotePipelineError("GLM keynote score must encode an integer from 0 to 100") from error
     if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 100:
         raise KeynotePipelineError("keynote score must be an integer from 0 to 100")
     return score
 
 
+def _glm_field_projection(payload, fields):
+    """Read explicit GLM fields, retaining the untouched wire result for audit."""
+    if not isinstance(payload, dict):
+        return payload
+    for _ in range(3):
+        if set(payload) != {"answer"}:
+            break
+        wrapped = payload["answer"]
+        if isinstance(wrapped, str):
+            try:
+                decoded = json.loads(wrapped)
+            except json.JSONDecodeError:
+                break
+            wrapped = decoded if isinstance(decoded, dict) else wrapped
+        if not isinstance(wrapped, dict):
+            break
+        payload = wrapped
+    if fields == {"summary", "insight"} and set(payload) == {"answer", "insight"}:
+        # GLM sometimes names the summary `answer` while keeping the separate
+        # insight explicit. Preserve both strings; never synthesize an insight.
+        if isinstance(payload["answer"], str) and isinstance(payload["insight"], str):
+            return {"summary": payload["answer"], "insight": payload["insight"]}
+    if not fields.issubset(payload):
+        return payload
+    projected = {key: deepcopy(payload[key]) for key in fields}
+    if "answer" not in payload:
+        return projected
+    alternate = payload["answer"]
+    if isinstance(alternate, str):
+        try:
+            decoded = json.loads(alternate)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, dict):
+            alternate = decoded
+    if fields == {"score"} and isinstance(alternate, str):
+        try:
+            alternate = json.loads(alternate)
+        except json.JSONDecodeError:
+            # Prose accompanying an explicit score is explanatory metadata.
+            return projected
+    if len(fields) == 1 and not isinstance(alternate, dict):
+        alternate = {next(iter(fields)): alternate}
+    if isinstance(alternate, dict):
+        for key in fields.intersection(alternate):
+            actual, other = projected[key], alternate[key]
+            if key == "score" and isinstance(actual, str):
+                try:
+                    actual = json.loads(actual)
+                except json.JSONDecodeError:
+                    pass
+            if type(actual) is not type(other) or actual != other:
+                raise KeynotePipelineError(f"GLM answer conflicts with explicit {key}")
+    return projected
+
+
 def _exact_output(result: ProviderResult, fields: set[str]) -> dict[str, JsonValue]:
+    def without_annotations(value):
+        if not isinstance(value, dict):
+            return value
+        return {key: child for key, child in value.items() if not (
+            key in {"rationale", "reason", "explanation"} - fields and isinstance(child, str)
+        )}
+
+    # Optional prose is retained in the provider cache, not used as a score or
+    # capsule field. Missing fields, conflicting answers and unknown keys fail.
     payload = result.json_value
+    if getattr(getattr(result, "trace", None), "model", "").startswith("glm-"):
+        raw_text = getattr(result, "text", "").strip()
+        if raw_text.startswith("{"):
+            # Some GLM responses concatenate an explanatory JSON object and the
+            # requested result. The transport extracted only the first object.
+            # Recover explicit fields only when the entire text is object JSON.
+            decoder = json.JSONDecoder()
+            objects = []
+            remaining = raw_text
+            while remaining and len(objects) < 4:
+                try:
+                    item, end = decoder.raw_decode(remaining)
+                except json.JSONDecodeError:
+                    break
+                if not isinstance(item, dict):
+                    break
+                objects.append(item)
+                remaining = remaining[end:].strip()
+            if not remaining and len(objects) > 1:
+                if objects[0] != payload:
+                    raise KeynotePipelineError("GLM raw objects disagree with parsed provider result")
+                merged = {}
+                for item in objects:
+                    for key, value in item.items():
+                        if key in merged and (type(merged[key]) is not type(value) or merged[key] != value):
+                            raise KeynotePipelineError(f"GLM JSON objects contain conflicting {key}")
+                        merged[key] = deepcopy(value)
+                payload = merged
+        payload = _glm_field_projection(payload, fields)
+    if isinstance(payload, dict) and set(payload) == fields | {"answer"}:
+        expected = {key: payload[key] for key in fields}
+        wrapped = without_annotations(payload["answer"])
+        if fields == {"score"} and isinstance(wrapped, str):
+            try:
+                wrapped = json.loads(wrapped)
+            except json.JSONDecodeError:
+                pass
+        if len(fields) == 1 and not isinstance(wrapped, dict):
+            field = next(iter(fields))
+            if type(wrapped) is type(expected[field]):
+                wrapped = {field: wrapped}
+        if isinstance(wrapped, dict) and set(wrapped) == fields and all(
+            type(wrapped[key]) is type(expected[key]) and wrapped[key] == expected[key] for key in fields
+        ):
+            payload = expected
+    if isinstance(payload, dict) and set(payload) == {"answer"}:
+        wrapped = without_annotations(payload["answer"])
+        if isinstance(wrapped, dict):
+            payload = deepcopy(wrapped)
+        elif len(fields) == 1:
+            payload = {next(iter(fields)): wrapped}
+        if fields == {"score"} and isinstance(payload.get("score"), str):
+            try:
+                payload["score"] = json.loads(payload["score"])
+            except json.JSONDecodeError as error:
+                raise KeynotePipelineError("wrapped keynote score must encode an integer from 0 to 100") from error
     if not isinstance(payload, dict) or set(payload) != fields:
         expected = ", ".join(sorted(fields))
         raise KeynotePipelineError(f"provider output must contain exactly: {expected}")

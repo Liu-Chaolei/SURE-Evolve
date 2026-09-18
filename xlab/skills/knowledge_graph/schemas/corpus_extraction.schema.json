@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Grounded tiered corpus extraction",
+  "type": "object",
+  "required": ["schema_version", "signature", "paper_id", "sha256", "extraction_level", "facts", "provenance", "quality"],
+  "properties": {
+    "schema_version": {"const": "xlab.paper_extraction.v3"},
+    "signature": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "extraction_level": {"enum": ["basic", "deep"]},
+    "facts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["kind", "summary", "quote", "span"],
+        "properties": {
+          "kind": {"enum": ["problem", "method", "core", "baseline", "dataset", "result", "limitation", "innovation", "future_work"]},
+          "quote": {"type": "string", "minLength": 12},
+          "span": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer", "minimum": 0}}
+        }
+      }
+    },
+    "quality": {"type": "object", "required": ["grounded", "passes", "input_truncated"]}
+  }
+}

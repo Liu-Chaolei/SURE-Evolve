@@ -12,7 +12,7 @@ from .config import RuntimeConfig, load_runtime_config
 
 @dataclass
 class IdeaRequest:
-    survey_path: Path
+    survey_path: Path | None
     topic: str = ""
     mature_idea: str = ""
     refinement_scope: str = ""
@@ -21,11 +21,13 @@ class IdeaRequest:
     resume: bool = False
     raw_args: str = ""
     compatibility_warnings: list[str] = field(default_factory=list)
+    research_policy: dict[str, Any] = field(default_factory=dict)
+    task_context: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self, cwd: Path) -> dict[str, Any]:
         return {
             "schema_version": "xlab.research_idea.request.v1",
-            "survey_path": _relative(cwd, self.survey_path),
+            "survey_path": _relative(cwd, self.survey_path) if self.survey_path else None,
             "topic": self.topic,
             "mature_idea": self.mature_idea,
             "refinement_scope": self.refinement_scope,
@@ -33,6 +35,8 @@ class IdeaRequest:
             "experiment_feedback": self.experiment_feedback,
             "resume": self.resume,
             "compatibility_warnings": self.compatibility_warnings,
+            "research_policy": self.research_policy,
+            "task_context": self.task_context,
         }
 
 
@@ -44,18 +48,33 @@ def _relative(cwd: Path, path: Path) -> str:
 
 
 def normalize_key_value_tokens(tokens: list[str]) -> list[str]:
+    value_flags = {"--survey", "--topic", "--mature-idea", "--refinement-scope",
+                   "--discussion", "--experiment-feedback"}
     normalized: list[str] = []
-    for token in tokens:
-        if token.startswith("--") or "=" not in token:
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            normalized.extend(tokens[index:])
+            break
+        if token in value_flags and index + 1 < len(tokens):
+            # Attach the value so argparse preserves text beginning with '--'.
+            normalized.append(token + "=" + tokens[index + 1])
+            index += 2
+            continue
+        if not token.startswith("--") and "=" in token:
+            key, value = token.split("=", 1)
+            flag = "--" + key.strip().replace("_", "-")
+            if flag in value_flags:
+                normalized.append(flag + "=" + value)
+            elif flag == "--resume":
+                if value.strip().lower() in {"1", "true", "yes", "on"}:
+                    normalized.append(flag)
+            else:
+                raise ValueError(f"Unsupported research_idea argument name: {key}")
+        else:
             normalized.append(token)
-            continue
-        key, value = token.split("=", 1)
-        flag = "--" + key.strip().replace("_", "-")
-        if flag == "--resume":
-            if value.strip().lower() in {"1", "true", "yes", "on"}:
-                normalized.append(flag)
-            continue
-        normalized.extend([flag, value])
+        index += 1
     return normalized
 
 
@@ -116,7 +135,7 @@ def compatibility_warnings(namespace: argparse.Namespace, runtime: RuntimeConfig
 def request_from_json(value: dict[str, Any], cwd: Path) -> IdeaRequest:
     survey_raw = str(value.get("survey_path") or "")
     survey_path = resolve_project_path(cwd, survey_raw)
-    if survey_path is None:
+    if survey_path is None and value.get("research_policy", {}).get("evidence_mode") != "task_only":
         raise ValueError("request.json is missing survey_path.")
     return IdeaRequest(
         survey_path=survey_path,
@@ -127,6 +146,8 @@ def request_from_json(value: dict[str, Any], cwd: Path) -> IdeaRequest:
         experiment_feedback=str(value.get("experiment_feedback") or ""),
         resume=bool(value.get("resume")),
         raw_args=str(value.get("raw_args") or ""),
+        research_policy=dict(value.get("research_policy") or {}),
+        task_context=dict(value.get("task_context") or {}),
         compatibility_warnings=[str(item) for item in value.get("compatibility_warnings", []) if item is not None]
         if isinstance(value.get("compatibility_warnings"), list)
         else [],

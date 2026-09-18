@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any, Mapping, Sequence
 
 from ..checkpoints import stage_completed, write_checkpoint
 from ..common import read_json, run_paths, write_portable_json
 from ..config import RuntimeConfig
 from ..inputs import IdeaRequest
+from ..materialization_validation import align_public_materialization, validate_materialization_identity, materialization_contract
+from ..research_policy import PolicyProvider, ResearchPolicy
+from ..task_context import TaskContextRepository
 from ..providers import (
     JsonValue,
     Provider,
@@ -20,6 +24,7 @@ from ..providers import (
     ProviderResult,
     ProviderTrace,
 )
+from ..providers.routing import routing_policy_from_environment
 from ..research_idea_spec import (
     ALGORITHM_ID,
     ALGORITHM_SPEC_VERSION,
@@ -53,9 +58,11 @@ from .contracts import (
     RolloutBlockerRecord,
 )
 from .fusion import CANONICAL_MODES, FusionRequest, fuse_five_modes
-from .keynote_pipeline import KeynotePipelineRequest, KeynotePipelineResult, run_keynote_pipeline
+from .keynote_pipeline import KeynotePipelineRequest, KeynotePipelineResult, run_keynote_pipeline, _glm_field_projection
+from .response_projection import unwrap_answer_object
+from .root_identity import inherit_root_identity, validate_root_identity
 from .memory import MemoryState
-from .operator_grounding import OperatorGroundingEvaluator
+from .operator_grounding import OperatorGroundingEvaluator, OperatorComponentRetrieval
 from .prompts import (
     ADVANCED_ANALYSIS_PROMPT,
     RE_ANALYSIS_REPLAN_PROMPT,
@@ -73,6 +80,7 @@ from .provider_adapter import (
     ProviderAdapter,
 )
 from .search import MCTSEngine, SearchConfig, SearchResult
+from .mode_migration import compatible_mode
 from .spec import SPEC_VERSION
 from .workflow import (
     OP_ANALYSIS,
@@ -149,11 +157,17 @@ class GenericWorkflowProvider:
             raise ValueError(f"unsupported workflow provider operation: {operation.name}")
         model = str(getattr(self._runtime, model_field))
         structured_input = _json_mapping(operation.structured_input, operation.name)
+        prompt = _workflow_prompt(operation.name, structured_input)
+        if operation.name == OP_MATERIALIZATION and 'references' in structured_input:
+            contract = materialization_contract(
+                {'idea':structured_input['fusion'], 'evidence_ids':structured_input['evidence_ids']},
+                structured_input['evidence'], structured_input['references'])
+            prompt += '\nAuthoritative materialization_contract; copy these values exactly:\n' + json.dumps(contract, ensure_ascii=False)
         request = ProviderRequest(
             operation=operation.name,
             model=model,
             structured_input=structured_input,
-            system_prompt=_workflow_prompt(operation.name, structured_input),
+            system_prompt=prompt,
             user_prompt=json.dumps(
                 structured_input,
                 ensure_ascii=False,
@@ -161,6 +175,8 @@ class GenericWorkflowProvider:
                 separators=(",", ":"),
             ),
             output_kind="json",
+            validation_profile="xlab.workflow.response.v1:" + operation.name,
+            response_validator=lambda result: _validate_workflow_response(operation, result),
         )
         result = self._provider.complete(request)
         if not isinstance(result.json_value, dict):
@@ -172,8 +188,78 @@ class GenericWorkflowProvider:
                 input_tokens=result.usage.input_tokens,
                 output_tokens=result.usage.output_tokens,
             ),
-            metadata={"model": model, "provider_trace": result.trace.to_dict()},
+            metadata={"model": result.trace.model, "requested_model": model, "provider_trace": result.trace.to_dict()},
         )
+
+
+def _validate_workflow_response(operation: ProviderOperation, result: ProviderResult) -> None:
+    if not isinstance(result.json_value, dict):
+        raise ValueError('Workflow response must be a JSON object')
+    value, _ = unwrap_answer_object(result.json_value)
+    data = operation.structured_input
+    scalar = {OP_BACKGROUND: 'background', OP_QUERY: 'query'}.get(operation.name)
+    if scalar:
+        if set(value) == {'answer'} and isinstance(value['answer'], str):
+            value = {scalar: value['answer']}
+        if not isinstance(value.get(scalar), str) or not value[scalar].strip():
+            raise ValueError(f'{scalar} must be a nonempty string')
+    elif operation.name == OP_RANKING:
+        ids = value.get('evidence_ids', value.get('answer') if set(value) == {'answer'} else None)
+        expected = [item['evidence_id'] for item in data['evidence']]
+        if (not isinstance(ids, list) or any(not isinstance(item, str) for item in ids)
+                or len(ids) != len(expected) or set(ids) != set(expected)):
+            raise ValueError('Ranking must contain every supplied evidence ID exactly once')
+    elif operation.name in {OP_ANALYSIS, OP_REPLAN}:
+        field = 'analysis' if operation.name == OP_ANALYSIS else 'replan'
+        if not isinstance(value.get(field), Mapping):
+            raise ValueError(f'Workflow response requires a {field} object')
+        root = value.get('root_idea') if field == 'analysis' else value['replan'].get('root_idea')
+        mature = data.get('mature_idea')
+        if root is not None:
+            if not isinstance(root, Mapping):
+                raise ValueError('root_idea must be an object')
+            if isinstance(mature, Mapping) and mature:
+                root, _ = inherit_root_identity(mature, root, context='provider.root_idea')
+                validate_root_identity(mature, root, context='provider.root_idea')
+            _idea_state(root)
+        elif not mature:
+            raise ValueError('Non-mature research requires a complete root_idea')
+    elif operation.name == OP_MATERIALIZATION:
+        idea = value.get('idea_result')
+        if not isinstance(idea, Mapping):
+            raise ValueError('Materialization requires an idea_result object')
+        fusion_result = {'idea':data['fusion'], 'evidence_ids':data['evidence_ids']}
+        validate_materialization_identity(idea, fusion_result)
+        if 'references' in data:
+            align_public_materialization(deepcopy(dict(idea)), fusion_result, data['evidence'], data['references'])
+        for name in _REQUIRED_RESULT_TEXT:
+            if not isinstance(idea.get(name), str) or not idea[name].strip():
+                raise ValueError(f'Materialization requires nonempty {name}')
+        task_only = data.get('research_policy', {}).get('evidence_mode') == 'task_only'
+        for name in _REQUIRED_RESULT_LISTS:
+            value_list = idea.get(name)
+            if not isinstance(value_list, list) or (not value_list and not (task_only and name == 'reference_papers')):
+                raise ValueError(f'Materialization requires a valid {name} list')
+        if stable_signature(idea['components']) != stable_signature(data['fusion']['components']):
+            raise ValueError('Materialization must preserve exact fusion.components')
+        if idea.get('source_modes') != data['source_modes']:
+            raise ValueError('Materialization must preserve source_modes')
+        for name in ['evidence_ids', 'reference_ids', 'root_domains']:
+            ids = idea.get(name)
+            if (not isinstance(ids, list) or any(not isinstance(v, str) or not v.strip() for v in ids)
+                    or len(ids) != len(set(ids))):
+                raise ValueError(f'Materialization requires a valid {name} list')
+        if not idea['evidence_ids'] or not set(idea['evidence_ids']).issubset(data['evidence_ids']):
+            raise ValueError('Materialization contains missing or unknown evidence IDs')
+        papers = {paper for item in data.get('evidence', []) for paper in item.get('paper_ids', [])}
+        if task_only:
+            if idea['reference_ids'] or idea['reference_papers']:
+                raise ValueError('Task-only materialization must not add paper references')
+        elif not idea['reference_ids'] or not set(idea['reference_ids']).issubset(papers):
+            raise ValueError('Materialization contains missing or unknown paper IDs')
+        for name in ['tags', 'root_domains']:
+            if name in data['fusion'] and idea.get(name) != data['fusion'][name]:
+                raise ValueError(f'Materialization must preserve fusion.{name}')
 
 
 class SurveyRepositoryRetrieval:
@@ -353,6 +439,26 @@ class SurveyRepositoryRetrieval:
         return result
 
 
+class TaskContextRetrieval:
+    def __init__(self, repository: TaskContextRepository):
+        self.repository = repository
+
+    def retrieve(self, request: RetrievalRequest) -> RetrievalOutput:
+        return RetrievalOutput(
+            evidence=tuple(Evidence(**{**item, "paper_ids": ()}) for item in self.repository.evidence_items),
+            resource_ids=self.repository.source.direct_parent_artifact_ids,
+            usage=BudgetUsage(),
+            metadata={"adapter": "sure_task_context", "evidence_mode": "task_only",
+                      "literature_accesses": 0, "query_digest": stable_signature(request.query)},
+        )
+
+
+class NoLiteratureComponents:
+    def retrieve_operator_components(self, query: str, *, limit: int) -> OperatorComponentRetrieval:
+        return OperatorComponentRetrieval((), json.dumps({"evidence_mode": "task_only",
+            "reason": "literature_disabled", "query_digest": stable_signature(query), "limit": limit}))
+
+
 def _selected_outcome_hits(items: Sequence[Mapping[str, Any]]) -> tuple[OutcomeHit, ...]:
     hits: list[OutcomeHit] = []
     for item in items:
@@ -479,6 +585,7 @@ def _keynote_output_from_dict(
             error_code=(
                 str(item.get("error_code")) if item.get("error_code") is not None else None
             ),
+            routing=deepcopy(item.get("routing")),
         )
         for item in traces
     )
@@ -568,6 +675,9 @@ class NativeKeynoteGrounder:
             },
             "model": self._model,
         }
+        routing_policy = routing_policy_from_environment()
+        if routing_policy is not None:
+            dependencies["api_routing_policy"] = routing_policy
         resumed = self._resume(dependencies)
         if resumed is not None:
             return resumed
@@ -639,9 +749,9 @@ class _TracingProvider:
         try:
             result = self._provider.complete(request)
         except ProviderError as error:
-            self.traces.append((error.trace, request.model))
+            self.traces.append((error.trace, error.trace.model))
             raise
-        self.traces.append((result.trace, request.model))
+        self.traces.append((result.trace, result.trace.model))
         return result
 
 
@@ -658,26 +768,52 @@ class _ComponentNoveltyProvider:
             structured_input=structured,
             system_prompt=(
                 "Judge candidate component novelty against only the supplied retrieved Core nodes. "
-                "Return strict JSON with integer retrieval_similarity, perceived_novelty, and "
-                "rubric_score in 0..5, plus rationale and provenance."
+                'Return a JSON object with exactly this shape: {"retrieval_similarity": 0, '
+                '"perceived_novelty": 0, "rubric_score": 0, "rationale": "evidence-based explanation", '
+                '"provenance": {"evidence_ids": ["a supplied Core node ID"], "basis": "comparison basis"}}. '
+                "Each of retrieval_similarity, perceived_novelty AND rubric_score must be an integer "
+                "chosen from 0, 1, 2, 3, 4, 5. These are ordinal rubric judgments, NOT percentages "
+                "or raw cosine similarities. Never return 58, 0.58, numeric strings, or labels such as moderate. "
+                "Higher retrieval_similarity means closer precedent; higher perceived_novelty and "
+                "rubric_score mean greater novelty. Choose the actual integers from the evidence, "
+                "not the placeholder zeros. provenance must be a nonempty JSON object, not an array. "
+                "Reference only supplied Core nodes; do not invent evidence IDs."
             ),
             user_prompt=json.dumps(structured, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
             output_kind="json",
         )
-        result = self._provider.complete(request)
-        value = result.json_value
-        if not isinstance(value, Mapping):
-            raise ValueError("component novelty provider requires a JSON object")
-        provenance = value.get("provenance")
-        if not isinstance(provenance, Mapping) or not provenance:
-            raise ValueError("component novelty provider requires provenance")
-        return ComponentNoveltyProviderOutput(
-            retrieval_similarity=value.get("retrieval_similarity"),  # type: ignore[arg-type]
-            perceived_novelty=value.get("perceived_novelty"),  # type: ignore[arg-type]
-            rubric_score=value.get("rubric_score"),  # type: ignore[arg-type]
-            rationale=str(value.get("rationale") or ""),
-            provenance_json=json.dumps(provenance, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-        )
+        def validate_response(result):
+            value = result.json_value
+            if result.trace.model.startswith("glm-"):
+                value = _glm_field_projection(value, {
+                    "retrieval_similarity", "perceived_novelty", "rubric_score", "rationale", "provenance",
+                })
+            if not isinstance(value, Mapping):
+                raise ValueError("component novelty provider requires a JSON object")
+            provenance = value.get("provenance")
+            if result.trace.model.startswith("glm-") and isinstance(provenance, list) and provenance:
+                provenance = {"evidence": deepcopy(provenance)}
+            if not isinstance(provenance, Mapping) or not provenance:
+                raise ValueError("component novelty provider requires provenance")
+            allowed = structured.get('evidence_ids')
+            if allowed:
+                cited = provenance.get('evidence_ids')
+                if cited is None and isinstance(provenance.get('evidence'), list):
+                    cited = [item.get('evidence_id') for item in provenance['evidence'] if isinstance(item, Mapping)]
+                if cited is not None and (not isinstance(cited, list) or not cited or
+                        any(not isinstance(item, str) or item not in allowed for item in cited)):
+                    raise ValueError('Component novelty provenance must cite supplied evidence IDs')
+            return ComponentNoveltyProviderOutput(
+                retrieval_similarity=value.get("retrieval_similarity"),  # type: ignore[arg-type]
+                perceived_novelty=value.get("perceived_novelty"),  # type: ignore[arg-type]
+                rubric_score=value.get("rubric_score"),  # type: ignore[arg-type]
+                rationale=str(value.get("rationale") or ""),
+                provenance_json=json.dumps(provenance, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            )
+
+        request = replace(request, validation_profile="xlab.component-novelty.response.v2",
+                          response_validator=validate_response)
+        return validate_response(self._provider.complete(request))
 
 
 class _SearchProvider:
@@ -707,6 +843,33 @@ class _SearchProvider:
 
     def generate(self, request):
         return self.generation.generate(request)
+
+    def _wire_provider(self):
+        provider = self._provider._provider
+        seen = set()
+        while id(provider) not in seen:
+            seen.add(id(provider))
+            if hasattr(provider, '_cache_counts'):
+                return provider
+            provider = getattr(provider, 'provider', getattr(provider, '_provider', None))
+            if provider is None:
+                break
+        return None
+
+    def checkpoint_state(self):
+        wire = self._wire_provider()
+        return {'cache_counts':dict(wire._cache_counts) if wire else {},
+                'traces':[(t.to_dict(), m) for t,m in self._provider.traces],
+                'generation_usage':asdict(self.generation.usage),
+                'evaluation_usage':asdict(self.evaluation.usage)}
+
+    def restore_checkpoint_state(self, state):
+        wire = self._wire_provider()
+        if wire:
+            wire._cache_counts = dict(state['cache_counts'])
+        self._provider.traces = [(ProviderTrace(**t),m) for t,m in state['traces']]
+        self.generation._usage = type(self.generation.usage)(**state['generation_usage'])
+        self.evaluation._usage = type(self.evaluation.usage)(**state['evaluation_usage'])
 
     def trace_records(self) -> list[dict[str, Any]]:
         return [_trace_record(trace, model) for trace, model in self._provider.traces]
@@ -749,7 +912,7 @@ class NativeModeSearch:
         *,
         mode: str,
         seed: int,
-        novelty_runtime: ComponentNoveltyRuntime,
+        novelty_runtime: ComponentNoveltyRuntime | None,
         run_dir: Path | None = None,
     ) -> None:
         self.mode = mode
@@ -764,10 +927,10 @@ class NativeModeSearch:
             ),
             embedding_model=novelty_runtime.embedding_model,
             component_index=novelty_runtime.component_index,
-        )
+        ) if novelty_runtime is not None else None
         self._operator_grounding_evaluator = OperatorGroundingEvaluator(
             self._provider.generation,
-            novelty_runtime.retriever,
+            novelty_runtime.retriever if novelty_runtime is not None else NoLiteratureComponents(),
         )
         self._component_novelty_resource_digest = stable_signature(
             {
@@ -776,7 +939,7 @@ class NativeModeSearch:
                 "embedding_model": asdict(novelty_runtime.embedding_model),
                 "component_index": asdict(novelty_runtime.component_index),
             }
-        )
+        ) if novelty_runtime is not None else "task-only-no-literature"
         self._run_dir = run_dir
         self._checkpoint_trace_records: tuple[dict[str, Any], ...] = ()
         self.result: SearchResult | None = None
@@ -787,32 +950,39 @@ class NativeModeSearch:
         resumed = self._resumed_output(request)
         if resumed is not None:
             return resumed
+        if self._run_dir:
+            write_checkpoint(self._run_dir, f'search.{self.mode}', last_error=None)
         provider_context = _idea_provider_context(request.context)
         memory = MemoryState.from_experiment_feedback(request.context.get("experiment_feedback"))
-        provider_context = IdeaProviderContext(
-            evidence=provider_context.evidence,
-            mature_idea=provider_context.mature_idea,
-            refinement_scope=provider_context.refinement_scope,
-            refinement_boundary=provider_context.refinement_boundary,
-            memory_hints=memory.hints(),
-        )
+        provider_context = replace(provider_context, memory_hints=memory.hints())
+        runtime_profile = {"context": request.context, "runtime": self._runtime.to_json()}
+        routing_policy = routing_policy_from_environment()
+        if routing_policy is not None:
+            runtime_profile["api_routing_policy"] = routing_policy
         engine = MCTSEngine(
             self._provider,
-            _search_config(
+            replace(_search_config(
                 self._runtime,
                 seed=request.seed,
                 evidence_digest=request.evidence_signature,
-            ),
+            ), component_novelty_required=self._novelty_evaluator is not None,
+                runtime_profile=stable_signature(runtime_profile)),
             memory=memory,
             context=provider_context,
             novelty_evaluator=self._novelty_evaluator,
             operator_grounding_evaluator=self._operator_grounding_evaluator,
             component_novelty_resource_digest=self._component_novelty_resource_digest,
         )
-        self.result = engine.search(_idea_state(request.root), request.mode)
+        self.result = engine.search(_idea_state(request.root), request.mode,
+            checkpoint_path=(self._run_dir / 'state/research_idea' / f'iteration.{self.mode}.json') if self._run_dir else None,
+            export_provider_state=self._provider.checkpoint_state,
+            restore_provider_state=self._provider.restore_checkpoint_state)
         counters = self.result.counters
         trace = tuple(_candidate_trace(candidate, request.mode) for candidate in self.result.candidates)
         metadata = {
+            "memory_digest": memory.digest,
+            "memory_records": len(memory.candidate_records) + len(memory.symbolic_records),
+            "novelty_source": "literature" if self._novelty_evaluator else "model_judgment",
             **deepcopy(self.result.metadata),
             "workflow_seed": request.seed,
             "rng_seed": self.result.rng_seed,
@@ -849,7 +1019,9 @@ class NativeModeSearch:
         return run_paths(self._run_dir)[f"workflow_search_{self.mode}"]
 
     def _dependencies(self, request) -> dict[str, Any]:
-        return {
+        dependencies = {
+            "context_signature": stable_signature(request.context),
+            "component_resources": self._component_novelty_resource_digest,
             "mode": self.mode,
             "seed": request.seed,
             "root_signature": request.root_signature,
@@ -860,6 +1032,7 @@ class NativeModeSearch:
             "runtime_profile": RUNTIME_PROFILE_ID,
             "prompt_semantic_version": PROMPT_ROUTING_PROFILE_ID,
             "operator_semantic_version": OPERATOR_RETRIEVAL_PROFILE_ID,
+            "reliability_profile": "xlab.search.reliable.v1",
             "search_config": {
                 "max_iterations": self._runtime.max_iterations,
                 "max_depth": self._runtime.max_depth,
@@ -875,9 +1048,23 @@ class NativeModeSearch:
                 "evaluation_model": self._runtime.evaluation_model,
             },
         }
+        routing_policy = routing_policy_from_environment()
+        if routing_policy is not None:
+            dependencies["api_routing_policy"] = routing_policy
+        return dependencies
 
     def _resumed_output(self, request) -> ModeSearchOutput | None:
         path = self._checkpoint_path()
+        migration = os.environ.get('XLAB_MODE_MIGRATION_MANIFEST')
+        if migration and self._run_dir and path and not path.exists():
+            imported = compatible_mode(migration, self.mode, self._dependencies(request),
+                                       self._run_dir / 'state/research_idea')
+            if imported is not None:
+                output = _mode_output_from_dict(imported)
+                output = replace(output, metadata={**output.metadata, 'resumed':True})
+                self._checkpoint_trace_records = tuple(imported['provider_trace_provenance'])
+                self._write_checkpoint(request, output)
+                return output
         if path is None or not stage_completed(
             self._run_dir,
             f"search.{self.mode}",
@@ -889,6 +1076,9 @@ class NativeModeSearch:
         if not isinstance(value, Mapping):
             return None
         output = _mode_output_from_dict(value)
+        if any(b.error_type in {'ProviderError','ProviderExhaustedError','ComponentNoveltyError'}
+               for b in output.rollout_blockers):
+            return None
         metadata = dict(output.metadata)
         metadata["resumed"] = True
         trace_records = value.get("provider_trace_provenance")
@@ -913,7 +1103,7 @@ class NativeModeSearch:
         if path is None:
             return
         value = _mode_output_dict(output)
-        value["provider_trace_provenance"] = self._provider.trace_records()
+        value["provider_trace_provenance"] = list(self._checkpoint_trace_records) or self._provider.trace_records()
         write_portable_json(path, value)
         write_checkpoint(
             self._run_dir,
@@ -940,7 +1130,7 @@ class NativeSearchFactory:
         provider: Provider,
         runtime: RuntimeConfig,
         *,
-        novelty_runtime: ComponentNoveltyRuntime,
+        novelty_runtime: ComponentNoveltyRuntime | None,
         run_dir: Path | None = None,
     ) -> None:
         self._provider = provider
@@ -1041,17 +1231,21 @@ def run_native_workflow(
 ) -> WorkflowResult:
     """Run and compatibility-materialize the authoritative package-native workflow."""
 
-    retrieval = SurveyRepositoryRetrieval(
+    policy = ResearchPolicy.from_payload(request.research_policy) if request.research_policy else None
+    if policy:
+        provider = PolicyProvider(provider, policy, request.task_context)
+    task_only = policy is not None and policy.evidence_mode == "task_only"
+    retrieval = TaskContextRetrieval(repository) if task_only else SurveyRepositoryRetrieval(
         repository,
         limit=int(source_context.get("selection_limit") or 12),
     )
-    keynote_grounder = NativeKeynoteGrounder(
+    keynote_grounder = None if task_only else NativeKeynoteGrounder(
         provider,
         model=runtime.agent_model,
         run_dir=run_dir,
     )
     workflow_provider = GenericWorkflowProvider(provider, runtime)
-    novelty_runtime = novelty_runtime or build_component_novelty_runtime(repository.source.resources)
+    novelty_runtime = None if task_only else (novelty_runtime or build_component_novelty_runtime(repository.source.resources))
     search_factory = NativeSearchFactory(
         provider,
         runtime,
@@ -1067,7 +1261,7 @@ def run_native_workflow(
     feedback_rag_query: str | None = None
     feedback_selected_hits: tuple[OutcomeHit, ...] = ()
     feedback_citations: CitationRegistry | None = None
-    if request.experiment_feedback:
+    if request.experiment_feedback and not policy:
         feedback_rag_query = request.topic or repository.topic
         feedback = retrieval.snapshot(feedback_rag_query)
         feedback_evidence = feedback.evidence
@@ -1094,6 +1288,8 @@ def run_native_workflow(
             selected_outcome_hits=feedback_selected_hits,
             citations=feedback_citations,
             retrieval_metadata=feedback_retrieval_metadata,
+            research_policy=request.research_policy,
+            task_context=request.task_context,
         ),
         search_factory=search_factory,
         fusion_runner=fusion_runner,
@@ -1111,7 +1307,10 @@ def run_native_workflow(
     run["native_workflow_trace"] = deepcopy(run.get("workflow_trace", []))
     if result.succeeded:
         run["workflow_trace"] = _public_workflow_trace(bool(request.experiment_feedback))
+        if policy and request.experiment_feedback:
+            run["workflow_trace"].insert(0, {"workflow": WORKFLOW_ID, "stage": "knowledge_acquisition", "status": "success"})
         _materialize_compatibility(artifact, search_factory, fusion_runner)
+        artifact["persistence"]["idea_result"]["research_policy"] = request.research_policy
         try:
             _validate_complete_result(artifact)
         except Exception as error:
@@ -1285,9 +1484,12 @@ def _validate_complete_result(artifact: Mapping[str, Any]) -> None:
     if not isinstance(result, Mapping):
         raise ValueError("native workflow did not persist idea_result")
     missing_text = [name for name in _REQUIRED_RESULT_TEXT if not str(result.get(name) or "").strip()]
+    task_only = result.get("research_policy", {}).get("evidence_mode") == "task_only"
+    if task_only and result.get("reference_papers") != []:
+        raise ValueError("Task-only research must not invent paper references")
     missing_lists = [
         name for name in _REQUIRED_RESULT_LISTS
-        if not isinstance(result.get(name), list) or not result.get(name)
+        if not (task_only and name == "reference_papers") and (not isinstance(result.get(name), list) or not result.get(name))
     ]
     if missing_text or missing_lists:
         raise ValueError(
@@ -1299,7 +1501,7 @@ def _validate_complete_result(artifact: Mapping[str, Any]) -> None:
 
 
 def _workflow_prompt(operation: str, value: Mapping[str, JsonValue]) -> str:
-    data = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    data = "See the complete structured input in the user message; all constraints there remain authoritative."
     if operation == OP_BACKGROUND:
         return TOPIC_BACKGROUND_PROMPT.format(topic=value.get("topic", ""))
     if operation == OP_QUERY:
@@ -1326,6 +1528,11 @@ def _workflow_prompt(operation: str, value: Mapping[str, JsonValue]) -> str:
             experiment_findings=json.dumps(value.get("experiment_feedback"), ensure_ascii=False),
         ) + "\nProvider input and required contract:\n" + data
     if operation == OP_REPLAN:
+        if value.get("research_policy"):
+            return (ResearchPolicy.from_payload(value["research_policy"]).prompt()
+                    + "\nAnalyse complete candidate outcomes and return {replan: {root_idea: <complete typed idea>, "
+                    "rationale: <scoped observations>}}. Preserve the current best method and only refine local slots. "
+                    "Do not manufacture component removal results. Input:\n" + data)
         return RE_ANALYSIS_REPLAN_PROMPT.format(
             topic=value.get("topic", ""),
             mature_idea=json.dumps(value.get("mature_idea", {}), ensure_ascii=False),
@@ -1340,7 +1547,7 @@ def _workflow_prompt(operation: str, value: Mapping[str, JsonValue]) -> str:
             refinement_scope=json.dumps(value.get("refinement_scope", []), ensure_ascii=False),
             idea=json.dumps(value.get("fusion", {}), ensure_ascii=False),
             papers=json.dumps(value.get("evidence", value.get("evidence_ids", [])), ensure_ascii=False),
-        ) + "\nWrap the response in idea_result and preserve the complete materialization contract in provider input:\n" + data
+        ) + "\nWrap the response in idea_result and preserve the complete materialization contract in provider input:\n" + data + "\nExact evidence_ids: " + json.dumps(value.get('evidence_ids', []))
     if operation == OP_RANKING:
         return (
             "Return strict JSON only as evidence_ids containing every supplied evidence_id exactly once, "
@@ -1374,6 +1581,8 @@ def _idea_provider_context(value: Mapping[str, Any]) -> IdeaProviderContext:
         mature_idea=mature,
         refinement_scope=refinement_scope,
         refinement_boundary=boundary,
+        task_context_json=json.dumps(value.get("task_context", {}), sort_keys=True),
+        research_policy_json=json.dumps(value.get("research_policy", {}), sort_keys=True),
     )
 
 
@@ -1463,6 +1672,7 @@ def _champion_record(champion) -> dict[str, Any]:
 
 def _trace_record(trace: ProviderTrace, model: str) -> dict[str, Any]:
     return {
+        **trace.to_dict(),
         "event": "llm_call",
         "op_name": _PROVIDER_OPERATION_NAMES.get(trace.operation, trace.operation),
         "provider_operation": trace.operation,
@@ -1470,7 +1680,7 @@ def _trace_record(trace: ProviderTrace, model: str) -> dict[str, Any]:
         "input_digest": trace.input_digest,
         "attempts": trace.attempts,
         "error_code": trace.error_code,
-        "model": model,
+        "model": trace.model,
     }
 
 

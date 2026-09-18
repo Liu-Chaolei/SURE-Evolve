@@ -37,6 +37,16 @@ export const SCIENCE_REVIEW_ROLES = [
 ] as const;
 
 export type ExperimentStage = (typeof EXPERIMENT_STAGES)[number];
+export interface ExperimentExecutionProfile {
+	mode: "standard" | "direct_formal";
+	kind: "research" | "baseline";
+}
+
+export function codeReviewRoles(profile?: ExperimentExecutionProfile): readonly string[] {
+	return profile?.mode === "direct_formal"
+		? CODE_REVIEW_ROLES.map((role) => (role === "integration_smoke" ? "static_integration" : role))
+		: CODE_REVIEW_ROLES;
+}
 export type ExperimentChildRole = "planner" | "worker" | "reviewer" | "final_reviewer";
 export type ExperimentProtocolStatus =
 	| "pending"
@@ -77,6 +87,7 @@ export interface ExperimentChildIdentity {
 }
 
 export interface ExperimentResultValidationContext {
+	execution_profile?: ExperimentExecutionProfile;
 	component_names?: string[];
 	reviewer_role?: string;
 	review_context?: ExperimentReviewValidationContext;
@@ -611,7 +622,11 @@ function validateUniqueWorkUnitIds(workUnits: ExperimentWorkUnit[]): string | un
 	return undefined;
 }
 
-export function validateCodePlan(plan: ExperimentPlan, componentNames: string[] = []): string | undefined {
+export function validateCodePlan(
+	plan: ExperimentPlan,
+	componentNames: string[] = [],
+	profile?: ExperimentExecutionProfile,
+): string | undefined {
 	if (plan.stage !== "code") {
 		return "Code plan must declare stage code.";
 	}
@@ -619,17 +634,18 @@ export function validateCodePlan(plan: ExperimentPlan, componentNames: string[] 
 	if (idError) {
 		return idError;
 	}
-	if (!stringList(componentNames)) {
+	if (!stringList(componentNames, profile?.kind === "baseline")) {
 		return "Code plan validation requires canonical Idea components.";
 	}
-	const smoke = plan.work_units.filter((unit) => unit.id === "final_integration_smoke");
-	if (smoke.length !== 1 || plan.work_units.at(-1)?.id !== "final_integration_smoke") {
-		return "Code plan must contain one terminal final_integration_smoke work unit.";
+	const terminalId = profile?.mode === "direct_formal" ? "final_static_integration" : "final_integration_smoke";
+	const smoke = plan.work_units.filter((unit) => unit.id === terminalId);
+	if (smoke.length !== 1 || plan.work_units.at(-1)?.id !== terminalId) {
+		return `Code plan must contain one terminal ${terminalId} work unit.`;
 	}
 	const terminal = smoke[0];
 	const otherIds = plan.work_units.slice(0, -1).map((unit) => unit.id);
 	if (otherIds.some((id) => !(terminal.needs ?? []).includes(id))) {
-		return "final_integration_smoke must depend on every preceding code work unit.";
+		return `${terminalId} must depend on every preceding code work unit.`;
 	}
 	for (const unit of plan.work_units) {
 		if (!nonEmptyString(unit.goal) || !nonEmptyRecord(unit.input_paths)) {
@@ -669,7 +685,7 @@ export function validateCodePlan(plan: ExperimentPlan, componentNames: string[] 
 			!nonEmptyRecord(unit.implementation_requirements) ||
 			!nonEmptyRecord(unit.experiment_bindings) ||
 			!Array.isArray(unit.component_disable_hooks) ||
-			unit.component_disable_hooks.length === 0 ||
+			(unit.component_disable_hooks.length === 0 && profile?.kind !== "baseline") ||
 			unit.component_disable_hooks.some((hook) => !nonEmptyRecord(hook))
 		) {
 			return `Code work unit ${unit.id} must define interfaces, implementation bindings, and component-disable hooks.`;
@@ -693,6 +709,13 @@ export function validateCodePlan(plan: ExperimentPlan, componentNames: string[] 
 		}
 	}
 	const evidence = terminal.evidence ?? [];
+	if (profile?.mode === "direct_formal") {
+		if (plan.work_units.some((unit) => /smoke/i.test(unit.id)))
+			return "direct_formal cannot schedule smoke work units.";
+		return evidence.includes("syntax") && evidence.includes("component_contract")
+			? undefined
+			: "Direct formal code requires syntax and component_contract evidence; runtime evidence is deferred to science.";
+	}
 	if (!evidence.includes("integrated") || !evidence.includes("component_disabled")) {
 		return "final_integration_smoke must require integrated and component_disabled evidence.";
 	}
@@ -702,7 +725,11 @@ export function validateCodePlan(plan: ExperimentPlan, componentNames: string[] 
 	return undefined;
 }
 
-export function validateSciencePlan(plan: ExperimentPlan, componentNames: string[]): string | undefined {
+export function validateSciencePlan(
+	plan: ExperimentPlan,
+	componentNames: string[],
+	profile?: ExperimentExecutionProfile,
+): string | undefined {
 	if (plan.stage !== "science") {
 		return "Science plan must declare stage science.";
 	}
@@ -710,7 +737,7 @@ export function validateSciencePlan(plan: ExperimentPlan, componentNames: string
 	if (idError) {
 		return idError;
 	}
-	if (!stringList(componentNames)) {
+	if (!stringList(componentNames, profile?.kind === "baseline")) {
 		return "Science plan validation requires canonical Idea components.";
 	}
 	const references = plan.work_units.filter((unit) => unit.kind === "all_components_reference");
@@ -793,6 +820,7 @@ export function validateSciencePlan(plan: ExperimentPlan, componentNames: string
 }
 
 export interface ExperimentReviewValidationContext {
+	execution_profile?: ExperimentExecutionProfile;
 	component_names: string[];
 	science_conditions: Array<{
 		id: string;
@@ -807,7 +835,7 @@ export function validateReviewMatrix(
 	reports: ExperimentReviewReport[],
 	context?: ExperimentReviewValidationContext,
 ): string | undefined {
-	const expected = stage === "code" ? CODE_REVIEW_ROLES : SCIENCE_REVIEW_ROLES;
+	const expected = stage === "code" ? codeReviewRoles(context?.execution_profile) : SCIENCE_REVIEW_ROLES;
 	if (reports.length !== expected.length) {
 		return `${stage} review matrix must contain ${expected.length} reports.`;
 	}
@@ -848,7 +876,11 @@ export function validateReviewMatrix(
 		}
 	}
 	if (stage === "science") {
-		if (!context || !stringList(context.component_names) || context.science_conditions.length === 0) {
+		if (
+			!context ||
+			!stringList(context.component_names, context.execution_profile?.kind === "baseline") ||
+			context.science_conditions.length === 0
+		) {
 			return "Science review validation requires canonical condition and component context.";
 		}
 		const statistical = reports.find((report) => report.role === "statistical_interpretation");
@@ -892,12 +924,13 @@ export function validateExperimentResult(assignment: ExperimentAssignment, resul
 			return `${assignment.child.stage} planner must submit a plan with work units.`;
 		}
 		const components = assignment.result_validation?.component_names ?? [];
+		const profile = assignment.result_validation?.execution_profile;
 		return assignment.child.stage === "prepare"
 			? validatePreparePlan(plan)
 			: assignment.child.stage === "code"
-				? validateCodePlan(plan, components)
+				? validateCodePlan(plan, components, profile)
 				: assignment.child.stage === "science"
-					? validateSciencePlan(plan, components)
+					? validateSciencePlan(plan, components, profile)
 					: "Finalize assignments cannot submit plans.";
 	}
 	if (assignment.kind === "worker_result") {
@@ -913,7 +946,7 @@ export function validateExperimentResult(assignment: ExperimentAssignment, resul
 		const role = assignment.result_validation?.reviewer_role;
 		const report = result as unknown as ExperimentReviewReport;
 		if (!role || report.role !== role) {
-			return "Reviewer result role does not match its assignment authority.";
+			return `Reviewer result must contain the JSON field "role": ${JSON.stringify(role)}. Do not use exact_assigned_role or a descriptive role sentence.`;
 		}
 		if (
 			report.artifact_role !== "reviewer_report" ||
@@ -1019,6 +1052,7 @@ export class ExperimentProtocolStore {
 			"pause",
 			"cancel",
 		]);
+		// biome-ignore lint/correctness/noConstructorReturn: The proxy applies the durable store lock uniformly to public operations.
 		return new Proxy(this, {
 			get: (target, property, receiver) => {
 				const value = Reflect.get(target, property, receiver);

@@ -5,6 +5,28 @@ description: Parse PDFs from a successful paper_collect run with MinerU, enrich 
 
 # Knowledge graph
 
+## Bulk corpus pipeline
+
+The explicitly selected `build_graph.py import-corpus --corpus <archive> --run-dir <run>`
+entrypoint accepts the bulk archive's catalog and checksum-validated MinerU bundles.
+It produces `xlab.corpus.v1` with `source_kind: bulk_archive`; it does not claim
+the archive is a successful canonical `paper_collect` run. The canonical input
+rules below continue to apply to `init` and the original graph phases.
+
+`scripts/corpus_pipeline.py run` provides the opt-in incremental, Slurm-hosted
+workflow. It validates safe archive members, exact quotes and token budgets,
+and distinguishes `basic` from `deep` in `xlab.paper_extraction.v3`. Basic is a
+single semantic pass per text chunk; deep reuses basic and adds graph extraction
+and calibration. A paper without a named Core is valid when its paper-level
+facts are grounded. It is never labeled as a completed three-pass extraction.
+The corpus coordinator may compose the packaged `literature_survey` CLI's
+`corpus-synthesize` mode after graph completion. This composition is local-only;
+the canonical graph implementation otherwise remains package-local.
+
+Run corpus phases only in a Slurm allocation. Secrets are inherited through
+private process/job environments and excluded from artifacts. The queue is
+node-local SQLite/WAL and is recoverable from shared immutable checkpoints.
+
 Select one successful `paper_collect` run directory and produce MinerU documents,
 PaperGraph Step 1 structures, validated Step 2 extractions, `method_graph@2`,
 `graph_db@1`, a static graph preview, and `graph_report@2`.

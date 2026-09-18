@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from math import isfinite
 from typing import Any, Literal, Mapping, Sequence
 
@@ -84,11 +84,70 @@ class SymbolicMemoryRecord:
         }
 
 
+@dataclass(frozen=True)
+class CandidateOutcomeRecord:
+    """An observed complete intervention; never a component attribution."""
+
+    record_id: str
+    candidate_id: str
+    parent_digest: str
+    implementation_digest: str
+    result_digest: str
+    scope: dict[str, Any]
+    change_set: list[dict[str, Any]]
+    outcome: str
+    metric: str = ""
+    direction: str = ""
+    parent_score: float | None = None
+    candidate_score: float | None = None
+    failure_category: str | None = None
+    source_artifacts: list[str] = field(default_factory=list)
+    kind: str = "candidate_outcome"
+    schema_version: str = "xlab.candidate_outcome.v1"
+
+    def __post_init__(self) -> None:
+        if self.kind != "candidate_outcome" or self.schema_version != "xlab.candidate_outcome.v1":
+            raise ValueError("Unsupported candidate outcome memory")
+        if not self.record_id or not self.candidate_id or not self.result_digest or not self.scope:
+            raise ValueError("Candidate outcome requires identity, scope and result provenance")
+        if self.outcome not in {"improved", "worse", "tied", "incomparable", "execution_failed"}:
+            raise ValueError("Invalid candidate outcome")
+        for score in (self.parent_score, self.candidate_score):
+            if score is not None and (isinstance(score, bool) or not isinstance(score, (int, float))
+                                      or not isfinite(score)):
+                raise ValueError("Memory scores must be finite numbers or null")
+        if self.outcome in {"improved", "worse", "tied"}:
+            if self.parent_score is None or self.candidate_score is None or not self.parent_digest:
+                raise ValueError("Comparable outcome requires the measured parent")
+            if self.direction not in {"lower", "higher"}:
+                raise ValueError("Comparable outcome requires metric direction")
+            gain = self.parent_score - self.candidate_score
+            if self.direction == "higher":
+                gain = -gain
+            expected = "improved" if gain > 0 else "worse" if gain < 0 else "tied"
+            if self.outcome != expected or self.failure_category:
+                raise ValueError("Outcome contradicts recorded scores or execution status")
+
+    def to_payload(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def hint(self) -> str:
+        return json.dumps({"record_id": self.record_id, "candidate_id": self.candidate_id, "scope": self.scope,
+                           "intervention": self.change_set, "outcome": self.outcome,
+                           "parent_digest": self.parent_digest, "metric": self.metric,
+                           "direction": self.direction, "parent_score": self.parent_score,
+                           "candidate_score": self.candidate_score,
+                           "failure_category": self.failure_category,
+                           "interpretation": "Single-run whole-intervention observation; no component causality or significance claim."},
+                          sort_keys=True, ensure_ascii=False)
+
+
 @dataclass
 class MemoryState:
     symbolic_records: list[SymbolicMemoryRecord] = field(default_factory=list)
     vector_memory_requested: bool = True
     symbolic_memory_only: bool = True
+    candidate_records: list[CandidateOutcomeRecord] = field(default_factory=list)
 
     @property
     def vector_memory_effective(self) -> bool:
@@ -97,7 +156,7 @@ class MemoryState:
     @property
     def digest(self) -> str:
         payload = json.dumps(
-            [record.to_payload() for record in self.symbolic_records],
+            [record.to_payload() for record in [*self.symbolic_records, *self.candidate_records]],
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -120,7 +179,7 @@ class MemoryState:
             + (f"; metric={record.metric}" if record.metric else "")
             + (f"; analysis={record.analysis}" if record.analysis else "")
             for record in records
-        )
+        ) + tuple(record.hint() for record in self.candidate_records)
 
     @classmethod
     def from_experiment_feedback(cls, feedback: Mapping[str, Any] | str | None) -> "MemoryState":
@@ -134,6 +193,15 @@ class MemoryState:
                 return cls()
         if not isinstance(value, Mapping):
             raise ValueError("structured experiment feedback must be a mapping")
+        if value.get("feedback_kind") == "candidate_outcome":
+            records_by_id = {}
+            for raw in value.get("records", []):
+                record = CandidateOutcomeRecord(**raw)
+                previous = records_by_id.get(record.record_id)
+                if previous is not None and previous != record:
+                    raise ValueError("Conflicting candidate outcome identity")
+                records_by_id[record.record_id] = record
+            return cls(candidate_records=[records_by_id[key] for key in sorted(records_by_id)])
         records = _records_from_feedback(value)
         return cls(records)
 

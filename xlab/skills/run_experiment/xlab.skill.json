@@ -47,6 +47,18 @@
     "argumentHint": "--idea <idea reference>",
     "arguments": [
       {
+        "name": "--baseline-profile",
+        "description": "Run an explicit fresh ASR baseline using a frozen direct-formal profile; mutually exclusive with --idea.",
+        "valueHint": "<profile.json>",
+        "takesValue": true
+      },
+      {
+        "name": "--profile",
+        "description": "Use the native direct-formal ASR/Slurm/SURE profile for the selected Idea.",
+        "valueHint": "<profile.json>",
+        "takesValue": true
+      },
+      {
         "name": "--idea",
         "description": "Select an existing successful Research Idea by path, artifact ID, producer run, workspace handle, current workspace Idea, or exact indexed title.",
         "valueHint": "<idea-reference>",

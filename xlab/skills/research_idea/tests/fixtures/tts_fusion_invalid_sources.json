@@ -1,0 +1,1058 @@
+{
+  "description": "Recorded GLM fusion source-contract failures; no credentials or runtime state.",
+  "mode_inputs": [
+    {
+      "mode": "ambitious_realist",
+      "idea": {
+        "abstract": "A v1.1 refinement of the completed F5TTS_v1_Base 50-epoch Premium Chinese fine-tune. The parent recipe plateaued at validation loss 0.655 by epoch ~40 with three weak slots: un-normalized un-masked DiT attention, a constant post-warmup learning rate, and convention-fixed CFG. This candidate enables QK RMSNorm and attention masking (requiring weight updates), swaps in a warmup+cosine-decay scheduler via build_scheduler, and raises inference CFG strength to 2.5. Training stays under the fixed contract (official init, fresh optimizer, 8 NPU DDP, BF16 autocast/FP32 master, 50 epochs, final EMA) and is scored once on the frozen tts_zh_cer route.",
+        "components": [
+          {
+            "description": "Flip qk_norm to RMSNorm and attn_mask_enabled to true in arch_config so query/key projections are normalized and padded text/audio positions are excluded from attention; newly initialized QK-norm parameters are the only structural addition, trainable during the full 50-epoch fine-tune from official weights.",
+            "name": "QK-normed masked DiT attention"
+          },
+          {
+            "description": "Implement build_scheduler in src/f5_tts/sure_candidate.py: linear warmup to 20000 updates followed by cosine decay to near-zero over the remaining ~53100 updates, replacing the constant 1e-05 that produced the epoch-40 validation-loss plateau; fused AdamW, grad clip 1.0, BF16 autocast, FP32 master params and final EMA unchanged.",
+            "name": "Cosine-decayed optimizer contract (build_scheduler)"
+          },
+          {
+            "description": "Raise cfg_strength from 2.0 to 2.5 in inference_config (fp32 inference, 32 NFE, sway -1.0 unchanged) so the conditional flow field is sharpened toward text-consistent content, the mechanism by which ASR transcription errors drop.",
+            "name": "Guidance-refined inference slot"
+          },
+          {
+            "description": "Unchanged funasr Paraformer zh scoring on 16k mono generated audio; the candidate is judged solely by the new frozen CER versus the parent's 0.0228, with full training evidence and EMA checkpoint replayable.",
+            "name": "Frozen evaluation route tts_zh_cer"
+          }
+        ],
+        "core_contribution": "A minimal mechanism repair showing that escaping the fine-tuning loss plateau requires fixing the optimization decay and the attention conditioning path jointly, rather than adding data or capacity: QK-normalized masked attention plus a post-warmup cosine LR schedule, paired with a modestly stronger CFG at inference, is hypothesized to lower Paraformer Chinese CER below 0.0228 under an identical budget.",
+        "method": "Prepare workspace source via --action prepare_source --candidate-source working/f5_candidate. Edit src/f5_tts/sure_candidate.py to expose build_scheduler implementing linear warmup (20000 updates) then cosine decay across the remaining total_updates; keep build_optimizer as the deployment's fused AdamW with lr 1e-05 and do not touch transform_batch. Submit SURE_TASK_WRAPPER --action candidate --parameters- with requires_training=true, architecture {qk_norm: 'rms', attn_mask_enabled: true}, training {epochs:50, learning_rate:1e-05, num_warmup_updates:20000, batch_size_per_gpu:25600, world_size:8, checkpoint_selection:'final_ema', seed:42, shuffle_seed:666}, candidate-source working/f5_candidate, and inference {cfg_strength:2.5, nfe_step:32, sway_sampling_coef:-1.0, target_rms:0.1, cross_fade_duration:0.15, remove_silence:false, text_cleanup:'none'}. The framework runs 50 epochs on the complete Premium train split from official weights; final EMA checkpoint is used for the single frozen tts_zh_cer evaluation. Repaired limitations: (1) constant LR plateau, (2) un-normalized/un-masked attention, (3) untuned inference guidance.",
+        "risks": "QK-norm parameters initialized fresh could transiently perturb pretrained attention dynamics under BF16; attention masking may interact with text_mask_padding=true conventions; cosine decay ending near zero could under-train late epochs if the optimum sits earlier; higher CFG can over-guid and increase acoustic artifacts that raise CER. All are monitored via the per-epoch validation loss trajectory in training_completion and judged only by the final frozen score.",
+        "root_domains": [
+          "speech-synthesis",
+          "asr-evaluation",
+          "model-fine-tuning"
+        ],
+        "tags": [
+          "tts",
+          "f5-tts",
+          "fine-tune",
+          "chinese",
+          "cer",
+          "dit",
+          "bf16",
+          "flow-matching",
+          "npu"
+        ],
+        "title": "Plateau-Breaking F5TTS v1.1: QK-Normed Masked Attention with Cosine LR Decay and Guidance-Refined Inference"
+      },
+      "evidence": [
+        "evidence:1e6957dbe5cf2995d7b2",
+        "evidence:07ae93796b2f44eabc92",
+        "evidence:77b79120e86a3c38be4f",
+        "evidence:65c00f69265d2be27b94",
+        "evidence:d94e528e17f17661eba2",
+        "evidence:78d1faa0f455e77de422",
+        "evidence:8fbf47aa6878d0d68436",
+        "evidence:74a325116b6c643afd31",
+        "evidence:6713a80fc66a9b0d3b1f",
+        "evidence:298ff9d9c03d4db3b25b",
+        "evidence:a5ee23fb52e357db4d20",
+        "evidence:3ce14ac10e5c9da31d91"
+      ]
+    },
+    {
+      "mode": "bridge_builder",
+      "idea": {
+        "abstract": "A v1.1 refinement of the completed F5TTS_v1_Base 50-epoch Premium Chinese fine-tune. The parent recipe plateaued at validation loss 0.655 by epoch ~40 with three weak slots: un-normalized un-masked DiT attention, a constant post-warmup learning rate, and convention-fixed CFG. This candidate enables QK RMSNorm and attention masking (requiring weight updates), swaps in a warmup+cosine-decay scheduler via build_scheduler, and raises inference CFG strength to 2.5. Training stays under the fixed contract (official init, fresh optimizer, 8 NPU DDP, BF16 autocast/FP32 master, 50 epochs, final EMA) and is scored once on the frozen tts_zh_cer route.",
+        "components": [
+          {
+            "description": "Flip qk_norm to RMSNorm and attn_mask_enabled to true in arch_config so query/key projections are normalized and padded text/audio positions are excluded from attention; newly initialized QK-norm parameters are the only structural addition, trainable during the full 50-epoch fine-tune from official weights.",
+            "name": "QK-normed masked DiT attention"
+          },
+          {
+            "description": "Implement build_scheduler in src/f5_tts/sure_candidate.py: linear warmup to 20000 updates followed by cosine decay to near-zero over the remaining ~53100 updates, replacing the constant 1e-05 that produced the epoch-40 validation-loss plateau; fused AdamW, grad clip 1.0, BF16 autocast, FP32 master params and final EMA unchanged.",
+            "name": "Cosine-decayed optimizer contract (build_scheduler)"
+          },
+          {
+            "description": "Raise cfg_strength from 2.0 to 2.5 in inference_config (fp32 inference, 32 NFE, sway -1.0 unchanged) so the conditional flow field is sharpened toward text-consistent content, the mechanism by which ASR transcription errors drop.",
+            "name": "Guidance-refined inference slot"
+          },
+          {
+            "description": "Unchanged funasr Paraformer zh scoring on 16k mono generated audio; the candidate is judged solely by the new frozen CER versus the parent's 0.0228, with full training evidence and EMA checkpoint replayable.",
+            "name": "Frozen evaluation route tts_zh_cer"
+          }
+        ],
+        "core_contribution": "A minimal mechanism repair showing that escaping the fine-tuning loss plateau requires fixing the optimization decay and the attention conditioning path jointly, rather than adding data or capacity: QK-normalized masked attention plus a post-warmup cosine LR schedule, paired with a modestly stronger CFG at inference, is hypothesized to lower Paraformer Chinese CER below 0.0228 under an identical budget.",
+        "method": "Prepare workspace source via --action prepare_source --candidate-source working/f5_candidate. Edit src/f5_tts/sure_candidate.py to expose build_scheduler implementing linear warmup (20000 updates) then cosine decay across the remaining total_updates; keep build_optimizer as the deployment's fused AdamW with lr 1e-05 and do not touch transform_batch. Submit SURE_TASK_WRAPPER --action candidate --parameters- with requires_training=true, architecture {qk_norm: 'rms', attn_mask_enabled: true}, training {epochs:50, learning_rate:1e-05, num_warmup_updates:20000, batch_size_per_gpu:25600, world_size:8, checkpoint_selection:'final_ema', seed:42, shuffle_seed:666}, candidate-source working/f5_candidate, and inference {cfg_strength:2.5, nfe_step:32, sway_sampling_coef:-1.0, target_rms:0.1, cross_fade_duration:0.15, remove_silence:false, text_cleanup:'none'}. The framework runs 50 epochs on the complete Premium train split from official weights; final EMA checkpoint is used for the single frozen tts_zh_cer evaluation. Repaired limitations: (1) constant LR plateau, (2) un-normalized/un-masked attention, (3) untuned inference guidance.",
+        "risks": "QK-norm parameters initialized fresh could transiently perturb pretrained attention dynamics under BF16; attention masking may interact with text_mask_padding=true conventions; cosine decay ending near zero could under-train late epochs if the optimum sits earlier; higher CFG can over-guid and increase acoustic artifacts that raise CER. All are monitored via the per-epoch validation loss trajectory in training_completion and judged only by the final frozen score.",
+        "root_domains": [
+          "speech-synthesis",
+          "asr-evaluation",
+          "model-fine-tuning"
+        ],
+        "tags": [
+          "tts",
+          "f5-tts",
+          "fine-tune",
+          "chinese",
+          "cer",
+          "dit",
+          "bf16",
+          "flow-matching",
+          "npu"
+        ],
+        "title": "Plateau-Breaking F5TTS v1.1: QK-Normed Masked Attention with Cosine LR Decay and Guidance-Refined Inference"
+      },
+      "evidence": [
+        "evidence:1e6957dbe5cf2995d7b2",
+        "evidence:07ae93796b2f44eabc92",
+        "evidence:77b79120e86a3c38be4f",
+        "evidence:65c00f69265d2be27b94",
+        "evidence:d94e528e17f17661eba2",
+        "evidence:78d1faa0f455e77de422",
+        "evidence:8fbf47aa6878d0d68436",
+        "evidence:74a325116b6c643afd31",
+        "evidence:6713a80fc66a9b0d3b1f",
+        "evidence:298ff9d9c03d4db3b25b",
+        "evidence:a5ee23fb52e357db4d20",
+        "evidence:3ce14ac10e5c9da31d91"
+      ]
+    },
+    {
+      "mode": "evidence_first",
+      "idea": {
+        "abstract": "A v1.1 refinement of the completed F5TTS_v1_Base 50-epoch Premium Chinese fine-tune. The parent recipe plateaued at validation loss 0.655 by epoch ~40 with three weak slots: un-normalized un-masked DiT attention, a constant post-warmup learning rate, and convention-fixed CFG. This candidate enables QK RMSNorm and attention masking (requiring weight updates), swaps in a warmup+cosine-decay scheduler via build_scheduler, and raises inference CFG strength to 2.5. Training stays under the fixed contract (official init, fresh optimizer, 8 NPU DDP, BF16 autocast/FP32 master, 50 epochs, final EMA) and is scored once on the frozen tts_zh_cer route.",
+        "components": [
+          {
+            "description": "Flip qk_norm to RMSNorm and attn_mask_enabled to true in arch_config so query/key projections are normalized and padded text/audio positions are excluded from attention; newly initialized QK-norm parameters are the only structural addition, trainable during the full 50-epoch fine-tune from official weights.",
+            "name": "QK-normed masked DiT attention"
+          },
+          {
+            "description": "Implement build_scheduler in src/f5_tts/sure_candidate.py: linear warmup to 20000 updates followed by cosine decay to near-zero over the remaining ~53100 updates, replacing the constant 1e-05 that produced the epoch-40 validation-loss plateau; fused AdamW, grad clip 1.0, BF16 autocast, FP32 master params and final EMA unchanged.",
+            "name": "Cosine-decayed optimizer contract (build_scheduler)"
+          },
+          {
+            "description": "Raise cfg_strength from 2.0 to 2.5 in inference_config (fp32 inference, 32 NFE, sway -1.0 unchanged) so the conditional flow field is sharpened toward text-consistent content, the mechanism by which ASR transcription errors drop.",
+            "name": "Guidance-refined inference slot"
+          },
+          {
+            "description": "Unchanged funasr Paraformer zh scoring on 16k mono generated audio; the candidate is judged solely by the new frozen CER versus the parent's 0.0228, with full training evidence and EMA checkpoint replayable.",
+            "name": "Frozen evaluation route tts_zh_cer"
+          }
+        ],
+        "core_contribution": "A minimal mechanism repair showing that escaping the fine-tuning loss plateau requires fixing the optimization decay and the attention conditioning path jointly, rather than adding data or capacity: QK-normalized masked attention plus a post-warmup cosine LR schedule, paired with a modestly stronger CFG at inference, is hypothesized to lower Paraformer Chinese CER below 0.0228 under an identical budget.",
+        "method": "Prepare workspace source via --action prepare_source --candidate-source working/f5_candidate. Edit src/f5_tts/sure_candidate.py to expose build_scheduler implementing linear warmup (20000 updates) then cosine decay across the remaining total_updates; keep build_optimizer as the deployment's fused AdamW with lr 1e-05 and do not touch transform_batch. Submit SURE_TASK_WRAPPER --action candidate --parameters- with requires_training=true, architecture {qk_norm: 'rms', attn_mask_enabled: true}, training {epochs:50, learning_rate:1e-05, num_warmup_updates:20000, batch_size_per_gpu:25600, world_size:8, checkpoint_selection:'final_ema', seed:42, shuffle_seed:666}, candidate-source working/f5_candidate, and inference {cfg_strength:2.5, nfe_step:32, sway_sampling_coef:-1.0, target_rms:0.1, cross_fade_duration:0.15, remove_silence:false, text_cleanup:'none'}. The framework runs 50 epochs on the complete Premium train split from official weights; final EMA checkpoint is used for the single frozen tts_zh_cer evaluation. Repaired limitations: (1) constant LR plateau, (2) un-normalized/un-masked attention, (3) untuned inference guidance.",
+        "risks": "QK-norm parameters initialized fresh could transiently perturb pretrained attention dynamics under BF16; attention masking may interact with text_mask_padding=true conventions; cosine decay ending near zero could under-train late epochs if the optimum sits earlier; higher CFG can over-guid and increase acoustic artifacts that raise CER. All are monitored via the per-epoch validation loss trajectory in training_completion and judged only by the final frozen score.",
+        "root_domains": [
+          "speech-synthesis",
+          "asr-evaluation",
+          "model-fine-tuning"
+        ],
+        "tags": [
+          "tts",
+          "f5-tts",
+          "fine-tune",
+          "chinese",
+          "cer",
+          "dit",
+          "bf16",
+          "flow-matching",
+          "npu"
+        ],
+        "title": "Plateau-Breaking F5TTS v1.1: QK-Normed Masked Attention with Cosine LR Decay and Guidance-Refined Inference"
+      },
+      "evidence": [
+        "evidence:1e6957dbe5cf2995d7b2",
+        "evidence:07ae93796b2f44eabc92",
+        "evidence:77b79120e86a3c38be4f",
+        "evidence:65c00f69265d2be27b94",
+        "evidence:d94e528e17f17661eba2",
+        "evidence:78d1faa0f455e77de422",
+        "evidence:8fbf47aa6878d0d68436",
+        "evidence:74a325116b6c643afd31",
+        "evidence:6713a80fc66a9b0d3b1f",
+        "evidence:298ff9d9c03d4db3b25b",
+        "evidence:a5ee23fb52e357db4d20",
+        "evidence:3ce14ac10e5c9da31d91"
+      ]
+    },
+    {
+      "mode": "moonshot_inventor",
+      "idea": {
+        "abstract": "A v1.1 refinement of the completed F5TTS_v1_Base 50-epoch Premium Chinese fine-tune. The parent recipe plateaued at validation loss 0.655 by epoch ~40 with three weak slots: un-normalized un-masked DiT attention, a constant post-warmup learning rate, and convention-fixed CFG. This candidate enables QK RMSNorm and attention masking (requiring weight updates), swaps in a warmup+cosine-decay scheduler via build_scheduler, and raises inference CFG strength to 2.5. Training stays under the fixed contract (official init, fresh optimizer, 8 NPU DDP, BF16 autocast/FP32 master, 50 epochs, final EMA) and is scored once on the frozen tts_zh_cer route.",
+        "components": [
+          {
+            "description": "Flip qk_norm to RMSNorm and attn_mask_enabled to true in arch_config so query/key projections are normalized and padded text/audio positions are excluded from attention; newly initialized QK-norm parameters are the only structural addition, trainable during the full 50-epoch fine-tune from official weights.",
+            "name": "QK-normed masked DiT attention"
+          },
+          {
+            "description": "Implement build_scheduler in src/f5_tts/sure_candidate.py: linear warmup to 20000 updates followed by cosine decay to near-zero over the remaining ~53100 updates, replacing the constant 1e-05 that produced the epoch-40 validation-loss plateau; fused AdamW, grad clip 1.0, BF16 autocast, FP32 master params and final EMA unchanged.",
+            "name": "Cosine-decayed optimizer contract (build_scheduler)"
+          },
+          {
+            "description": "Raise cfg_strength from 2.0 to 2.5 in inference_config (fp32 inference, 32 NFE, sway -1.0 unchanged) so the conditional flow field is sharpened toward text-consistent content, the mechanism by which ASR transcription errors drop.",
+            "name": "Guidance-refined inference slot"
+          },
+          {
+            "description": "Unchanged funasr Paraformer zh scoring on 16k mono generated audio; the candidate is judged solely by the new frozen CER versus the parent's 0.0228, with full training evidence and EMA checkpoint replayable.",
+            "name": "Frozen evaluation route tts_zh_cer"
+          }
+        ],
+        "core_contribution": "A minimal mechanism repair showing that escaping the fine-tuning loss plateau requires fixing the optimization decay and the attention conditioning path jointly, rather than adding data or capacity: QK-normalized masked attention plus a post-warmup cosine LR schedule, paired with a modestly stronger CFG at inference, is hypothesized to lower Paraformer Chinese CER below 0.0228 under an identical budget.",
+        "method": "Prepare workspace source via --action prepare_source --candidate-source working/f5_candidate. Edit src/f5_tts/sure_candidate.py to expose build_scheduler implementing linear warmup (20000 updates) then cosine decay across the remaining total_updates; keep build_optimizer as the deployment's fused AdamW with lr 1e-05 and do not touch transform_batch. Submit SURE_TASK_WRAPPER --action candidate --parameters- with requires_training=true, architecture {qk_norm: 'rms', attn_mask_enabled: true}, training {epochs:50, learning_rate:1e-05, num_warmup_updates:20000, batch_size_per_gpu:25600, world_size:8, checkpoint_selection:'final_ema', seed:42, shuffle_seed:666}, candidate-source working/f5_candidate, and inference {cfg_strength:2.5, nfe_step:32, sway_sampling_coef:-1.0, target_rms:0.1, cross_fade_duration:0.15, remove_silence:false, text_cleanup:'none'}. The framework runs 50 epochs on the complete Premium train split from official weights; final EMA checkpoint is used for the single frozen tts_zh_cer evaluation. Repaired limitations: (1) constant LR plateau, (2) un-normalized/un-masked attention, (3) untuned inference guidance.",
+        "risks": "QK-norm parameters initialized fresh could transiently perturb pretrained attention dynamics under BF16; attention masking may interact with text_mask_padding=true conventions; cosine decay ending near zero could under-train late epochs if the optimum sits earlier; higher CFG can over-guid and increase acoustic artifacts that raise CER. All are monitored via the per-epoch validation loss trajectory in training_completion and judged only by the final frozen score.",
+        "root_domains": [
+          "speech-synthesis",
+          "asr-evaluation",
+          "model-fine-tuning"
+        ],
+        "tags": [
+          "tts",
+          "f5-tts",
+          "fine-tune",
+          "chinese",
+          "cer",
+          "dit",
+          "bf16",
+          "flow-matching",
+          "npu"
+        ],
+        "title": "Plateau-Breaking F5TTS v1.1: QK-Normed Masked Attention with Cosine LR Decay and Guidance-Refined Inference"
+      },
+      "evidence": [
+        "evidence:1e6957dbe5cf2995d7b2",
+        "evidence:07ae93796b2f44eabc92",
+        "evidence:77b79120e86a3c38be4f",
+        "evidence:65c00f69265d2be27b94",
+        "evidence:d94e528e17f17661eba2",
+        "evidence:78d1faa0f455e77de422",
+        "evidence:8fbf47aa6878d0d68436",
+        "evidence:74a325116b6c643afd31",
+        "evidence:6713a80fc66a9b0d3b1f",
+        "evidence:298ff9d9c03d4db3b25b",
+        "evidence:a5ee23fb52e357db4d20",
+        "evidence:3ce14ac10e5c9da31d91"
+      ]
+    },
+    {
+      "mode": "steady_engineer",
+      "idea": {
+        "abstract": "A v1.1 refinement of the completed F5TTS_v1_Base 50-epoch Premium Chinese fine-tune. The parent recipe plateaued at validation loss 0.655 by epoch ~40 with three weak slots: un-normalized un-masked DiT attention, a constant post-warmup learning rate, and convention-fixed CFG. This candidate enables QK RMSNorm and attention masking (requiring weight updates), swaps in a warmup+cosine-decay scheduler via build_scheduler, and raises inference CFG strength to 2.5. Training stays under the fixed contract (official init, fresh optimizer, 8 NPU DDP, BF16 autocast/FP32 master, 50 epochs, final EMA) and is scored once on the frozen tts_zh_cer route.",
+        "components": [
+          {
+            "description": "Flip qk_norm to RMSNorm and attn_mask_enabled to true in arch_config so query/key projections are normalized and padded text/audio positions are excluded from attention; newly initialized QK-norm parameters are the only structural addition, trainable during the full 50-epoch fine-tune from official weights.",
+            "name": "QK-normed masked DiT attention"
+          },
+          {
+            "description": "Implement build_scheduler in src/f5_tts/sure_candidate.py: linear warmup to 20000 updates followed by cosine decay to near-zero over the remaining ~53100 updates, replacing the constant 1e-05 that produced the epoch-40 validation-loss plateau; fused AdamW, grad clip 1.0, BF16 autocast, FP32 master params and final EMA unchanged.",
+            "name": "Cosine-decayed optimizer contract (build_scheduler)"
+          },
+          {
+            "description": "Raise cfg_strength from 2.0 to 2.5 in inference_config (fp32 inference, 32 NFE, sway -1.0 unchanged) so the conditional flow field is sharpened toward text-consistent content, the mechanism by which ASR transcription errors drop.",
+            "name": "Guidance-refined inference slot"
+          },
+          {
+            "description": "Unchanged funasr Paraformer zh scoring on 16k mono generated audio; the candidate is judged solely by the new frozen CER versus the parent's 0.0228, with full training evidence and EMA checkpoint replayable.",
+            "name": "Frozen evaluation route tts_zh_cer"
+          }
+        ],
+        "core_contribution": "A minimal mechanism repair showing that escaping the fine-tuning loss plateau requires fixing the optimization decay and the attention conditioning path jointly, rather than adding data or capacity: QK-normalized masked attention plus a post-warmup cosine LR schedule, paired with a modestly stronger CFG at inference, is hypothesized to lower Paraformer Chinese CER below 0.0228 under an identical budget.",
+        "method": "Prepare workspace source via --action prepare_source --candidate-source working/f5_candidate. Edit src/f5_tts/sure_candidate.py to expose build_scheduler implementing linear warmup (20000 updates) then cosine decay across the remaining total_updates; keep build_optimizer as the deployment's fused AdamW with lr 1e-05 and do not touch transform_batch. Submit SURE_TASK_WRAPPER --action candidate --parameters- with requires_training=true, architecture {qk_norm: 'rms', attn_mask_enabled: true}, training {epochs:50, learning_rate:1e-05, num_warmup_updates:20000, batch_size_per_gpu:25600, world_size:8, checkpoint_selection:'final_ema', seed:42, shuffle_seed:666}, candidate-source working/f5_candidate, and inference {cfg_strength:2.5, nfe_step:32, sway_sampling_coef:-1.0, target_rms:0.1, cross_fade_duration:0.15, remove_silence:false, text_cleanup:'none'}. The framework runs 50 epochs on the complete Premium train split from official weights; final EMA checkpoint is used for the single frozen tts_zh_cer evaluation. Repaired limitations: (1) constant LR plateau, (2) un-normalized/un-masked attention, (3) untuned inference guidance.",
+        "risks": "QK-norm parameters initialized fresh could transiently perturb pretrained attention dynamics under BF16; attention masking may interact with text_mask_padding=true conventions; cosine decay ending near zero could under-train late epochs if the optimum sits earlier; higher CFG can over-guid and increase acoustic artifacts that raise CER. All are monitored via the per-epoch validation loss trajectory in training_completion and judged only by the final frozen score.",
+        "root_domains": [
+          "speech-synthesis",
+          "asr-evaluation",
+          "model-fine-tuning"
+        ],
+        "tags": [
+          "tts",
+          "f5-tts",
+          "fine-tune",
+          "chinese",
+          "cer",
+          "dit",
+          "bf16",
+          "flow-matching",
+          "npu"
+        ],
+        "title": "Plateau-Breaking F5TTS v1.1: QK-Normed Masked Attention with Cosine LR Decay and Guidance-Refined Inference"
+      },
+      "evidence": [
+        "evidence:1e6957dbe5cf2995d7b2",
+        "evidence:07ae93796b2f44eabc92",
+        "evidence:77b79120e86a3c38be4f",
+        "evidence:65c00f69265d2be27b94",
+        "evidence:d94e528e17f17661eba2",
+        "evidence:78d1faa0f455e77de422",
+        "evidence:8fbf47aa6878d0d68436",
+        "evidence:74a325116b6c643afd31",
+        "evidence:6713a80fc66a9b0d3b1f",
+        "evidence:298ff9d9c03d4db3b25b",
+        "evidence:a5ee23fb52e357db4d20",
+        "evidence:3ce14ac10e5c9da31d91"
+      ]
+    }
+  ],
+  "drafts": [
+    {
+      "cache_file": "3a7794fbdeea6c258ec8d5267ea365752ccf9b76aea0549bca008709df89e62d-0.json",
+      "output": {
+        "fused_idea": {
+          "title": "Plateau-Breaking F5TTS v1.1: Joint Attention Normalization, Cosine LR Decay, and Guidance-Refined Inference under the Frozen CER Route",
+          "abstract": "A v1.1 refinement of the completed F5TTS_v1_Base 50-epoch Premium Chinese fine-tune. The parent recipe plateaued at validation loss 0.655 by epoch ~40 with three weak slots: un-normalized un-masked DiT attention, a constant post-warmup learning rate, and convention-fixed CFG. This candidate repairs all three declared functional slots in one coordinated intervention: it enables QK RMSNorm and attention masking in the DiT (requiring weight updates and a full 50-epoch run), swaps the constant post-warmup LR for a linear-warmup-then-cosine-decay schedule via the sanctioned build_scheduler hook, and raises inference CFG strength from 2.0 to 2.5. Training stays under the fixed contract (official init, fresh optimizer, 8 NPU DDP, BF16 autocast/FP32 master, 50 epochs, final EMA) and is scored once on the frozen tts_zh_cer route against the parent's 0.0228. The three edits are deliberately kept as separate, config-gated slots so the intervention is a typed modular repair bundle, but the hypothesis is honestly framed as a joint claim: plateau escape requires fixing the optimization decay and the attention conditioning path together, and the frozen CER evaluates the bundle as a whole.",
+          "core_contribution": "A minimal mechanism repair bundle showing that escaping the fine-tuning loss plateau requires fixing the optimization decay and the attention conditioning path jointly, rather than adding data or capacity: QK-normalized masked attention plus a post-warmup cosine LR schedule, paired with a modestly stronger CFG at inference, is hypothesized to lower Paraformer Chinese CER below 0.0228 under an identical budget. Each edit lives in its own declared functional slot (arch_config, build_scheduler, inference_config) with exact provenance bookkeeping, so future rounds can vary slots per round without conflating this round's joint outcome with any single mechanism.",
+          "hypothesis": "The parent's epoch-40 validation-loss plateau under a constant post-warmup LR of 1e-05, combined with un-normalized un-masked DiT attention and convention-fixed inference guidance, jointly limits further CER reduction; repairing all three slots in a single 50-epoch EMA run will produce a frozen tts_zh_cer below the parent's 0.0228, with the validation-loss trajectory indicating whether plateau escape occurred.",
+          "method": "Prepare workspace source via --action prepare_source --candidate-source working/f5_candidate. Edit src/f5_tts/sure_candidate.py to expose build_scheduler implementing linear warmup (20000 updates) then cosine decay across the remaining total_updates; keep build_optimizer as the deployment's fused AdamW with lr 1e-05 and do not touch transform_batch. Submit SURE_TASK_WRAPPER --action candidate --parameters- with requires_training=true, architecture {qk_norm: 'rms', attn_mask_enabled: true}, training {epochs:50, learning_rate:1e-05, num_warmup_updates:20000, batch_size_per_gpu:25600, world_size:8, checkpoint_selection:'final_ema', seed:42, shuffle_seed:666}, candidate-source working/f5_candidate, and inference {cfg_strength:2.5, nfe_step:32, sway_sampling_coef:-1.0, target_rms:0.1, cross_fade_duration:0.15, remove_silence:false, text_cleanup:'none'}. The framework runs 50 epochs on the complete Premium train split from official weights; the final EMA checkpoint is used for the single frozen tts_zh_cer evaluation compared only against the parent's 0.0228 under identical splits. Repaired limitations: (1) constant LR plateau, (2) un-normalized/un-masked attention, (3) untuned inference guidance.",
+          "risks": "QK-norm parameters initialized fresh could transiently perturb pretrained attention dynamics under BF16; attention masking may interact with text_mask_padding=true conventions; cosine decay ending near zero could under-train late epochs if the optimum sits earlier; higher CFG can over-guide and increase acoustic artifacts that raise CER. Because the three edits run together and no component ablations are permitted, the frozen CER is a joint result and cannot attribute the outcome to any single slot; negative or flat results should be interpreted as a bundle verdict and used to rank slots in later rounds. All are monitored via the per-epoch validation loss trajectory in training_completion and judged only by the final frozen score.",
+          "tags": [
+            "tts",
+            "f5-tts",
+            "fine-tune",
+            "chinese",
+            "cer",
+            "dit",
+            "bf16",
+            "flow-matching",
+            "npu"
+          ],
+          "operator": "fusion_agent",
+          "target_defects": [
+            "Validation loss plateau from ~epoch 40 under constant post-warmup LR",
+            "Un-normalized QK projections and absent attention masking in the DiT text-audio path",
+            "Inference CFG strength fixed by default rather than mechanism-driven",
+            "Joint-intervention attribution risk: provenance bookkeeping via slot-decoupled config fields without claiming single-run component attribution"
+          ],
+          "rationale": "All five mode searches converged on the same coordinated repair within the sanctioned edit surface (arch_config flags, build_scheduler hook, one inference knob), with consistent evaluator findings: alignment is maximal, feasibility is high (4-5), and the recurring defects are confounding/harder_to_ablate and a heuristic CFG choice. The fusion adopts the steady_engineer framing (highest best_score 3.6): the typed-slot modular repair bundle with provenance bookkeeping is the defensible core, the bridge_builder variant supplies the honest joint-intervention framing that avoids the 'attributable to schedule alone' overreach, and the evidence_first evaluator feedback confirms the plateau diagnosis from the parent's validation history directly implicates the constant-LR schedule. The CFG bump is kept as a support edit (mechanistically the most direct path from weights/guidance to CER) rather than elevated to the core mechanism, since guidance is not the dominant contribution.",
+          "components": [
+            "Cosine-decayed optimizer contract (build_scheduler)",
+            "QK-normed masked DiT attention",
+            "Guidance-refined inference slot",
+            "Frozen evaluation route tts_zh_cer"
+          ],
+          "component_explanations": {
+            "Cosine-decayed optimizer contract (build_scheduler)": "Dominant core mechanism. Implemented in src/f5_tts/sure_candidate.py as linear warmup to 20000 updates followed by cosine decay to near-zero over the remaining ~53100 updates, replacing the constant 1e-05 that produced the epoch-40 validation-loss plateau. This is the update rule that directly targets the observed optimization limit.",
+            "QK-normed masked DiT attention": "Support module. Flips qk_norm to RMSNorm and attn_mask_enabled to true in arch_config so query/key projections are normalized and padded text/audio positions are excluded from attention; newly initialized QK-norm parameters are the only structural addition, trainable during the full 50-epoch fine-tune from official weights. It conditions the attention path so the flow-matching residual learning operates on well-conditioned alignment signals.",
+            "Guidance-refined inference slot": "Support module. Raises cfg_strength from 2.0 to 2.5 in inference_config (fp32 inference, 32 NFE, sway -1.0 unchanged) so the conditional flow field is sharpened toward text-consistent content, the most direct mechanism by which ASR transcription errors drop. Kept at the parent's frozen parent for round inference semantics; it is a deliberate but secondary edit.",
+            "Frozen evaluation route tts_zh_cer": "Protocol/guardrail. Unchanged funasr Paraformer zh scoring on 16k mono generated audio; the candidate is judged solely by the new frozen CER versus the parent's 0.0228, with full training evidence and EMA checkpoint replayable. It is not the novelty."
+          },
+          "root_domains": [
+            "speech-synthesis",
+            "asr-evaluation",
+            "model-fine-tuning"
+          ],
+          "paper_graph_context": "Survey clusters emphasize dense-transformer refinements (norms, attention patterns) over backbone substitution, and inference-time flow control (CFG, sway sampling, NFE) over architectural rewrites. Anchors include evidence on dense Transformer architectures with minor adaptations (evidence:1e6957dbe5cf2995d7b2), sparse attention patterns (evidence:77b79120e86a3c38be4f), Conformer-style attention convolution sandwiches (evidence:d94e528e17f17661eba2), and Small-E's alignment-stability focus in linear-attention TTS (evidence:6713a80fc66a9b0d3b1f, evidence:298ff9d9c03d4db3b25b). These support the position that normalization/masking refinements plus guidance control are the correct levers within a dense DiT fine-tune, matching the parent run's own validation history implicating the constant LR.",
+          "edit_plan": null,
+          "skill_metrics": {}
+        },
+        "fusion_metadata": {
+          "host_idea_mode": "steady_engineer",
+          "selected_components": [
+            {
+              "source_mode": "steady_engineer",
+              "component": "Cosine-decayed optimizer contract (build_scheduler)",
+              "role": "core_mechanism",
+              "why_selected": "The parent run's validation history directly implicates the constant post-warmup LR as the cause of the epoch-40 plateau; the scheduler edit is the underlying task-solving update rule and stays entirely within the sanctioned build_scheduler hook. The steady_engineer evaluator explicitly noted the strongest non-obvious element is targeting the epoch-40 plateau via the scheduler hook.",
+              "evidence": [
+                "The candidate stays tightly within the allowed edit surface (arch_config flips, build_scheduler hook, one inference knob) and correctly identifies the plateau as a target.",
+                "the strongest non-obvious element is targeting the epoch-40 plateau via the scheduler hook"
+              ]
+            },
+            {
+              "source_mode": "steady_engineer",
+              "component": "QK-normed masked DiT attention",
+              "role": "support_module",
+              "why_selected": "Kept as the structural conditioning repair inside the declared arch_config slot; it is a support edit, not a competing core mechanism, and the evaluator confirmed the arch->inference config wiring is clean and well-scoped within the refinement surface.",
+              "evidence": [
+                "The actual mechanism edits (qk_norm='rms', attn_mask_enabled=true, cosine decay, CFG 2.5) are reasonable, well-scoped, and within the refinement surface, and the arch→inference config wiring is clean."
+              ]
+            },
+            {
+              "source_mode": "steady_engineer",
+              "component": "Guidance-refined inference slot",
+              "role": "support_module",
+              "why_selected": "Retained because guidance strength is the most direct mechanism from weights to CER, but demoted from any core role per evaluator findings that it is a heuristic knob; it stays as a deliberate secondary slot edit with exact provenance bookkeeping.",
+              "evidence": [
+                "Framing the contribution as a typed-slot modular repair bundle (which genuinely reduces responsibility_entanglement and rollback blindspot for future search nodes) is the defensible core; the attribution claim should be softened to provenance bookkeeping."
+              ]
+            },
+            {
+              "source_mode": "bridge_builder",
+              "component": "Frozen evaluation route tts_zh_cer",
+              "role": "guardrail",
+              "why_selected": "The bridge_builder trace supplies the honest joint-intervention framing used in the fused hypothesis and risks: no component ablations are permitted, so the single frozen CER is a bundle verdict compared only against the parent's 0.0228. This guardrail is required by the SURE contract and must not be presented as the novelty.",
+              "evidence": [
+                "Since no component ablations are permitted, the honest framing is a joint intervention with a schedule-centered thesis; the in-run plateau-escape check should be treated as indicative only given the ~0.001 validation-loss noise floor near epoch 40."
+              ]
+            }
+          ],
+          "rejected_components": [
+            {
+              "source_mode": "bridge_builder",
+              "component": "Cosine-decayed optimizer contract (build_scheduler)",
+              "why_rejected": "Rejected as the core mechanism from this mode because its node-level framing 'attributable to the schedule alone' contradicts bundling QK-norm, mask, and CFG changes in the same run; the schedule thesis is retained through the steady_engineer host instead, without the single-mechanism attribution overreach.",
+              "evidence": [
+                "the claim that the intervention is 'attributable to the schedule alone' is contradicted by the bundled QK-norm, mask, and CFG-2.5 changes inherited in the same run — this is a responsibility_entanglement risk"
+              ]
+            },
+            {
+              "source_mode": "steady_engineer",
+              "component": "Frozen evaluation route tts_zh_cer",
+              "why_rejected": "Not adopted as a selectable novelty element from this mode: the evaluator showed that slot-isolated change-tracking cannot yield component attribution from a single joint execution, so the bookkeeping framing is softened and the frozen route is carried as the required protocol only.",
+              "evidence": [
+                "a single joint execution still yields one number, and auxiliary ablations are disallowed"
+              ]
+            }
+          ],
+          "conflicts_and_resolutions": [
+            {
+              "conflict": "bridge_builder's schedule-alone attribution framing versus steady_engineer's provenance-only framing of the same joint bundle",
+              "resolution": "Adopt the steady_engineer typed-slot provenance framing as the fused contribution and drop all 'attributable to schedule alone' language; the fused hypothesis states the joint claim honestly, with the validation trajectory used only as an indicative plateau check.",
+              "source_modes": [
+                "steady_engineer",
+                "bridge_builder"
+              ],
+              "evidence": [
+                "the claim that per-slot contribution becomes 'identifiable from the one execution' is not supported by the protocol.",
+                "Since no component ablations are permitted, the honest framing is a joint intervention with a schedule-centered thesis"
+              ]
+            },
+            {
+              "conflict": "CFG 2.5 treated as core mechanism in ambitious_realist/moonshot traces versus demoted heuristic knob in steady_engineer/evidence_first traces",
+              "resolution": "Keep the CFG bump as a support module edit, not the dominant core mechanism: the scheduler targeting the measured plateau is the core, and guidance is a deliberate secondary edit whose mechanism to CER is acknowledged without letting the unfalsifiable single-shot guess carry the contribution.",
+              "source_modes": [
+                "steady_engineer",
+                "ambitious_realist"
+              ],
+              "evidence": [
+                "the CFG change is the only edit with a direct mechanism to CER and could be validated on its own at far lower cost; bundling it with structural changes increases attribution risk without clear additive justification.",
+                "The CFG 2.5 slot is essentially an untuned hyperparameter guess riding on the training change"
+              ]
+            }
+          ],
+          "fused_core_thesis": "A coordinated three-slot repair (QK-normalized masked attention, warmup-then-cosine LR decay, CFG 2.5) within the frozen SURE contract is a joint intervention whose outcome is honestly framed as a bundle verdict: the plateau diagnosis implicates the constant post-warmup LR as the central mechanism, with attention conditioning and guidance as deliberately booked secondary slots.",
+          "why_stronger_than_each_input": "It removes the schedule-alone attribution overreach from bridge_builder and moonshot variants, removes the unsupported single-run component-attribution claim from steady_engineer's intermediate nodes, and keeps the highest-fidelity host framing (steady_engineer, best_score 3.6) while preserving all three mechanism edits with exact provenance bookkeeping; the risks section now correctly states that a joint outcome cannot be decomposed, which none of the individual root candidates fully acknowledged.",
+          "minimal_validation_plan": "One normal SURE candidate execution under the supplied budget: prepare workspace source, edit src/f5_tts/sure_candidate.py build_scheduler (linear warmup 20000 updates then cosine decay over total_updates), submit requires_training=true with architecture {qk_norm:'rms', attn_mask_enabled:true}, the fixed 50-epoch/8-rank BF16 training contract with final EMA, and inference {cfg_strength:2.5}; the final EMA checkpoint is scored once on the frozen tts_zh_cer route against the parent's 0.0228, with the per-epoch validation-loss trajectory recorded. Ablation=[]."
+        }
+      }
+    },
+    {
+      "cache_file": "12be5f27a5e2e3a0ae6b6109d46131418f9264ccb37334d7ecf6065f7f19a54f-0.json",
+      "output": {
+        "fused_idea": {
+          "title": "Plateau-Breaking F5TTS v1.1: QK-Normed Masked Attention Repair with Warmup-to-Cosine LR Decay",
+          "abstract": "A v1.1 refinement of the completed F5TTS_v1_Base 50-epoch Premium Chinese fine-tune (frozen tts_zh_cer 0.0228). The parent recipe plateaued at validation loss 0.655 by epoch ~40 under a constant post-warmup learning rate while running un-normalized, un-masked DiT attention. This fused candidate repairs the training-side slots only: it flips qk_norm to RMSNorm and attn_mask_enabled to true in arch_config (requiring weight updates, trained from official weights with a fresh optimizer), and implements build_scheduler in src/f5_tts/sure_candidate.py as linear warmup (20000 updates) followed by cosine decay over the remaining ~53100 updates. Inference stays at the parent's frozen defaults (cfg_strength 2.0, 32 NFE, fp32), so the frozen CER outcome is attributable to the conditioning/optimization repair alone. Everything else — data, splits, 50 epochs, 8 NPU DDP, BF16 autocast/FP32 master, final EMA, vocoder, vocab — is unchanged.",
+          "core_contribution": "A mechanism-committed slot repair showing that the fine-tuning plateau is attacked by fixing the attention conditioning path (QK normalization + attention masking) together with the post-warmup learning-rate decay via the sanctioned build_scheduler hook, deliberately excluding inference-side changes so the single frozen tts_zh_cer evaluation carries one coherent causal story: better-conditioned alignment plus annealed updates should push CER below 0.0228 under an identical budget.",
+          "hypothesis": "The epoch-40 validation-loss plateau of the parent fine-tune stems from the constant post-warmup LR and under-specified text-audio attention (no QK norm, no attention masking); jointly repairing these two training-side slots will improve the final EMA checkpoint and lower frozen Paraformer Chinese CER below the parent's 0.0228.",
+          "method": "Call SURE_TASK_WRAPPER --action prepare_source --candidate-source working/f5_candidate. Edit src/f5_tts/sure_candidate.py to expose build_scheduler(optimizer, total_updates, training) implementing linear warmup for 20000 updates then cosine decay to a small floor across the remaining ~53100 updates; keep build_optimizer as the deployment's fused AdamW (lr 1e-05) and leave transform_batch untouched. Submit SURE_TASK_WRAPPER --action candidate --parameters- with requires_training=true, architecture {qk_norm: 'rms', attn_mask_enabled: true}, training {epochs: 50, learning_rate: 1e-05, num_warmup_updates: 20000, batch_size_per_gpu: 25600, world_size: 8, checkpoint_selection: 'final_ema', seed: 42, shuffle_seed: 666}, candidate-source working/f5_candidate, and inference at the parent's frozen defaults {cfg_strength: 2.0, nfe_step: 32, sway_sampling_coef: -1.0, target_rms: 0.1, cross_fade_duration: 0.15, remove_silence: false, text_cleanup: 'none'}. The framework runs 50 full epochs on the complete Premium train split from official weights with a fresh optimizer; the final EMA checkpoint is scored once on the frozen tts_zh_cer route. Ablation=[] — no auxiliary experiments.",
+          "risks": "Freshly initialized QK-norm parameters could transiently perturb pretrained attention dynamics under BF16 autocast; attention masking may interact with the existing text_mask_padding=true convention; cosine decay ending near zero could under-train late epochs if the optimum sits earlier. All are monitored via the per-epoch validation-loss trajectory in training_completion, and the candidate is judged only by the single frozen tts_zh_cer score against the parent's 0.0228. Because inference is unchanged, any CER regression or non-improvement reflects the training-side joint repair, not guidance effects.",
+          "tags": [
+            "tts",
+            "f5-tts",
+            "fine-tune",
+            "chinese",
+            "cer",
+            "dit",
+            "bf16",
+            "flow-matching",
+            "npu"
+          ],
+          "operator": "fusion_agent",
+          "target_defects": [
+            "Validation loss plateau from ~epoch 40 under constant post-warmup LR",
+            "Un-normalized QK projections and absent attention masking in the DiT text-audio path",
+            "Responsibility entanglement from bundling an untuned inference CFG change with training-side repairs"
+          ],
+          "rationale": "All five mode inputs converge on the same three training-side slot flips; evaluators across bridge_builder, steady_engineer, and ambitious_realist consistently flagged the CFG 2.5 bump as an untuned heuristic confound on a single frozen metric ('essentially an untuned hyperparameter guess riding on the training change'). The fusion therefore keeps the QK-normed masked attention repair as the one dominant core mechanism, adds the plateau-targeted cosine scheduler as the sanctioned support module, and rejects the inference guidance change to keep the causal chain single and honest under the SURE contract (one normal candidate execution, ablation=[]).",
+          "components": [
+            "QK-normed masked DiT attention",
+            "Cosine-decayed optimizer contract (build_scheduler)",
+            "Frozen evaluation route tts_zh_cer"
+          ],
+          "component_explanations": {
+            "QK-normed masked DiT attention": "Dominant core mechanism: flipping qk_norm to RMSNorm and attn_mask_enabled to true conditions the transformer's attention scores before flow-matching residual learning, aligning text-audio attention with the survey's dense-transformer refinement consensus (Conformer pre-norm sandwich, GQA-style attention adaptations, alignment-stability attention refinements).",
+            "Cosine-decayed optimizer contract (build_scheduler)": "Support module implementing the warmup+cosine decay in the explicitly sanctioned build_scheduler hook, replacing the constant 1e-05 tail that the parent's validation history implicates in the epoch-40 plateau; fused AdamW, grad clip 1.0, BF16 autocast, FP32 master params, and final EMA are unchanged.",
+            "Frozen evaluation route tts_zh_cer": "Guardrail/protocol component: unchanged funasr Paraformer zh scoring on 16k mono audio with inference at parent defaults, so the candidate is judged solely by one frozen CER versus 0.0228 with replayable training evidence."
+          },
+          "root_domains": [
+            "speech-synthesis",
+            "asr-evaluation",
+            "model-fine-tuning"
+          ],
+          "paper_graph_context": "Graph neighbors anchor the survey's baseline-comparison context (Grad-StyleSpeech as a diffusion-TTS baseline); survey paragraphs on Small-E and RWKV-7 (survey-paragraph-135, survey-paragraph-158) establish that alignment-stability attention refinements and inference-time flow control dominate recent TTS progress over backbone substitution; component-index evidence ties the proposed changes to established dense-transformer adaptations (GQA attention adaptation, sparse attention patterns, Conformer pre-norm attention sandwich).",
+          "edit_plan": null,
+          "skill_metrics": {}
+        },
+        "fusion_metadata": {
+          "host_idea_mode": "steady_engineer",
+          "selected_components": [
+            {
+              "source_mode": "steady_engineer",
+              "component": "QK-normed masked DiT attention",
+              "role": "core_mechanism",
+              "why_selected": "The single structural repair targeting the under-specified text-audio attention path; it is the one mechanism that changes the model's conditioning representation and directly follows the survey consensus on dense-transformer attention refinements rather than backbone substitution.",
+              "evidence": [
+                "A novel architecture that organically combines convolutions with self-attention in ASR models by sandwiching attention and convolution modules between feed-forward layers. A novel architecture that organically combines convolutions with self-attention in ASR models by sandwiching attention and convolution modules between feed-forward layers. Conformer",
+                "The candidate stays tightly within the allowed edit surface (arch_config flips, build_scheduler hook, one inference knob) and correctly identifies the plateau as a target."
+              ]
+            },
+            {
+              "source_mode": "bridge_builder",
+              "component": "Cosine-decayed optimizer contract (build_scheduler)",
+              "role": "support_module",
+              "why_selected": "Directly grounded in the parent's measured epoch-40 validation plateau; it is the sanctioned build_scheduler hook, so it strengthens the same training-side causal chain without introducing a competing mechanism.",
+              "evidence": [
+                "The idea correctly targets the constant post-warmup LR tail as a weak slot and specifies the build_scheduler edit precisely within the allowed local-modification surface.",
+                "The floor-anchored cosine schedule itself is a well-known, obvious-next-step recipe (novelty limited), but the specific claim that EMA checkpoint quality under a fixed short budget is governed by late-stage update magnitude is a legitimate, testable sharpening of the parent's diagnosis of the validation plateau."
+              ]
+            },
+            {
+              "source_mode": "moonshot_inventor",
+              "component": "Frozen evaluation route tts_zh_cer",
+              "role": "guardrail",
+              "why_selected": "Unchanged Paraformer CER route with inference held at parent defaults keeps the single frozen score interpretable as evidence about the training-side joint repair alone.",
+              "evidence": [
+                "Unchanged funasr Paraformer zh scoring on 16k mono generated audio; the candidate is judged solely by the new frozen CER versus the parent's 0.0228, with full training evidence and EMA checkpoint replayable.",
+                "All are monitored via the per-epoch validation loss trajectory in training_completion and judged only by the final frozen score."
+              ]
+            }
+          ],
+          "rejected_components": [
+            {
+              "source_mode": "ambitious_realist",
+              "component": "Guidance-refined inference slot",
+              "why_rejected": "The CFG 2.5 bump is an untuned hyperparameter guess with no mechanism-derived value; bundling it into the training run confounds the frozen single-score evaluation, and several evaluators explicitly flagged it as an avoidable coupling.",
+              "evidence": [
+                "The CFG 2.5 slot is essentially an untuned hyperparameter guess riding on the training change and could be evaluated on its own without any training, making its inclusion in the same run avoidable coupling. Consider decoupling the inference-only change, or at minimum stating what validation-loss trajectory signature would count as plateau-breaking.",
+                "The CFG bump is convention-driven rather than mechanism-derived and interacts with the training-side changes"
+              ]
+            },
+            {
+              "source_mode": "bridge_builder",
+              "component": "Modularly Ablatable F5TTS v1.1: Slot-Decoupled QK-Norm Attention, Scheduler Hook, and Guidance Knob for Plateau-Breaking Chinese TTS Fine-Tuning",
+              "why_rejected": "A software-organization wrapper whose only benefit is future attribution; it delivers no new mechanism now because auxiliary ablations are disallowed, and its provenance claim was flagged as unsupported by the protocol.",
+              "evidence": [
+                "Modularization makes future attribution possible but delivers none now, since ablation=[] is required; the claim that the three slots are 'jointly necessary' remains untested and is a residual validation_gap. Novelty and surprise are therefore limited to a software-organization insight rather than a new mechanism."
+              ]
+            },
+            {
+              "source_mode": "steady_engineer",
+              "component": "Slot-Isolated F5TTS v1.1.1: Modular QK-Normed Masked Attention Wired to Guidance-Refined Inference under a Single-Execution Change-Tracking Protocol",
+              "why_rejected": "Change-tracking bookkeeping presented as attribution; the claim that per-slot contribution becomes identifiable from one joint execution is unsupported, and typed-slot bookkeeping is not a task-solving mechanism.",
+              "evidence": [
+                "The candidate correctly recognizes that the parent v1.1 bundle is unattributable, but its remedy — typed config fields, separate build_scheduler hook, and change-tracking diffs — improves bookkeeping, not attribution: a single joint execution still yields one number, and auxiliary ablations are disallowed."
+              ]
+            }
+          ],
+          "conflicts_and_resolutions": [
+            {
+              "conflict": "Whether to bundle the inference CFG 2.5 change into the single training candidate alongside the QK-norm/mask and scheduler repairs.",
+              "resolution": "Drop the CFG change and hold inference at the parent's frozen cfg_strength 2.0 defaults; the fused idea commits to the training-side joint repair (QK-normed masked attention + cosine decay) so the single frozen CER comparison is attributable to one coherent conditioning/optimization mechanism.",
+              "source_modes": [
+                "ambitious_realist",
+                "steady_engineer"
+              ],
+              "evidence": [
+                "The main weakness is confounding: bundling a structural change, an optimization change, and an inference change means the hypothesis 'plateau escape requires joint repair' is not falsifiable component-wise; if CER fails to improve, the evidence cannot distinguish which slot is responsible.",
+                "The CFG change is the only edit with a direct mechanism to CER and could be validated on its own at far lower cost; bundling it with structural changes increases attribution risk without clear additive justification."
+              ]
+            },
+            {
+              "conflict": "Whether the LR schedule should be framed as the sole cause of plateau escape (mechanism-commit variants) versus a joint optimization/attention thesis.",
+              "resolution": "Frame the fused thesis as one joint training-side intervention in which the attention conditioning repair and the decayed schedule are the coordinated core, explicitly avoiding any 'schedule alone' or per-component attribution claims that no execution could support.",
+              "source_modes": [
+                "bridge_builder"
+              ],
+              "evidence": [
+                "A cleaner commitment would hold CFG at the parent's 2.0 and treat the schedule as the sole mechanism edit, or explicitly reframe the candidate as one joint intervention whose outcome cannot be decomposed.",
+                "Since no component ablations are permitted, the honest framing is a joint intervention with a schedule-centered thesis; the in-run plateau-escape check should be treated as indicative only given the ~0.001 validation-loss noise floor near epoch 40."
+              ]
+            }
+          ],
+          "fused_core_thesis": "The parent F5TTS_v1_Base fine-tune's epoch-40 validation plateau and its under-specified text-audio attention can be jointly repaired by enabling QK RMSNorm plus attention masking in the DiT and replacing the constant post-warmup LR with a warmup-to-cosine-decay schedule via the sanctioned build_scheduler hook; with inference frozen at parent defaults, one 50-epoch final-EMA run on the complete Premium train split is scored once on the frozen tts_zh_cer route to test whether this conditioning/optimization repair lowers CER below 0.0228.",
+          "why_stronger_than_each_input": "Every mode input kept the CFG 2.5 bump inside the training bundle, which every evaluator flagged as the main confound on the single frozen metric; the fused idea removes that defect while retaining the strongest, most direct mechanism repairs (QK-normed masked attention, plateau-targeted cosine decay) on the sanctioned edit surface, yielding a cleaner causal chain than the root, better attribution honesty than the slot-isolation variants, and higher validation power than the modular bookkeeping variants.",
+          "minimal_validation_plan": "One normal SURE candidate execution: prepare working/f5_candidate source, implement build_scheduler (linear warmup 20000 updates, then cosine decay), submit --action candidate with requires_training=true, architecture {qk_norm: 'rms', attn_mask_enabled: true}, parent-frozen training settings (50 epochs, lr 1e-05, warmup 20000, batch 25600 frames/GPU, world_size 8, final_ema, seeds 42/666), and parent-frozen inference defaults; the framework completes 50 epochs and scores the final EMA checkpoint once on the frozen tts_zh_cer route against the parent's 0.0228. Ablation=[]."
+        }
+      }
+    },
+    {
+      "cache_file": "5fa495fb463315615ec6f7ec8683b68a43ea22db7e869faa935f543b29c8b367-0.json",
+      "output": {
+        "fused_idea": {
+          "title": "Plateau-Breaking F5TTS v1.1: QK-Normed Masked Attention with Cosine LR Decay and Guidance-Refined Inference",
+          "abstract": "A v1.1 refinement of the completed F5TTS_v1_Base 50-epoch Premium Chinese fine-tune. The parent recipe plateaued at validation loss 0.655 by epoch ~40 with three weak slots: un-normalized un-masked DiT attention, a constant post-warmup learning rate, and convention-fixed CFG. This candidate enables QK RMSNorm and attention masking (requiring weight updates), swaps in a warmup+cosine-decay scheduler via build_scheduler, and raises inference CFG strength to 2.5. Training stays under the fixed contract (official init, fresh optimizer, 8 NPU DDP, BF16 autocast/FP32 master, 50 epochs, final EMA) and is scored once on the frozen tts_zh_cer route.",
+          "core_contribution": "A minimal mechanism repair showing that escaping the fine-tuning loss plateau requires fixing the optimization decay and the attention conditioning path jointly, rather than adding data or capacity: QK-normalized masked attention plus a post-warmup cosine LR schedule, paired with a modestly stronger CFG at inference, is hypothesized to lower Paraformer Chinese CER below 0.0228 under an identical budget.",
+          "hypothesis": "The epoch-40 validation-loss plateau stems jointly from the constant post-warmup learning rate and the un-normalized, un-masked text-audio attention path; repairing these two training-side slots together, and modestly strengthening inference guidance, will lower the frozen tts_zh_cer below the parent's 0.0228 under an identical budget.",
+          "method": "Prepare workspace source via --action prepare_source --candidate-source working/f5_candidate. Edit src/f5_tts/sure_candidate.py to expose build_scheduler implementing linear warmup (20000 updates) then cosine decay across the remaining total_updates; keep build_optimizer as the deployment's fused AdamW with lr 1e-05 and do not touch transform_batch. Submit SURE_TASK_WRAPPER --action candidate --parameters- with requires_training=true, architecture {qk_norm: 'rms', attn_mask_enabled: true}, training {epochs:50, learning_rate:1e-05, num_warmup_updates:20000, batch_size_per_gpu:25600, world_size:8, checkpoint_selection:'final_ema', seed:42, shuffle_seed:666}, candidate-source working/f5_candidate, and inference {cfg_strength:2.5, nfe_step:32, sway_sampling_coef:-1.0, target_rms:0.1, cross_fade_duration:0.15, remove_silence:false, text_cleanup:'none'}. The framework runs 50 epochs on the complete Premium train split from official weights; the final EMA checkpoint is used for the single frozen tts_zh_cer evaluation against the parent's 0.0228.",
+          "risks": "QK-norm parameters initialized fresh could transiently perturb pretrained attention dynamics under BF16; attention masking may interact with text_mask_padding=true conventions; cosine decay ending near zero could under-train late epochs if the optimum sits earlier; higher CFG can over-guid and increase acoustic artifacts that raise CER. All three edits are confounded in a single execution, so the outcome validates the bundle, not individual slots; validation-loss trajectory in training_completion is indicative only given the ~0.001 loss noise floor near epoch 40.",
+          "tags": [
+            "tts",
+            "f5-tts",
+            "fine-tune",
+            "chinese",
+            "cer",
+            "dit",
+            "bf16",
+            "flow-matching",
+            "npu"
+          ],
+          "operator": "fusion_agent",
+          "target_defects": [
+            "Validation loss plateau from ~epoch 40 under constant post-warmup LR",
+            "Un-normalized QK projections and absent attention masking in the DiT text-audio path",
+            "Inference CFG strength fixed by default rather than mechanism-driven"
+          ],
+          "rationale": "All five modes converge on the same joint repair within the allowed edit surface (arch_config flips, build_scheduler hook, one inference knob); the highest-scoring evidence_first and steady_engineer diagnostics endorse the plateau diagnosis from the parent's own validation history. The fused idea keeps one causal chain: decayed LR + conditioned attention escape the plateau, and stronger CFG converts better weights into lower CER.",
+          "components": [
+            "QK-normed masked DiT attention",
+            "Cosine-decayed optimizer contract (build_scheduler)",
+            "Guidance-refined inference slot",
+            "Frozen evaluation route tts_zh_cer"
+          ],
+          "component_explanations": {
+            "QK-normed masked DiT attention": "Core structural mechanism: normalizing Q/K projections and excluding padded positions conditions the text-audio attention path, aligning with survey evidence that dense-transformer attention refinements (norms, masking) rather than backbone substitution drive quality.",
+            "Cosine-decayed optimizer contract (build_scheduler)": "Core optimization mechanism targeting the directly diagnosed defect: constant 1e-05 after 20000-update warmup produced the epoch-40 plateau; cosine decay lets late updates sharpen the EMA weights within the fixed 50-epoch budget.",
+            "Guidance-refined inference slot": "Support inference change: CFG 2.5 sharpens the conditional flow field toward text-consistent content, the mechanism by which better weights translate into fewer Paraformer transcription errors.",
+            "Frozen evaluation route tts_zh_cer": "Guardrail: unchanged funasr Paraformer zh frozen scoring guarantees a like-for-like comparison against the parent's 0.0228 under identical splits."
+          },
+          "root_domains": [
+            "speech-synthesis",
+            "asr-evaluation",
+            "model-fine-tuning"
+          ],
+          "paper_graph_context": "Survey anchors include Small-E (linear attention and alignment stability, s2:3d178d96c74bf7d1d070a227e70b7cde805b9005) and stepwise monotonic attention (s2:051238432e23a865981c95579deb978e815d8f55), supporting alignment-focused attention refinements; component-index evidence on dense Transformer adaptations (GQA, sparse attention patterns) supports local attention-path conditioning over backbone substitution. Graph neighbors (Grad-StyleSpeech) contextualize diffusion/TTS baselines.",
+          "edit_plan": null,
+          "skill_metrics": {}
+        },
+        "fusion_metadata": {
+          "host_idea_mode": "steady_engineer",
+          "selected_components": [
+            {
+              "source_mode": "steady_engineer",
+              "component": "QK-normed masked DiT attention",
+              "role": "core_mechanism",
+              "why_selected": "Only structural change; conditions the text-audio attention path, directly repairing the un-normalized/un-masked slot flagged by every diagnostic; survey evidence supports attention refinements over backbone substitution.",
+              "evidence": [
+                "The proposal stays entirely within the allowed edit surface: it flips existing arch_config slots (qk_norm, attn_mask_enabled), uses the sanctioned build_scheduler hook for warmup+cosine decay, and adjusts one inference parameter.",
+                "A standard dense Transformer architecture with minor adaptations like Grouped Query Attention (GQA), a 128K token vocabulary, and increased RoPE base frequency for longer contexts."
+              ]
+            },
+            {
+              "source_mode": "steady_engineer",
+              "component": "Cosine-decayed optimizer contract (build_scheduler)",
+              "role": "core_mechanism",
+              "why_selected": "Directly targets the measured epoch-40 plateau under constant post-warmup LR; the parent's own validation history provides the causal evidence, and the hook is the sanctioned edit surface.",
+              "evidence": [
+                "the plateau diagnosis from the parent's validation history (flat ~0.655 from epoch ~40 under a constant post-warmup LR) gives a coherent causal story for the scheduler change"
+              ]
+            },
+            {
+              "source_mode": "steady_engineer",
+              "component": "Guidance-refined inference slot",
+              "role": "support_module",
+              "why_selected": "The only edit with a direct mechanism to CER; kept as a modest, bounded support change so the bundle reads as one coordinated intervention rather than an unranked numeric sweep.",
+              "evidence": [
+                "The CFG change is the only edit with a direct mechanism to CER and could be validated on its own at far lower cost; bundling it with structural changes increases attribution risk without clear additive justification."
+              ]
+            },
+            {
+              "source_mode": "steady_engineer",
+              "component": "Frozen evaluation route tts_zh_cer",
+              "role": "guardrail",
+              "why_selected": "Preserves like-for-like comparison with the parent's 0.0228 under identical splits; required by the SURE contract and not a novelty source.",
+              "evidence": [
+                "Unchanged funasr Paraformer zh scoring on 16k mono generated audio; the candidate is judged solely by the new frozen CER versus the parent's 0.0228, with full training evidence and EMA checkpoint replayable."
+              ]
+            }
+          ],
+          "rejected_components": [
+            {
+              "source_mode": "bridge_builder",
+              "component": "Mechanism-Committed F5TTS v1.2: Annealed Warmup-to-1e-7 Cosine Schedule for Plateau Escape in QK-Normed Fine-Tuning",
+              "why_rejected": "This child node duplicates the schedule repair already kept and was explicitly flagged for a title-attribution inconsistency ('attributable to the schedule alone') contradicted by the bundled QK-norm/mask/CFG changes; carrying the floor-anchored variant would add an unmotivated 1e-7 floor and a competing framing without new mechanism.",
+              "evidence": [
+                "The idea correctly targets the constant post-warmup LR tail as a weak slot and specifies the build_scheduler edit precisely within the allowed local-modification surface. However, the claim that the intervention is 'attributable to the schedule alone' is contradicted by the bundled QK-norm, mask, and CFG-2.5 changes inherited in the same run — this is a responsibility_entanglement risk."
+              ]
+            },
+            {
+              "source_mode": "bridge_builder",
+              "component": "Modularly Ablatable F5TTS v1.1: Slot-Decoupled QK-Norm Attention, Scheduler Hook, and Guidance Knob for Plateau-Breaking Chinese TTS Fine-Tuning",
+              "why_rejected": "Purely a code-organization rework of the same three mechanisms; it delivers no scientific delta in this round since ablations are disallowed and would elevate bookkeeping above mechanism.",
+              "evidence": [
+                "Modularization makes future attribution possible but delivers none now, since ablation=[] is required; the claim that the three slots are 'jointly necessary' remains untested and is a residual validation_gap. Novelty and surprise are therefore limited to a software-organization insight rather than a new mechanism."
+              ]
+            },
+            {
+              "source_mode": "steady_engineer",
+              "component": "Slot-Isolated F5TTS v1.1.1: Modular QK-Normed Masked Attention Wired to Guidance-Refined Inference under a Single-Execution Change-Tracking Protocol",
+              "why_rejected": "Its per-slot attribution claim is unsupported by the single-execution protocol; the underlying mechanisms are already carried, so only the overreaching provenance thesis is dropped.",
+              "evidence": [
+                "The candidate correctly recognizes that the parent v1.1 bundle is unattributable, but its remedy — typed config fields, separate build_scheduler hook, and change-tracking diffs — improves bookkeeping, not attribution: a single joint execution still yields one number, and auxiliary ablations are disallowed."
+              ]
+            },
+            {
+              "source_mode": "moonshot_inventor",
+              "component": "Plateau-Breaking F5TTS v1.1: QK-Normed Masked Attention with Cosine LR Decay and Guidance-Refined Inference",
+              "why_rejected": "Identical mechanism bundle to the host mode with a weaker diagnostic (lowest novelty score of 2); retained only via the shared root, not as an additional source of components.",
+              "evidence": [
+                "The central thesis—that the epoch-40 validation plateau stems jointly from constant post-warmup LR and un-normalized attention rather than data or capacity—is a reasonable mechanism diagnosis grounded in the recorded validation trajectory. Weaknesses: all three changes are confounded in a single training run, so the frozen CER cannot distinguish which repair mattered"
+              ]
+            },
+            {
+              "source_mode": "ambitious_realist",
+              "component": "Plateau-Breaking F5TTS v1.1: QK-Normed Masked Attention with Cosine LR Decay and Guidance-Refined Inference",
+              "why_rejected": "Same root bundle; its diagnostic contribution (labeling CFG 2.5 as an untuned heuristic and confounded with training changes) is absorbed as a stated risk rather than as a distinct component.",
+              "evidence": [
+                "The CFG 2.5 slot is essentially an untuned hyperparameter guess riding on the training change and could be evaluated on its own without any training, making its inclusion in the same run avoidable coupling."
+              ]
+            },
+            {
+              "source_mode": "evidence_first",
+              "component": "Plateau-Breaking F5TTS v1.1: QK-Normed Masked Attention with Cosine LR Decay and Guidance-Refined Inference",
+              "why_rejected": "Same root bundle; retained for its plateau framing only, with its 'weak_fallback_behavior' defect folded into the fused risks.",
+              "evidence": [
+                "The main weakness is bundling three edits with only one frozen evaluation: the outcome will be a joint result, not component evidence."
+              ]
+            }
+          ],
+          "conflicts_and_resolutions": [
+            {
+              "conflict": "Whether the CFG 2.5 inference change should be bundled with the training-side repairs or run separately as an inference-only probe on the frozen parent.",
+              "resolution": "Keep CFG 2.5 inside the single permitted joint execution as a declared, bounded support change, and state explicitly in risks that the outcome validates the bundle, not individual slots; the frozen-parent probe remains a future-round option, not an auxiliary experiment now.",
+              "source_modes": [
+                "ambitious_realist",
+                "steady_engineer"
+              ],
+              "evidence": [
+                "Consider decoupling the inference-only change, or at minimum stating what validation-loss trajectory signature would count as plateau-breaking.",
+                "The CFG change is the only edit with a direct mechanism to CER and could be validated on its own at far lower cost; bundling it with structural changes increases attribution risk without clear additive justification."
+              ]
+            },
+            {
+              "conflict": "bridge_builder child variants reframe the schedule as the sole causal mechanism ('attributable to the schedule alone') versus the root's joint-repair thesis.",
+              "resolution": "Adopt the honest joint-intervention framing from the root and diagnostics: schedule-centered but explicitly coordinated with QK-norm/masked attention, with no component-level attribution claims.",
+              "source_modes": [
+                "bridge_builder",
+                "steady_engineer"
+              ],
+              "evidence": [
+                "Since no component ablations are permitted, the honest framing is a joint intervention with a schedule-centered thesis; the in-run plateau-escape check should be treated as indicative only given the ~0.001 validation-loss noise floor near epoch 40.",
+                "the causal chain from cosine decay to CER is the weakest link, since validation loss plateau need not correspond to CER plateau"
+              ]
+            },
+            {
+              "conflict": "Whether slot-isolation/change-tracking bookkeeping should be presented as delivering attribution within the single execution.",
+              "resolution": "Drop the attribution claim entirely; keep only the underlying mechanisms (QK-norm/mask, scheduler, CFG) as one coherent method.",
+              "source_modes": [
+                "steady_engineer",
+                "bridge_builder"
+              ],
+              "evidence": [
+                "The claim that per-slot contribution becomes 'identifiable from the one execution' is not supported by the protocol.",
+                "Modularization makes future attribution possible but delivers none now, since ablation=[] is required"
+              ]
+            }
+          ],
+          "fused_core_thesis": "The parent 50-epoch fine-tune stalled because its constant post-warmup LR and un-normalized, un-masked text-audio attention stopped improving the EMA weights by epoch ~40; jointly repairing those two training-side slots (cosine LR decay via build_scheduler plus QK RMSNorm and attention masking) and modestly strengthening inference guidance (CFG 2.5) is hypothesized to break the plateau and lower frozen Paraformer Chinese CER below 0.0228 under an identical budget.",
+          "why_stronger_than_each_input": "It keeps the single causal chain every mode endorsed, but sharpens it: the schedule mechanism is grounded in the parent's measured plateau rather than asserted, the QK-norm/mask repair is anchored to survey evidence on attention refinements, the CFG change is explicitly labeled a bounded support edit with its over-guidance risk stated, and all unsupported attribution and schedule-only claims from weaker child variants are excised.",
+          "minimal_validation_plan": "Exactly one normal SURE candidate execution: prepare working/f5_candidate source, implement build_scheduler (linear warmup 20000 updates then cosine decay to ~53100 remaining updates), submit requires_training=true with architecture {qk_norm:'rms', attn_mask_enabled:true}, the fixed 50-epoch training contract (batch_size_per_gpu 25600, lr 1e-05, world_size 8, final EMA, seeds 42/666), and inference {cfg_strength:2.5, nfe_step:32, sway_sampling_coef:-1.0, target_rms:0.1, cross_fade_duration:0.15, remove_silence:false, text_cleanup:'none'}; score once on the frozen tts_zh_cer route against the parent's 0.0228 with no ablations (ablation=[])."
+        }
+      }
+    },
+    {
+      "cache_file": "727e6ab8453e79b9eef08d2835af4985dd149aafbb219becee9f1f38f870e7a2-0.json",
+      "output": {
+        "fused_idea": {
+          "title": "Plateau-Breaking F5TTS v1.1: QK-Normed Masked Attention with Cosine LR Decay and Guidance-Refined Inference",
+          "abstract": "A v1.1 refinement of the completed F5TTS_v1_Base 50-epoch Premium Chinese fine-tune. The parent recipe plateaued at validation loss 0.655 by epoch ~40 with three weak slots: un-normalized un-masked DiT attention, a constant post-warmup learning rate, and convention-fixed CFG. This candidate enables QK RMSNorm and attention masking (requiring weight updates), swaps in a warmup+cosine-decay scheduler via build_scheduler, and raises inference CFG strength to 2.5. Training stays under the fixed contract (official init, fresh optimizer, 8 NPU DDP, BF16 autocast/FP32 master, 50 epochs, final EMA) and is scored once on the frozen tts_zh_cer route.",
+          "core_contribution": "A minimal mechanism repair showing that escaping the fine-tuning loss plateau requires fixing the optimization decay and the attention conditioning path jointly, rather than adding data or capacity: QK-normalized masked attention plus a post-warmup cosine LR schedule, paired with a modestly stronger CFG at inference, is hypothesized to lower Paraformer Chinese CER below 0.0228 under an identical budget.",
+          "hypothesis": "The parent's epoch-40+ validation-loss plateau under a constant post-warmup LR, combined with un-normalized and un-masked DiT text-audio attention and untuned CFG guidance, jointly limit Chinese CER; repairing these three sanctioned slots in one coordinated 50-epoch EMA run lowers frozen tts_zh_cer below 0.0228.",
+          "method": "Prepare workspace source via --action prepare_source --candidate-source working/f5_candidate. Edit src/f5_tts/sure_candidate.py to expose build_scheduler implementing linear warmup (20000 updates) then cosine decay across the remaining total_updates; keep build_optimizer as the deployment's fused AdamW with lr 1e-05 and do not touch transform_batch. Submit SURE_TASK_WRAPPER --action candidate --parameters- with requires_training=true, architecture {qk_norm: 'rms', attn_mask_enabled: true}, training {epochs:50, learning_rate:1e-05, num_warmup_updates:20000, batch_size_per_gpu:25600, world_size:8, checkpoint_selection:'final_ema', seed:42, shuffle_seed:666}, candidate-source working/f5_candidate, and inference {cfg_strength:2.5, nfe_step:32, sway_sampling_coef:-1.0, target_rms:0.1, cross_fade_duration:0.15, remove_silence:false, text_cleanup:'none'}. The framework runs 50 epochs on the complete Premium train split from official weights; final EMA checkpoint is used for the single frozen tts_zh_cer evaluation. Repaired limitations: (1) constant LR plateau, (2) un-normalized/un-masked attention, (3) untuned inference guidance.",
+          "risks": "QK-norm parameters initialized fresh could transiently perturb pretrained attention dynamics under BF16; attention masking may interact with text_mask_padding=true conventions; cosine decay ending near zero could under-train late epochs if the optimum sits earlier; higher CFG can over-guid and increase acoustic artifacts that raise CER. Because the three edits are a joint intervention under one frozen score, the outcome cannot be decomposed into per-component attribution. All are monitored via the per-epoch validation loss trajectory in training_completion and judged only by the final frozen score versus the parent's 0.0228.",
+          "tags": [
+            "tts",
+            "f5-tts",
+            "fine-tune",
+            "chinese",
+            "cer",
+            "dit",
+            "bf16",
+            "flow-matching",
+            "npu"
+          ],
+          "operator": "fusion_agent",
+          "target_defects": [
+            "Validation loss plateau from ~epoch 40 under constant post-warmup LR",
+            "Un-normalized QK projections and absent attention masking in the DiT text-audio path",
+            "Inference CFG strength fixed by default rather than mechanism-driven"
+          ],
+          "rationale": "All five taste modes converged on the same mechanism repair inside the allowed edit surface (arch_config qk_norm/attn_mask_enabled flips, the sanctioned build_scheduler hook, and one inference knob), and every mode's diagnostic named the same residual defects: harder_to_ablate and theory_gap. The fusion preserves the joint coordinated intervention as one causal chain — well-conditioned (QK-normed, masked) attention receiving progressively decaying updates produces an EMA checkpoint that, under moderately strengthened CFG, yields lower CER — while explicitly refusing to claim single-component attribution, which no mode supported. Survey evidence (dense-transformer refinements over backbone substitution; alignment-stability via attention mechanisms; inference-time flow control) anchors each slot.",
+          "components": [
+            "QK-normed masked DiT attention",
+            "Cosine-decayed optimizer contract (build_scheduler)",
+            "Guidance-refined inference slot",
+            "Frozen evaluation route tts_zh_cer"
+          ],
+          "component_explanations": {
+            "QK-normed masked DiT attention": "Core mechanism: normalize query/key projections and exclude padded text/audio positions from attention so the text-audio conditioning path is well-conditioned; only the freshly initialized QK-norm parameters are structural additions, trainable during the full 50-epoch fine-tune from official weights.",
+            "Cosine-decayed optimizer contract (build_scheduler)": "Support module for the core mechanism: linear warmup to 20000 updates then cosine decay over the remaining ~53100 updates breaks the constant-LR plateau recorded in the parent's validation history, letting the repaired attention path converge rather than churn at a fixed step size.",
+            "Guidance-refined inference slot": "Support module raising cfg_strength from 2.0 to 2.5 (fp32, 32 NFE, sway -1.0 unchanged) so the conditional flow field sharpens toward text-consistent content — the direct mechanism by which ASR transcription errors drop.",
+            "Frozen evaluation route tts_zh_cer": "Protocol: unchanged funasr Paraformer zh scoring on 16k mono audio; the candidate is judged solely by frozen CER versus the parent's 0.0228, with full training evidence and final EMA checkpoint replayable."
+          },
+          "root_domains": [
+            "speech-synthesis",
+            "asr-evaluation",
+            "model-fine-tuning"
+          ],
+          "paper_graph_context": "Survey anchors progress in dense-transformer refinements (norms, attention patterns) and inference-time flow control rather than backbone substitution; PAPER_ANCHOR:s2:051238432e23a865981c95579deb978e815d8f55 (monotonic/stepwise attention for robust TTS alignment) and PAPER_ANCHOR:s2:3d178d96c74bf7d1d070a227e70b7cde805b9005 (Small-E: alignment stability through attention design) support the attention-path repair; graph neighbors (Grad-StyleSpeech baseline_comparison) confirm diffusion/flow TTS progress via conditioning-path refinement.",
+          "edit_plan": null,
+          "skill_metrics": {}
+        },
+        "fusion_metadata": {
+          "host_idea_mode": "evidence_first",
+          "selected_components": [
+            {
+              "source_mode": "moonshot_inventor",
+              "component": "QK-normed masked DiT attention",
+              "role": "core_mechanism",
+              "why_selected": "All modes converge on this as the structural mechanism repair; it is the only weight-updating architectural edit and the survey-grounded alignment-stability lever inside the allowed edit surface.",
+              "evidence": [
+                "Flip qk_norm to RMSNorm and attn_mask_enabled to true in arch_config so query/key projections are normalized and padded text/audio positions are excluded from attention; newly initialized QK-norm parameters are the only structural addition, trainable during the full 50-epoch fine-tune from official weights."
+              ]
+            },
+            {
+              "source_mode": "bridge_builder",
+              "component": "Cosine-decayed optimizer contract (build_scheduler)",
+              "role": "support_module",
+              "why_selected": "Directly targets the measured epoch-40 plateau via the sanctioned build_scheduler hook; the mechanism-commit iterations identified the schedule as the sharpest causal story for the plateau, subject to honest joint-intervention framing.",
+              "evidence": [
+                "Implement build_scheduler in src/f5_tts/sure_candidate.py: linear warmup to 20000 updates followed by cosine decay to near-zero over the remaining ~53100 updates, replacing the constant 1e-05 that produced the epoch-40 validation-loss plateau; fused AdamW, grad clip 1.0, BF16 autocast, FP32 master params and final EMA unchanged."
+              ]
+            },
+            {
+              "source_mode": "steady_engineer",
+              "component": "Guidance-refined inference slot",
+              "role": "support_module",
+              "why_selected": "Kept as the one inference-side edit with a direct mechanism to CER; steady_engineer and ambitious_realist flagged it as an untuned guess, so the fusion explicitly frames it as part of the joint intervention rather than an independently validated knob.",
+              "evidence": [
+                "Raise cfg_strength from 2.0 to 2.5 in inference_config (fp32 inference, 32 NFE, sway -1.0 unchanged) so the conditional flow field is sharpened toward text-consistent content, the mechanism by which ASR transcription errors drop."
+              ]
+            },
+            {
+              "source_mode": "evidence_first",
+              "component": "Frozen evaluation route tts_zh_cer",
+              "role": "protocol",
+              "why_selected": "The unchanged single frozen evaluation is required by the execution contract and provides the only valid comparison (against parent 0.0228 under identical splits).",
+              "evidence": [
+                "Unchanged funasr Paraformer zh scoring on 16k mono generated audio; the candidate is judged solely by the new frozen CER versus the parent's 0.0228, with full training evidence and EMA checkpoint replayable."
+              ]
+            }
+          ],
+          "rejected_components": [
+            {
+              "source_mode": "steady_engineer",
+              "component": "Slot-Isolated F5TTS v1.1.1: Modular QK-Normed Masked Attention Wired to Guidance-Refined Inference under a Single-Execution Change-Tracking Protocol",
+              "why_rejected": "Its per-slot attribution claim is unsupported: a single joint execution yields one frozen number and auxiliary ablations are disallowed, so change-tracking bookkeeping adds a wrapper contribution rather than task-solving novelty.",
+              "evidence": [
+                "The main overreach is the thesis itself: 'component attribution survives a single joint execution' is not established by per-slot diffs plus a validation trajectory; a joint outcome cannot be decomposed without separate conditions, and none are allowed."
+              ]
+            },
+            {
+              "source_mode": "bridge_builder",
+              "component": "Mechanism-Committed F5TTS v1.2: Annealed Warmup-to-1e-7 Cosine Schedule for Plateau Escape in QK-Normed Fine-Tuning",
+              "why_rejected": "Rejected as a competing framing, not a mechanism: its 'attributable to the schedule alone' title contradicts the bundled QK-norm/mask/CFG edits (responsibility_entanglement), and the unmotivated 1e-7 floor adds an arbitrary constant without mechanism backing.",
+              "evidence": [
+                "The idea correctly targets the constant post-warmup LR tail as a weak slot and specifies the build_scheduler edit precisely within the allowed local-modification surface. However, the claim that the intervention is 'attributable to the schedule alone' is contradicted by the bundled QK-norm, mask, and CFG-2.5 changes inherited in the same run — this is a responsibility_entanglement risk."
+              ]
+            },
+            {
+              "source_mode": "ambitious_realist",
+              "component": "Guidance-refined inference slot (decoupled inference-only probe)",
+              "why_rejected": "The realist's decoupled inference-only pre-check was rejected because SURE policy forbids auxiliary experiments; CFG 2.5 is retained only as a coordinated support edit inside the single joint candidate.",
+              "evidence": [
+                "The CFG 2.5 slot is essentially an untuned hyperparameter guess riding on the training change and could be evaluated on its own without any training, making its inclusion in the same run avoidable coupling."
+              ]
+            }
+          ],
+          "conflicts_and_resolutions": [
+            {
+              "conflict": "Attribution: moonshot_inventor and bridge_builder flagged harder_to_ablate/responsibility_entanglement for bundling three edits; steady_engineer proposed slot-isolation bookkeeping as a fix.",
+              "resolution": "Keep the joint intervention but drop all single-component attribution claims; the fused thesis states the repair is joint and the frozen score validates only the bundle. This satisfies SURE policy that joint outcomes are not component-removal evidence.",
+              "source_modes": [
+                "moonshot_inventor",
+                "bridge_builder",
+                "steady_engineer"
+              ],
+              "evidence": [
+                "Weaknesses: all three changes are confounded in a single training run, so the frozen CER cannot distinguish which repair mattered; the CFG bump is convention-driven rather than mechanism-derived and interacts with the training-side changes; and QK-norm interaction with BF16 fine-tuning dynamics is the least de-risked component.",
+                "The candidate correctly recognizes that the parent v1.1 bundle is unattributable, but its remedy — typed config fields, separate build_scheduler hook, and change-tracking diffs — improves bookkeeping, not attribution: a single joint execution still yields one number, and auxiliary ablations are disallowed."
+              ]
+            },
+            {
+              "conflict": "Cosine-decay tail: moonshot_inventor/bridge_builder chose decay to near-zero; the annealed variant proposed a 1e-7 floor but was flagged as unmotivated.",
+              "resolution": "Adopt the standard warmup-then-cosine-decay-to-near-zero schedule in build_scheduler without an arbitrary floor constant, preserving the parent's evidence trail (constant LR implicated by the recorded plateau) and avoiding unsupported numeric commitments.",
+              "source_modes": [
+                "bridge_builder",
+                "moonshot_inventor"
+              ],
+              "evidence": [
+                "Residual risks: schedule may be dominated by the structural QK-norm perturbation; the 1e-7 floor choice is unmotivated; CFG change is an unforced confound on a frozen comparison metric.",
+                "Implement build_scheduler in src/f5_tts/sure_candidate.py: linear warmup to 20000 updates followed by cosine decay to near-zero over the remaining ~53100 updates, replacing the constant 1e-05 that produced the epoch-40 validation-loss plateau; fused AdamW, grad clip 1.0, BF16 autocast, FP32 master params and final EMA unchanged."
+              ]
+            },
+            {
+              "conflict": "CFG 2.5 inclusion: evidence_first treated it as an acceptable support slot; ambitious_realist demanded decoupling it from training.",
+              "resolution": "Include CFG 2.5 as an explicitly declared coordinated edit of the single joint candidate; no decoupled probe is run because SURE forbids auxiliary experiments. The risk section carries the over-guidance hazard into the final frozen score.",
+              "source_modes": [
+                "evidence_first",
+                "ambitious_realist"
+              ],
+              "evidence": [
+                "The main weakness is bundling three edits with only one frozen evaluation: the outcome will be a joint result, not component evidence.",
+                "Consider decoupling the inference-only change, or at minimum stating what validation-loss trajectory signature would count as plateau-breaking."
+              ]
+            }
+          ],
+          "fused_core_thesis": "Under the fixed SURE contract, escaping the F5TTS_v1_Base fine-tune plateau requires a coordinated repair of the well-conditioning of the DiT text-audio attention (QK RMSNorm + masking), the post-warmup optimization decay (warmup+cosine scheduler), and inference guidance strength (CFG 2.5), evaluated jointly on one frozen tts_zh_cer run against the parent's 0.0228 — no component-level attribution is claimed or possible.",
+          "why_stronger_than_each_input": "It preserves the highest-feasibility, contract-clean intervention (evidence_first root, feasibility 4-5 across modes) while fixing the defects every diagnostic flagged: it strips steady_engineer's unsupported attribution wrapper, bridge_builder's unmotivated schedule-floor constant, and ambitious_realist's decoupled-probe requirement (incompatible with no-auxiliary-experiments policy), yielding one coherent joint causal chain with honest risks.",
+          "minimal_validation_plan": "Exactly one normal SURE candidate execution under the supplied budget: prepare working/f5_candidate, implement build_scheduler (linear warmup 20000 then cosine decay) in src/f5_tts/sure_candidate.py, submit requires_training=true with architecture {qk_norm:'rms', attn_mask_enabled:true}, training {epochs:50, lr:1e-05, warmup:20000, batch_size_per_gpu:25600, world_size:8, final_ema, seeds 42/666}, inference {cfg_strength:2.5, nfe_step:32, sway:-1.0, target_rms:0.1, cross_fade:0.15, remove_silence:false, text_cleanup:'none'}; score once on frozen tts_zh_cer versus parent 0.0228; ablation=[]."
+        }
+      }
+    },
+    {
+      "cache_file": "909b7fcd5024dd6635b591bbc20c98fa304873df2f265aaa074d4249420ac9a1-0.json",
+      "output": {
+        "fused_idea": {
+          "title": "Mechanism-Committed F5TTS v1.2: Warmup-to-Floor Cosine LR Decay over QK-Normed Masked Attention with Guidance-Refined Inference",
+          "abstract": "A v1.2 refinement of the completed F5TTS_v1_Base 50-epoch Premium Chinese fine-tune. The parent recipe's diagnosis is sharpened: the validation loss plateau (~0.655 from epoch 40) is caused primarily by a constant post-warmup learning rate that prevents EMA weights from consolidating late-training gains. The fused candidate commits to a single core mechanism — a warmup-then-cosine-decay schedule implemented through the sanctioned build_scheduler hook in src/f5_tts/sure_candidate.py — supported by two already-identified weak-slot repairs in the same joint intervention: QK RMSNorm plus attention masking in the DiT conditioning path (arch_config: qk_norm='rms', attn_mask_enabled=true), and a modest CFG strength increase to 2.5 at inference. Because component ablations are disallowed, the candidate is honestly framed as one joint intervention with a schedule-centered thesis: training stays under the fixed SURE contract (official init, fresh fused AdamW, 8-rank DDP, BF16 autocast/FP32 master, 50 epochs, final EMA) and is scored once on the frozen tts_zh_cer route against the parent's 0.0228.",
+          "core_contribution": "A schedule-committed mechanism repair showing that breaking the fine-tuning loss plateau is best targeted at the constant post-warmup LR — the measured limiting factor in the parent's validation trajectory — executed jointly with the attention-conditioning repair (QK-normed masked attention) and a single inference guidance slot change, under an identical 50-epoch EMA budget.",
+          "hypothesis": "Replacing the constant 1e-05 post-warmup learning rate with linear warmup (20000 updates) followed by cosine decay to a near-zero floor will consolidate the plateauing validation loss into a measurably lower final loss and final EMA checkpoint; combined with QK-normalized masked attention and CFG 2.5, this lowers Paraformer Chinese CER below 0.0228 under the identical training budget.",
+          "method": "Call SURE_TASK_WRAPPER --action prepare_source --candidate-source working/f5_candidate; edit src/f5_tts/sure_candidate.py to expose build_scheduler(optimizer, total_updates, training) implementing linear warmup for 20000 updates then cosine decay across the remaining ~53100 updates, with build_optimizer returning the deployment's fused AdamW at lr 1e-05 and transform_batch untouched. Submit SURE_TASK_WRAPPER --action candidate --parameters- with requires_training=true, architecture {qk_norm: 'rms', attn_mask_enabled: true}, training {epochs: 50, learning_rate: 1e-05, num_warmup_updates: 20000, batch_size_per_gpu: 25600, grad_accumulation_steps: 1, max_grad_norm: 1.0, max_samples: 64, world_size: 8, checkpoint_selection: 'final_ema', seed: 42, shuffle_seed: 666}, candidate-source working/f5_candidate, and inference {cfg_strength: 2.5, nfe_step: 32, sway_sampling_coef: -1.0, target_rms: 0.1, cross_fade_duration: 0.15, remove_silence: false, text_cleanup: 'none'}. The framework runs 50 epochs on the complete Premium train split from official weights; the final EMA checkpoint is used for the single frozen tts_zh_cer evaluation. Ablation: [].",
+          "risks": "Freshly initialized QK-norm parameters may transiently perturb pretrained attention dynamics under BF16 autocast; attention masking may interact with the text_mask_padding=true convention; cosine decay ending near a 1e-7 floor could under-train late epochs if the optimum sits earlier; CFG 2.5 can over-guid and increase acoustic artifacts that raise CER. Since the three edits are bundled in one joint run and no ablations are allowed, a single frozen outcome cannot attribute responsibility among the schedule, attention, and guidance slots; the plateau-escape check in the per-epoch validation trajectory is indicative only given the ~0.001 validation-loss noise floor near epoch 40.",
+          "tags": [
+            "tts",
+            "f5-tts",
+            "fine-tune",
+            "chinese",
+            "cer",
+            "dit",
+            "bf16",
+            "flow-matching",
+            "npu"
+          ],
+          "operator": "fusion_agent",
+          "target_defects": [
+            "Validation loss plateau from ~epoch 40 under constant post-warmup LR",
+            "Un-normalized QK projections and absent attention masking in the DiT text-audio path",
+            "Inference CFG strength fixed by default rather than mechanism-driven",
+            "Responsibility entanglement across bundled slots in prior joint-intervention framings"
+          ],
+          "rationale": "The survey frames progress as dense-transformer refinements (norms/attention patterns) plus inference-time flow control, not backbone substitution; the parent run's own validation history directly implicates the constant-LR schedule as the primary limiting slot. Evaluation feedback across all five taste modes repeatedly flagged confounding of the three-way bundle; the bridge_builder refinement showed that committing to the schedule as the single core mechanism thesis — while honestly labeling the run as a joint intervention with a schedule-centered hypothesis — is the strongest defensible framing within the SURE contract. The fused idea therefore keeps one core mechanism (cosine LR decay) and treats the attention repair and CFG change as support edits, preserving the refinement scope (local slot edits only) and the execution contract (one 50-epoch EMA run, frozen evaluation).",
+          "components": [
+            "Cosine-decayed optimizer contract (build_scheduler)",
+            "QK-normed masked DiT attention",
+            "Guidance-refined inference slot",
+            "Frozen evaluation route tts_zh_cer"
+          ],
+          "component_explanations": {
+            "Cosine-decayed optimizer contract (build_scheduler)": "CORE MECHANISM. Linear warmup (20000 updates) then cosine decay to a ~1e-7 floor across the remaining ~53100 updates via the sanctioned build_scheduler hook in src/f5_tts/sure_candidate.py. This directly targets the parent's measured plateau: validation loss was flat (~0.655) from epoch 40 onward under a constant post-warmup LR, indicating the schedule, not data or capacity, limits further learning. Fused AdamW, grad clip 1.0, BF16 autocast, FP32 master params, and final EMA remain unchanged.",
+            "QK-normed masked DiT attention": "SUPPORT MODULE (requires weight updates). Flip qk_norm to RMSNorm and attn_mask_enabled to true in arch_config so query/key projections are normalized and padded text/audio positions are excluded from attention. This repairs the under-specified text-audio conditioning path so the schedule-driven optimization has a well-conditioned attention slot to refine; it is subordinate to the schedule thesis and jointly committed within the single permitted run.",
+            "Guidance-refined inference slot": "SUPPORT MODULE. Raise cfg_strength from 2.0 to 2.5 in inference_config (fp32 inference, 32 NFE, sway -1.0 unchanged) so the conditional flow field is sharpened toward text-consistent content. Acknowledged as a heuristic, mechanism-adjacent inference edit bundled with the joint intervention; it is an inference-slot local modification, not an ablation and not a separate experiment.",
+            "Frozen evaluation route tts_zh_cer": "PROTOCOL/GUARDRAIL. Unchanged funasr Paraformer zh scoring on 16k mono generated audio. The candidate is judged solely by the new frozen CER versus the parent's 0.0228, with full training evidence and EMA checkpoint replayable; serves as the mandatory single frozen comparison, not as novelty."
+          },
+          "root_domains": [
+            "speech-synthesis",
+            "asr-evaluation",
+            "model-fine-tuning"
+          ],
+          "paper_graph_context": "Graph neighbors anchored on Grad-StyleSpeech (baseline_comparison relations from YourTTS and Meta-StyleSpeech) confirm that dense transformer/diffusion prior modules and training-recipe comparisons dominate the TTS evidence landscape; no paper in the retrieved neighborhood prescribes backbone substitution for plateau escape, supporting a schedule-and-attention local repair. Evidence items evidence:a5ee23fb52e357db4d20 and evidence:3ce14ac10e5c9da31d91 (Grad-StyleSpeech neighbor context) anchor the diffusion/transformer baseline-comparison frame.",
+          "edit_plan": null,
+          "skill_metrics": {}
+        },
+        "fusion_metadata": {
+          "host_idea_mode": "bridge_builder",
+          "selected_components": [
+            {
+              "source_mode": "bridge_builder",
+              "component": "Cosine-decayed optimizer contract (build_scheduler)",
+              "role": "core_mechanism",
+              "why_selected": "The bridge_builder trace (node 1/node 3, 'Mechanism-Committed F5TTS v1.2') evaluated the schedule as the honest single-thesis core mechanism: 'The idea correctly targets the constant post-warmup LR tail as a weak slot and specifies the build_scheduler edit precisely within the allowed local-modification surface.' Its novelty champion (novelty 4) selected this schedule-committed framing; the plateau diagnosis is grounded in the parent's recorded validation trajectory.",
+              "evidence": [
+                "evidence:6713a80fc66a9b0d3b1f (survey: 'Small-E is designed to address the quadratic complexity of Transformers and the lack of monotonic alignment bias in standard attention mechanisms... making it feasible to train on long sequences')",
+                "evidence:298ff9d9c03d4db3b25b (survey-paragraph-158, 'Synthesis and Future Directions' grounding efficient attention/alignment-stability context for the conditioning repair)"
+              ]
+            },
+            {
+              "source_mode": "steady_engineer",
+              "component": "QK-normed masked DiT attention",
+              "role": "support_module",
+              "why_selected": "The steady_engineer root diagnostic scored 3.6 (best feasibility/conciseness) and explicitly identified the un-normalized/un-masked DiT attention slot as a targeted repair; it is a concrete weight-updating slot fix that supports the schedule's ability to consolidate gains, subordinate to the core mechanism.",
+              "evidence": [
+                "evidence:1e6957dbe5cf2995d7b2 (component: 'A standard dense Transformer architecture with minor adaptations like Grouped Query Attention (GQA), a 128K token vocabulary, and increased RoPE base frequency' — dense-transformer local refinements rather than backbone substitution)"
+              ]
+            },
+            {
+              "source_mode": "steady_engineer",
+              "component": "Guidance-refined inference slot",
+              "role": "support_module",
+              "why_selected": "The steady_engineer diagnostic noted 'The CFG change is the only edit with a direct mechanism to CER'; it is retained as the single inference-slot local modification paired with the joint run, with over-guidance risk explicitly recorded rather than hidden.",
+              "evidence": [
+                "evidence:77b79120e86a3c38be4f (component: 'The model uses alternating dense and locally banded sparse attention patterns in the layers of the transformer' — attention-pattern refinements context)"
+              ]
+            },
+            {
+              "source_mode": "ambitious_realist",
+              "component": "Frozen evaluation route tts_zh_cer",
+              "role": "protocol",
+              "why_selected": "The ambitious_realist trace (feasibility 5) confirmed the plan is fully implementable within the SURE contract under the fixed frozen evaluation; this is the mandatory single-execution protocol, kept unchanged and explicitly not the novelty.",
+              "evidence": [
+                "evidence:65c00f69265d2be27b94 (component: 'A new simple network architecture based solely on attention mechanisms, dispensing with recurrence and convolutions entirely' — context for attention-only local modification being a legitimate architectural repair)"
+              ]
+            }
+          ],
+          "rejected_components": [
+            {
+              "source_mode": "steady_engineer",
+              "component": "Slot-Isolated F5TTS v1.1.1: Modular QK-Normed Masked Attention Wired to Guidance-Refined Inference under a Single-Execution Change-Tracking Protocol",
+              "why_rejected": "Its evaluator feedback showed 'typed config fields... improves bookkeeping, not attribution: a single joint execution still yields one number' and the 'identifiable from the one execution' claim was unsupported; change-tracking modules are bookkeeping, not a scientific mechanism, and ablations are disallowed so the modularity delivers no attribution value in this run.",
+              "evidence": [
+                "evidence:76fafe288a46b890200312feb89501d9ec6090dd081c0a48ff0f2fb7e479e77c is a cache digest, not evidence — using mode evidence list item: evidence:07ae93796b2f44eabc92 (component: 'Variants of transformer architectures used in LLMs, differing in attention application and block connections' — context, not an attribution mechanism)"
+              ]
+            },
+            {
+              "source_mode": "moonshot_inventor",
+              "component": "Plateau-Breaking F5TTS v1.1: QK-Normed Masked Attention with Cosine LR Decay and Guidance-Refined Inference (as an unranked joint bundle)",
+              "why_rejected": "The moonshot_inventor diagnostic flagged 'all three changes are confounded in a single training run, so the frozen CER cannot distinguish which repair mattered; the CFG bump is convention-driven'. The unattributed bundle framing is rejected; the same edits are retained but re-framed with the schedule as the committed core thesis per the bridge_builder refinement, which the evaluator judged the stronger mechanism-committed framing.",
+              "evidence": [
+                "evidence:6713a80fc66a9b0d3b1f and evidence:298ff9d9c03d4db3b25b (Small-E linear-attention/alignment-stability and synthesis-direction survey paragraphs anchoring attention-refinement evidence without attributing joint outcomes)"
+              ]
+            }
+          ],
+          "conflicts_and_resolutions": [
+            {
+              "conflict": "Bridge_builder's node 3 proposed annealing to a 1e-7 floor while presenting the intervention as 'attributable to the schedule alone', but it inherited qk_norm, attn_mask_enabled, and CFG 2.5 changes in the same run; the evaluator flagged this as responsibility_entanglement.",
+              "resolution": "The fused idea keeps the 1e-7 floor schedule as the committed core mechanism but reframes the candidate as ONE JOINT INTERVENTION with a schedule-centered thesis; the frozen outcome is treated as joint evidence for the bundle and never attributed to any single slot, matching the SURE policy that component outcomes of joint interventions cannot be decomposed.",
+              "source_modes": [
+                "bridge_builder"
+              ],
+              "evidence": [
+                "evidence:6713a80fc66a9b0d3b1f (survey: 'the recurrent state is a compressed summary of all previous information. This compression can lead to information loss... when precise alignment with specific input tokens is required' — alignment/conditioning context motivating the joint attention edit)"
+              ]
+            },
+            {
+              "conflict": "Steady_engineer and ambitious_realist both suggested the CFG bump could be validated alone at lower cost, conflicting with the single-candidate SURE execution requirement.",
+              "resolution": "CFG 2.5 is retained as a bundled support slot in the single permitted joint run (no auxiliary inference-only probe is allowed); its risk of over-guidance is explicitly recorded and the frozen CER outcome is judged only against the parent baseline under identical conditions.",
+              "source_modes": [
+                "ambitious_realist"
+              ],
+              "evidence": [
+                "evidence:65c00f69265d2be27b94 (attention-only architecture context) and evidence:1e6957dbe5cf2995d7b2 (dense transformer local-adaptation context) — grounding the local-slot character of the inference and attention edits within one execution"
+              ]
+            }
+          ],
+          "fused_core_thesis": "The parent fine-tune's epoch-40 validation plateau is primarily an optimization-schedule artifact: replacing the constant post-warmup LR with linear warmup plus cosine decay (via build_scheduler), executed jointly with QK-normed masked attention and CFG 2.5 in one joint 50-epoch EMA run, lowers Paraformer Chinese CER below 0.0228.",
+          "why_stronger_than_each_input": "Each input kept all three edits as an unranked bundle whose outcome was unattributable (flagged as harder_to_ablate/validation_gap/responsibility_entanglement in every mode's diagnostics). The fused idea keeps the same contract-compliant edits but gives the intervention a single committed mechanism (the schedule) with an honest joint-intervention framing drawn from bridge_builder's highest-novelty refinement, plus the strongest feasibility/conciseness slot analysis from steady_engineer — removing the unsupported attribution claims while preserving every implementable edit.",
+          "minimal_validation_plan": "Exactly one normal SURE candidate execution under the supplied budget: requires_training=true, 50 epochs on the complete Premium train split from official weights, fresh fused AdamW with the custom warmup+cosine scheduler, final EMA checkpoint, single frozen tts_zh_cer scoring compared only against the parent's 0.0228. Ablation: []."
+        }
+      }
+    }
+  ]
+}

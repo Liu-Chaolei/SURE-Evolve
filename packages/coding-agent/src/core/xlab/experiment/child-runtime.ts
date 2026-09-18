@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { type Static, type TSchema, Type } from "typebox";
 import type { AgentSession } from "../../agent-session.ts";
@@ -38,7 +38,13 @@ const ROLE_KINDS: Record<ExperimentChildRole, ExperimentSubmissionKind> = {
 };
 
 const submissionParameters = Type.Object({
-	result: Type.Unknown(),
+	result: Type.Optional(Type.Unknown()),
+	bound_plan: Type.Optional(
+		Type.Boolean({
+			description:
+				"For planner assignments only, submit the complete immutable executor-bound plan without retranscribing it.",
+		}),
+	),
 	output_paths: Type.Optional(Type.Array(Type.String())),
 });
 
@@ -54,6 +60,9 @@ export interface ExperimentChildRuntimeOptions {
 	createSession?: typeof createAgentSession;
 	systemPrompt?: (assignment: ExperimentAssignment) => string;
 	validateResult?: (assignment: ExperimentAssignment, result: CanonicalJson) => string | undefined;
+	assignmentTools?: (assignment: ExperimentAssignment) => NonNullable<CreateAgentSessionOptions["customTools"]>;
+	boundPlan?: (assignment: ExperimentAssignment) => CanonicalJson;
+	allowEdits?: (assignment: ExperimentAssignment) => boolean;
 	agentOptions?: Pick<CreateAgentSessionOptions, "authStorage" | "modelRegistry" | "model" | "thinkingLevel">;
 	ownerFence?: () => ExperimentOwnerFence | undefined;
 }
@@ -123,6 +132,19 @@ function constrainPathTool<TParams extends TSchema, TDetails, TState>(
 				throw new Error(`${tool.name} requires a path.`);
 			}
 			const path = allowedPath(scopes, value.path, requireExisting);
+			if (tool.name === "read" && statSync(path).isDirectory()) {
+				return {
+					content: toolText(
+						JSON.stringify(
+							readdirSync(path, { withFileTypes: true }).map((entry) => ({
+								name: entry.name,
+								directory: entry.isDirectory(),
+							})),
+						),
+					),
+					details: {} as TDetails,
+				};
+			}
 			return tool.execute(toolCallId, { ...value, path } as Static<TParams>, signal, onUpdate, ctx);
 		},
 	});
@@ -142,6 +164,7 @@ function createSubmissionTool(
 	clock: () => string,
 	ownerFence?: () => ExperimentOwnerFence | undefined,
 	validateResult?: ExperimentChildRuntimeOptions["validateResult"],
+	boundPlan?: ExperimentChildRuntimeOptions["boundPlan"],
 ): ToolDefinition<typeof submissionParameters, SubmissionToolDetails> {
 	const name = SUBMISSION_TOOL_NAMES[assignment.kind];
 	return defineTool({
@@ -153,7 +176,10 @@ function createSubmissionTool(
 		executionMode: "sequential",
 		parameters: submissionParameters,
 		async execute(_toolCallId, params: SubmissionParameters): Promise<AgentToolResult<SubmissionToolDetails>> {
-			const result = params.result as CanonicalJson;
+			if (params.bound_plan && (assignment.kind !== "plan" || !boundPlan))
+				throw new Error("No executor-bound plan is available for this assignment.");
+			const result = params.bound_plan ? boundPlan!(assignment) : (params.result as CanonicalJson);
+			if (result === undefined) throw new Error("Submission requires result or a bound plan.");
 			const resultError = validateResult?.(assignment, result);
 			if (resultError) {
 				return {
@@ -190,6 +216,7 @@ function createSubmissionTool(
 			}
 			return {
 				content: toolText(`Accepted ${assignment.kind} for ${assignment.assignment_id}.`),
+				terminate: true,
 				details: { accepted: true, disposition: accepted.disposition, record: accepted.accepted },
 			};
 		},
@@ -315,7 +342,11 @@ export class ExperimentChildRuntime {
 			customTools.push(constrainPathTool(createReadToolDefinition(manager.getCwd()), assignment.read_scope, true));
 			activeTools.push("read");
 		}
-		if (child.role === "worker" && assignment.write_scope.length > 0) {
+		if (
+			child.role === "worker" &&
+			(this.options.allowEdits?.(assignment) ?? true) &&
+			assignment.write_scope.length > 0
+		) {
 			customTools.push(constrainPathTool(createEditToolDefinition(manager.getCwd()), assignment.write_scope, true));
 			customTools.push(
 				constrainPathTool(createWriteToolDefinition(manager.getCwd()), assignment.write_scope, false),
@@ -329,9 +360,15 @@ export class ExperimentChildRuntime {
 			this.clock,
 			this.options.ownerFence,
 			this.options.validateResult,
+			this.options.boundPlan,
 		);
 		customTools.push(submitTool);
 		activeTools.push(submitTool.name);
+		for (const tool of this.options.assignmentTools?.(assignment) ?? []) {
+			if (activeTools.includes(tool.name)) throw new Error(`Duplicate assignment tool ${tool.name}.`);
+			customTools.push(tool);
+			activeTools.push(tool.name);
+		}
 
 		const { session } = await this.createSession({
 			cwd: manager.getCwd(),

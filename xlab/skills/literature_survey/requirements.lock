@@ -6,6 +6,7 @@ rich==14.3.1
 loguru==0.7.3
 tenacity==9.1.4
 requests==2.32.5
+httpx==0.28.1
 diskcache==5.6.3
 networkx==3.6.1
 tiktoken==0.12.0

@@ -13,6 +13,11 @@ export interface XlabControlCommand {
 
 export const XLAB_PRODUCT_COMMANDS = [
 	{
+		task: "run-evolution",
+		skillName: "asr_evolution",
+		description: "Run native ASR evolution with full ablations and Slurm-managed concurrency.",
+	},
+	{
 		task: "collect-papers",
 		skillName: "paper_collect",
 		description: "Find, download, and organize research papers.",

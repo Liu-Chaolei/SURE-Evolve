@@ -33,10 +33,12 @@ from .contracts import (
 )
 from .operator_grounding import OperatorQuery
 
-from .defects import validate_defects
+from .defects import DEFECTS, validate_defects
 from .evaluation import METRICS
-from .fusion import ALLOWED_REPAIR_OPERATIONS, CANONICAL_MODES, REFEREE_METRICS
+from .fusion import ALLOWED_REPAIR_OPERATIONS, CANONICAL_MODES, REFEREE_METRICS, validate_fusion_output
 from .operators import EditKind, EditPlan
+from .response_projection import unwrap_answer_object
+from .root_identity import IDENTITY_FIELDS, validate_root_identity
 from .prompts.idea_fusion import (
     FUSION_REPAIR_PROMPT,
     IDEA_FUSION_PROMPT,
@@ -60,6 +62,11 @@ MAX_REPAIR_OPERATIONS = 6
 
 class AdapterOutputError(ValueError):
     """Raised when a provider result does not satisfy a native contract."""
+
+    def __init__(self, message: str, *, issues: list[dict[str, Any]] | None = None) -> None:
+        super().__init__(message)
+        self.validation_issues = deepcopy(issues or [])
+        self.previous_draft: dict[str, JsonValue] | None = None
 
 
 @dataclass(frozen=True)
@@ -176,63 +183,75 @@ class ProviderAdapter:
             operation = MECHANISM_COMMIT_QUERY_OPERATION
             prompt = get_mechanism_commit_query_prompt(prompt_mode)
             needed_field = "mechanism_gap"
-        result = self._complete(operation, structured, prompt)
-        payload = _result_object(result)
-        _reject_placeholders(payload)
-        expected_fields = {"query", needed_field, "expected_role"}
-        if set(payload) != expected_fields:
-            raise AdapterOutputError(
-                f"{kind} query output requires exactly: {', '.join(sorted(expected_fields))}"
-            )
-        query = _required_text(payload.get("query"), "query")
-        needed_content = _required_text(payload.get(needed_field), needed_field)
-        expected_role = _required_text(payload.get("expected_role"), "expected_role")
-        return OperatorQuery(
-            kind=kind,
-            query=query,
-            needed_content=needed_content,
-            expected_role=expected_role,
-            provenance_json=json.dumps(
-                {
-                    "operation": operation,
-                    "provider_trace": result.trace.to_dict(),
-                    "structured_input_digest": result.trace.input_digest,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
+        prompt = prompt.format(
+            topic=state.title, root_domains=json.dumps(list(state.root_domains)),
+            refinement_scope="See the structured user input for the current idea.",
+            idea="See user input: idea.",
+            edit_plan="Retrieve grounding for the named operator; no plan was supplied to this query.",
         )
+        def validate_response(result: ProviderResult):
+            payload = _result_object(result)
+            _reject_placeholders(payload)
+            expected_fields = {"query", needed_field, "expected_role"}
+            if set(payload) != expected_fields:
+                raise AdapterOutputError(
+                    f"{kind} query output requires exactly: {', '.join(sorted(expected_fields))}"
+                )
+            query = _required_text(payload.get("query"), "query")
+            needed_content = _required_text(payload.get(needed_field), needed_field)
+            expected_role = _required_text(payload.get("expected_role"), "expected_role")
+            return OperatorQuery(
+                kind=kind,
+                query=query,
+                needed_content=needed_content,
+                expected_role=expected_role,
+                provenance_json=json.dumps(
+                    {
+                        "operation": operation,
+                        "provider_trace": result.trace.to_dict(),
+                        "structured_input_digest": result.trace.input_digest,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+
+        result = self._complete(operation, structured, prompt, response_validator=validate_response)
+        return validate_response(result)
 
     def propose_repair(self, request: Mapping[str, Any]) -> Mapping[str, Any] | None:
         structured = _json_mapping(request, "repair request")
         prompt = _format_repair_prompt(structured)
-        result = self._complete(FUSION_REPAIR_OPERATION, structured, prompt)
-        payload = _result_object(result)
-        _reject_placeholders(payload)
+        def validate_response(result: ProviderResult):
+            payload = _result_object(result)
+            _reject_placeholders(payload)
 
-        stop = payload.get("stop", False)
-        if not isinstance(stop, bool):
-            raise AdapterOutputError("repair stop must be a boolean")
-        if stop:
-            return None
+            stop = payload.get("stop", False)
+            if not isinstance(stop, bool):
+                raise AdapterOutputError("repair stop must be a boolean")
+            if stop:
+                return None
 
-        local_shape = "component_edits" in payload
-        raw_operations = payload.get("component_edits") if local_shape else payload.get("operations")
-        operations = _mapping_sequence(raw_operations, "repair operations")
-        if not 1 <= len(operations) <= MAX_REPAIR_OPERATIONS:
-            raise AdapterOutputError(
-                f"repair output requires 1..{MAX_REPAIR_OPERATIONS} operations"
-            )
-        allowed = {
-            str(item).strip().lower()
-            for item in structured.get("allowed_operations", sorted(ALLOWED_REPAIR_OPERATIONS))
-        }
-        normalized = [
-            _normalize_repair_operation(item, local_shape=local_shape, allowed=allowed)
-            for item in operations
-        ]
-        _validate_replacement_sources(normalized, structured.get("mode_inputs"))
-        return {"operations": normalized}
+            local_shape = "component_edits" in payload
+            raw_operations = payload.get("component_edits") if local_shape else payload.get("operations")
+            operations = _mapping_sequence(raw_operations, "repair operations")
+            if not 1 <= len(operations) <= MAX_REPAIR_OPERATIONS:
+                raise AdapterOutputError(
+                    f"repair output requires 1..{MAX_REPAIR_OPERATIONS} operations"
+                )
+            allowed = {
+                str(item).strip().lower()
+                for item in structured.get("allowed_operations", sorted(ALLOWED_REPAIR_OPERATIONS))
+            }
+            normalized = [
+                _normalize_repair_operation(item, local_shape=local_shape, allowed=allowed)
+                for item in operations
+            ]
+            _validate_replacement_sources(normalized, structured.get("mode_inputs"))
+            return {"operations": normalized}
+
+        result = self._complete(FUSION_REPAIR_OPERATION, structured, prompt, response_validator=validate_response)
+        return validate_response(result)
 
     def _evaluate_idea(
         self,
@@ -267,30 +286,34 @@ class ProviderAdapter:
             edit_plan="None",
             idea=json.dumps(state.to_payload(), ensure_ascii=False),
             defect_registry=(
-                "canonical package defect registry; ranked evidence: "
+                "Canonical defect tags (an empty list is valid when none applies): "
+                + json.dumps(sorted(DEFECTS)) + "; ranked evidence: "
                 + json.dumps([item.to_payload() for item in context.evidence], ensure_ascii=False)
             ),
             symbolic_memory_hints=json.dumps(list(context.memory_hints), ensure_ascii=False),
         )
         operation = IDEA_DIAGNOSTIC_OPERATION if diagnostic else IDEA_EVALUATE_OPERATION
-        result = self._complete(operation, structured, prompt)
-        payload = _result_object(result)
-        _reject_placeholders(payload)
-        metrics = _metrics(payload, METRICS, integers_only=True)
-        confidence = _finite_number(payload.get("confidence"), "confidence", minimum=0, maximum=1)
-        defects = _string_sequence(payload.get("detected_defects"), "detected_defects")
-        try:
-            validated_defects = validate_defects(tuple(defects))
-        except ValueError as error:
-            raise AdapterOutputError(str(error)) from error
-        feedback = _required_text(payload.get("feedback"), "feedback")
-        return EvaluationResponse(
-            metrics=metrics,
-            confidence=confidence,
-            detected_defects=validated_defects,
-            feedback=feedback,
-            usage=_algorithm_usage(result, evaluator=True),
-        )
+        def validate_response(result: ProviderResult):
+            payload = _result_object(result)
+            _reject_placeholders(payload)
+            metrics = _metrics(payload, METRICS, integers_only=True)
+            confidence = _finite_number(payload.get("confidence"), "confidence", minimum=0, maximum=1)
+            defects = _optional_string_sequence(payload.get("detected_defects"), "detected_defects")
+            try:
+                validated_defects = validate_defects(tuple(defects))
+            except ValueError as error:
+                raise AdapterOutputError(str(error)) from error
+            feedback = _required_text(payload.get("feedback"), "feedback")
+            return EvaluationResponse(
+                metrics=metrics,
+                confidence=confidence,
+                detected_defects=validated_defects,
+                feedback=feedback,
+                usage=_algorithm_usage(result, evaluator=True),
+            )
+
+        result = self._complete(operation, structured, prompt, response_validator=validate_response)
+        return validate_response(result)
 
     def _generate_idea(self, request: GenerationRequest) -> GenerationResponse:
         if request.mode not in IDEA_TASTE_MODES:
@@ -313,6 +336,8 @@ class ProviderAdapter:
             refinement_scope=request.context.refinement_scope,
             refinement_boundary=request.context.refinement_boundary,
             memory_hints=request.memory_hints,
+            task_context_json=request.context.task_context_json,
+            research_policy_json=request.context.research_policy_json,
         )
 
         structured: dict[str, JsonValue] = {
@@ -331,53 +356,73 @@ class ProviderAdapter:
             root_domains=json.dumps(list(request.parent.root_domains), ensure_ascii=False),
             refinement_scope=json.dumps(list(context.refinement_scope), ensure_ascii=False),
             taste_guidance=request.idea_taste_mode,
-            mature_idea=json.dumps(
-                context.mature_idea.to_payload()
-                if context.mature_idea
-                else request.parent.to_payload(),
-                ensure_ascii=False,
-            ),
-            parent_summary=json.dumps(request.parent.to_payload(), ensure_ascii=False),
+            mature_idea='See user input: grounding.mature_idea (or parent if absent).',
+            parent_summary='See user input: parent.',
             parent_components=json.dumps(
                 [component.name for component in request.parent.components], ensure_ascii=False
             ),
-            paper_context=json.dumps(
-                [item.to_payload() for item in context.evidence], ensure_ascii=False
-            ),
-            memory_bundle=json.dumps(list(context.memory_hints), ensure_ascii=False),
+            paper_context='See user input: grounding.evidence.',
+            memory_bundle='See user input: memory_hints.',
             skill_references="package-local algorithm resources",
-            additional_retrieval_context=json.dumps(
-                {"evidence_ids": list(context.evidence_ids)}, ensure_ascii=False
-            ),
+            additional_retrieval_context='See user input: operator_grounding and grounding.',
             skill_name=request.plan.operator,
             plan_objective=request.plan.rationale,
             target_defects=json.dumps(list(request.plan.target_defects), ensure_ascii=False),
-            component_edits=json.dumps(structured["plan"], ensure_ascii=False),
+            component_edits='See user input: plan.',
             validation_protocols="encoded in the typed edit plan",
             guardrails="preserve typed component bounds",
         )
-        result = self._complete(IDEA_GENERATE_OPERATION, structured, prompt)
-        payload = _result_object(result)
-        _reject_placeholders(payload)
-        state = _idea_state_from_generation(payload, request.parent, request.plan)
-        _validate_generated_child(
-            payload,
-            parent=request.parent,
-            child=state,
-            plan=request.plan,
-            context=request.context,
-        )
-        return GenerationResponse(state=state, usage=_algorithm_usage(result, generation=True))
+        prompt += ("\nExisting replacement/removal targets MUST be copied byte-for-byte from parent_components. "
+                   "Do not append a file path, role, version, or parenthetical explanation to a name. "
+                   "Descriptions belong only in component_role_explanations. "
+                   "If validation feedback is provided, repair the listed fields without inventing sources.\n")
+        def validate_response(result: ProviderResult):
+            payload = _result_object(result)
+            _reject_placeholders(payload)
+            state = _idea_state_from_generation(payload, request.parent, request.plan)
+            _validate_generated_child(
+                payload,
+                parent=request.parent,
+                child=state,
+                plan=request.plan,
+                context=request.context,
+            )
+            return GenerationResponse(state=state, usage=_algorithm_usage(result, generation=True))
+
+        result = self._complete(IDEA_GENERATE_OPERATION, structured, prompt, response_validator=validate_response)
+        return validate_response(result)
 
     def _generate_fusion(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         structured = _json_mapping(request, "fusion request")
         prompt = _format_fusion_prompt(structured)
-        result = self._complete(FUSION_GENERATE_OPERATION, structured, prompt)
-        payload = _result_object(result)
-        _reject_placeholders(payload)
-        normalized = _normalize_fusion(payload)
-        _validate_fusion_sources(normalized, structured.get("mode_inputs"))
-        return normalized
+        def validate_response(result: ProviderResult):
+            payload = _result_object(result)
+            try:
+                _reject_placeholders(payload)
+                normalized = _normalize_fusion(payload)
+                _validate_fusion_sources(normalized, structured.get("mode_inputs"))
+                validate_fusion_output(normalized, structured["mode_inputs"],
+                                       minimum_components=structured.get("minimum_components", 1))
+                mature = _fusion_mature_idea(structured)
+                if mature is not None:
+                    try:
+                        validate_root_identity(mature, normalized["idea"], context="idea_fusion.idea")
+                    except ValueError as error:
+                        raise AdapterOutputError(str(error), issues=[{
+                            "path": "fused_idea",
+                            "message": str(error),
+                            "received": {key: normalized["idea"].get(key) for key in IDENTITY_FIELDS},
+                            "required_identity": {key: deepcopy(mature[key]) for key in IDENTITY_FIELDS if key in mature},
+                        }]) from error
+            except ValueError as error:
+                if not isinstance(error, AdapterOutputError):
+                    error = AdapterOutputError(str(error))
+                error.previous_draft = deepcopy(payload)
+                raise error
+            return normalized
+
+        result = self._complete(FUSION_GENERATE_OPERATION, structured, prompt, response_validator=validate_response)
+        return validate_response(result)
 
     def _evaluate_fusion(self, candidate: Mapping[str, Any]) -> Mapping[str, Any]:
         structured = {
@@ -391,31 +436,35 @@ class ProviderAdapter:
             refinement_scope="None",
             edit_plan="fusion referee evaluation",
             idea=json.dumps(structured["candidate"], ensure_ascii=False),
-            defect_registry="canonical package defect registry",
+            defect_registry=json.dumps(sorted(DEFECTS)),
             symbolic_memory_hints="[]",
         )
-        result = self._complete(FUSION_REFEREE_OPERATION, structured, prompt)
-        payload = _result_object(result)
-        _reject_placeholders(payload)
-        metrics = _metrics(payload, REFEREE_METRICS)
-        score_value = payload.get("score", payload.get("composite"))
-        score = (
-            _finite_number(score_value, "score", minimum=0, maximum=5)
-            if score_value is not None
-            else None
-        )
-        details = {
-            key: deepcopy(value)
-            for key, value in payload.items()
-            if key not in {"score", "composite", "metrics", *REFEREE_METRICS}
-        }
-        result_payload: dict[str, Any] = {"metrics": metrics, **details}
-        if score is not None:
-            result_payload["score"] = score
-        return result_payload
+        def validate_response(result: ProviderResult):
+            payload = _result_object(result)
+            _reject_placeholders(payload)
+            metrics = _metrics(payload, REFEREE_METRICS)
+            score_value = payload.get("score", payload.get("composite"))
+            score = (
+                _finite_number(score_value, "score", minimum=0, maximum=5)
+                if score_value is not None
+                else None
+            )
+            details = {
+                key: deepcopy(value)
+                for key, value in payload.items()
+                if key not in {"score", "composite", "metrics", *REFEREE_METRICS}
+            }
+            result_payload: dict[str, Any] = {"metrics": metrics, **details}
+            if score is not None:
+                result_payload["score"] = score
+            return result_payload
+
+        result = self._complete(FUSION_REFEREE_OPERATION, structured, prompt, response_validator=validate_response)
+        return validate_response(result)
 
     def _complete(
-        self, operation: str, structured_input: Mapping[str, JsonValue], system_prompt: str
+        self, operation: str, structured_input: Mapping[str, JsonValue], system_prompt: str,
+        *, response_validator=None,
     ) -> ProviderResult:
         request = ProviderRequest(
             operation=operation,
@@ -427,6 +476,8 @@ class ProviderAdapter:
             ),
             output_kind="json",
             temperature=self._temperature,
+            validation_profile="xlab.adapter.response.v1:" + operation if response_validator is not None else None,
+            response_validator=response_validator,
         )
         try:
             result = self._provider.complete(request)
@@ -464,7 +515,8 @@ ProviderFusionAdapter = ProviderAdapter
 def _result_object(result: ProviderResult) -> dict[str, JsonValue]:
     if result.json_value is None or not isinstance(result.json_value, dict):
         raise AdapterOutputError("provider operation requires a JSON object result")
-    return deepcopy(result.json_value)
+    payload, _ = unwrap_answer_object(result.json_value)
+    return payload
 
 
 def _algorithm_usage(
@@ -768,15 +820,33 @@ def _validate_fusion_sources(
     fusion: Mapping[str, Any], mode_inputs: Any
 ) -> None:
     sources = _fusion_sources(mode_inputs)
+    issues = []
     for field in ("selected_components", "rejected_components"):
-        for record in fusion[field]:
-            _validate_source_record(record, sources, field)
-    for record in fusion["conflict_resolutions"]:
+        for index, record in enumerate(fusion[field]):
+            try:
+                _validate_source_record(record, sources, field)
+            except AdapterOutputError as error:
+                source = sources[record["source_mode"]]
+                issues.append({
+                    "path": f"{field}[{index}]",
+                    "message": str(error),
+                    "received": deepcopy(record),
+                    "allowed_component_names": list(source["components"]),
+                    "allowed_evidence_ids": sorted(source["evidence"]),
+                })
+    for index, record in enumerate(fusion["conflict_resolutions"]):
         available = set().union(
             *(sources[mode]["evidence"] for mode in record["source_modes"])
         )
         if not set(record["evidence"]).issubset(available):
-            raise AdapterOutputError("conflict evidence does not belong to its source modes")
+            issues.append({
+                "path": f"conflict_resolutions[{index}].evidence",
+                "message": "conflict evidence does not belong to its source modes",
+                "received": deepcopy(record["evidence"]),
+                "allowed_evidence_ids": sorted(available),
+            })
+    if issues:
+        raise AdapterOutputError(issues[0]["message"], issues=issues)
 
 
 def _validate_source_record(
@@ -989,23 +1059,72 @@ def _reject_placeholder_text(text: str, field: str) -> None:
 
 def _format_fusion_prompt(request: Mapping[str, JsonValue]) -> str:
     mode_inputs = request.get("mode_inputs", [])
-    return IDEA_FUSION_PROMPT.format(
+    prompt = IDEA_FUSION_PROMPT.format(
         topic=request.get("topic", ""),
-        mature_idea=json.dumps(request.get("context", {}), ensure_ascii=False),
+        mature_idea="See user input: context.mature_idea_payload.",
         refinement_scope=json.dumps(request.get("context", {}).get("refinement_scope") if isinstance(request.get("context"), dict) else None),
         root_domains=json.dumps(request.get("context", {}).get("root_domains", []) if isinstance(request.get("context"), dict) else []),
-        analysis=json.dumps(request.get("context", {}), ensure_ascii=False),
+        analysis="See user input: context.",
         mode_count=len(mode_inputs) if isinstance(mode_inputs, list) else 0,
-        candidate_ideas_json=json.dumps(mode_inputs, ensure_ascii=False),
+        candidate_ideas_json="See user input: mode_inputs; all source details are supplied there.",
+    )
+    prompt += _fusion_source_catalog(mode_inputs)
+    mature = _fusion_mature_idea(request)
+    if mature is not None:
+        prompt += (
+            "\n== Frozen fused-idea identity ==\n"
+            + json.dumps({key: mature[key] for key in IDENTITY_FIELDS if key in mature}, ensure_ascii=False)
+            + "\nCopy these tags and root_domains into fused_idea exactly, including their order "
+            "and empty arrays. They are frozen identity metadata, not a summary of your new "
+            "method. Do not add, remove, rename, or reorder entries to describe the fusion.\n"
+        )
+    return prompt
+
+
+def _fusion_mature_idea(request: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    context = request.get("context")
+    if not isinstance(context, Mapping):
+        return None
+    mature = context.get("mature_idea_payload", context.get("mature_idea"))
+    return mature if isinstance(mature, Mapping) else None
+
+
+def _fusion_source_catalog(mode_inputs: Any) -> str:
+    sources = _fusion_sources(mode_inputs)
+    catalog = {
+        mode: {
+            "components": [
+                {"name": name}
+                for name, description in source["components"].items()
+            ],
+            "evidence_ids": sorted(source["evidence"]),
+        }
+        for mode, source in sources.items()
+    }
+    return (
+        "\n== Authoritative selectable source catalog ==\n"
+        + json.dumps(catalog, ensure_ascii=False)
+        + "\nCopy component names and bare evidence IDs exactly from this catalog. "
+        "Evidence IDs are opaque strings, not descriptions or reviewer feedback. "
+        "Never append explanations, punctuation, or citations to an ID. "
+        "Nested search traces, child ideas, titles, and evaluator feedback are context only; "
+        "they do not add selectable components or evidence IDs. "
+        "Each source_mode restricts BOTH component names and evidence IDs to that mode. "
+        "If validation_feedback is supplied, correct every validation_issues entry in "
+        "previous_draft and return the complete corrected JSON. Do not replace invalid "
+        "evidence with an arbitrary allowed ID: choose evidence that supports the claim.\n"
     )
 
 
 def _format_repair_prompt(request: Mapping[str, JsonValue]) -> str:
-    return FUSION_REPAIR_PROMPT.format(
+    prompt = FUSION_REPAIR_PROMPT.format(
         topic=request.get("topic", ""),
         root_domains=json.dumps(request.get("root_domains", []), ensure_ascii=False),
-        current_idea_json=json.dumps(request.get("best_idea", {}), ensure_ascii=False),
-        current_evaluation_json=json.dumps(request.get("best_evaluation", {}), ensure_ascii=False),
-        candidate_ideas_json=json.dumps(request.get("mode_inputs", []), ensure_ascii=False),
+        current_idea_json="See user input: best_idea.",
+        current_evaluation_json="See user input: best_evaluation.",
+        candidate_ideas_json="See user input: mode_inputs.",
         atomic_op_reference=json.dumps(request.get("allowed_operations", []), ensure_ascii=False),
     )
+    if "mode_inputs" in request:
+        prompt += _fusion_source_catalog(request["mode_inputs"])
+    return prompt

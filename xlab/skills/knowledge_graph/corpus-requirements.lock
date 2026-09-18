@@ -1,0 +1,3 @@
+# CPU corpus coordinator. MinerU and vLLM use their separate pinned images.
+httpx==0.28.1
+transformers==5.14.1

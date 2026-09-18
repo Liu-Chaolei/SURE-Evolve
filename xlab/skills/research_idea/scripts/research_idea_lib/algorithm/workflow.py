@@ -27,6 +27,13 @@ from .contracts import (
 from .fusion import CANONICAL_MODES as FUSION_CANONICAL_MODES
 from .operator_grounding import MECHANISM_COMMIT_OPERATOR
 from .operators import OPERATORS
+from .response_projection import unwrap_answer_object
+from .root_identity import (
+    IDENTITY_FIELDS,
+    ROOT_IDENTITY_INSTRUCTION,
+    inherit_root_identity,
+    validate_root_identity,
+)
 
 CANONICAL_MODES = FUSION_CANONICAL_MODES
 
@@ -249,6 +256,8 @@ class WorkflowRequest:
     selected_outcome_hits: tuple[OutcomeHit, ...] = ()
     citations: CitationRegistry | None = None
     retrieval_metadata: Mapping[str, Any] = field(default_factory=dict)
+    research_policy: Mapping[str, Any] = field(default_factory=dict)
+    task_context: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -277,7 +286,7 @@ def run_workflow(
     budgets = _BudgetLedger()
     try:
         _validate_request(request)
-        if request.experiment_feedback is None:
+        if request.experiment_feedback is None or request.research_policy:
             evidence, resource_ids, analysis = _normal_prelude(
                 request,
                 provider,
@@ -286,66 +295,45 @@ def run_workflow(
                 artifact,
                 budgets,
             )
-        else:
-            evidence = _validated_evidence(request.evidence)
-            resource_ids = _nonempty_strings(request.resource_ids, "feedback resource_ids")
-            _set_retrieval_namespace(
-                artifact, evidence, resource_ids, request.retrieval_metadata
-            )
-            grounding = _run_keynote_grounding(
-                request,
-                keynote_grounder,
-                request.rag_query,
-                request.selected_outcome_hits,
-                request.citations,
-                artifact,
-                budgets,
-            )
-            analysis = _provider_call(
-                provider,
-                OP_ANALYSIS,
-                {
-                    "topic": request.topic,
-                    "source_context": deepcopy(dict(request.source_context)),
-                    "experiment_feedback": deepcopy(request.experiment_feedback),
-                    "evidence": [_evidence_dict(item) for item in evidence],
-                    **grounding,
-                    "mature_idea": deepcopy(dict(request.mature_idea or {})),
-                    "refinement_scope": list(request.refinement_scope),
-                    "refinement_boundary": request.refinement_boundary.to_payload() if request.refinement_boundary else None,
-                },
-                artifact,
-                budgets,
-            )
-            _require_analysis(analysis, mature=bool(request.mature_idea))
-            artifact["analysis"]["entries"].append(deepcopy(dict(analysis)))
-            _stage(artifact, "advanced_analysis")
+        if request.experiment_feedback is not None:
+            if request.research_policy:
+                # The full prelude above already retrieved and analysed fresh evidence.
+                grounding = {}
+            else:
+                evidence = _validated_evidence(request.evidence)
+                resource_ids = _nonempty_strings(request.resource_ids, "feedback resource_ids")
+                _set_retrieval_namespace(artifact, evidence, resource_ids, request.retrieval_metadata)
+                grounding = _run_keynote_grounding(
+                    request, keynote_grounder, request.rag_query, request.selected_outcome_hits,
+                    request.citations, artifact, budgets,
+                )
+            if not request.research_policy:
+                analysis = _feedback_analysis(request, provider, evidence, grounding, artifact, budgets)
             replan = _provider_call(
-                provider,
-                OP_REPLAN,
-                {
-                    "topic": request.topic,
-                    "analysis": deepcopy(dict(analysis)),
-                    "experiment_feedback": deepcopy(request.experiment_feedback),
-                    "mature_idea": deepcopy(dict(request.mature_idea or {})),
-                    "refinement_scope": list(request.refinement_scope),
-                    "refinement_boundary": request.refinement_boundary.to_payload() if request.refinement_boundary else None,
-                    "evidence": [_evidence_dict(item) for item in evidence],
-                    "evidence_ids": [item.evidence_id for item in evidence],
-                },
-                artifact,
-                budgets,
+                provider, OP_REPLAN,
+                {"topic": request.topic, "analysis": deepcopy(dict(analysis)),
+                 "experiment_feedback": deepcopy(request.experiment_feedback),
+                 "mature_idea": deepcopy(dict(request.mature_idea or {})),
+                 "refinement_scope": list(request.refinement_scope),
+                 "refinement_boundary": request.refinement_boundary.to_payload() if request.refinement_boundary else None,
+                 "evidence": [_evidence_dict(item) for item in evidence],
+                 "evidence_ids": [item.evidence_id for item in evidence],
+                 "research_policy": dict(request.research_policy), "task_context": dict(request.task_context)},
+                artifact, budgets,
             )
             _require_mapping(replan.get("replan"), "re_analysis_replan.replan")
             artifact["analysis"]["entries"].append(deepcopy(dict(replan)))
             _stage(artifact, "re_analysis_replan")
             analysis = {**deepcopy(dict(analysis)), **deepcopy(dict(replan))}
 
-        root = _select_root(request, analysis)
+        inheritance: dict[str, Any] = {}
+        root = _select_root(request, analysis, inheritance=inheritance)
         root_signature = stable_signature(root)
         evidence_signature = stable_evidence_signature(evidence)
         evidence_ids = tuple(item.evidence_id for item in evidence)
         context = {
+            "research_policy": dict(request.research_policy),
+            "task_context": dict(request.task_context),
             "topic": request.topic,
             "source_context": deepcopy(dict(request.source_context)),
             "analysis": deepcopy(dict(analysis)),
@@ -366,6 +354,8 @@ def run_workflow(
             }
         )
         artifact["retrieval"]["evidence_signature"] = evidence_signature
+        if inheritance:
+            artifact["analysis"]["root_identity_inheritance"] = inheritance
 
         mode_outputs = _run_modes(
             request,
@@ -389,12 +379,19 @@ def run_workflow(
             artifact,
             budgets,
         )
+        if request.research_policy and request.mature_idea is not None:
+            _validate_mature_root(request.mature_idea, fusion.idea, request.refinement_boundary,
+                                  context="idea_fusion.idea")
         materialized = _provider_call(
             provider,
             OP_MATERIALIZATION,
             {
                 "topic": request.topic,
                 "fusion": deepcopy(dict(fusion.idea)),
+                "references": deepcopy(request.source_context.get('references', [])),
+                "research_policy": dict(request.research_policy),
+                "task_context": dict(request.task_context),
+                "evidence": [_evidence_dict(item) for item in evidence],
                 "source_modes": list(CANONICAL_MODES),
                 "evidence_ids": list(fusion.evidence_ids),
                 "root_signature": root_signature,
@@ -443,6 +440,21 @@ def stable_signature(value: object) -> str:
         raise WorkflowContractError(f"value is not stable JSON: {exc}") from exc
 
 
+def _feedback_analysis(request, provider, evidence, grounding, artifact, budgets):
+    analysis = _provider_call(provider, OP_ANALYSIS, {
+        "topic": request.topic, "source_context": deepcopy(dict(request.source_context)),
+        "experiment_feedback": deepcopy(request.experiment_feedback),
+        "evidence": [_evidence_dict(item) for item in evidence], **grounding,
+        "mature_idea": deepcopy(dict(request.mature_idea or {})),
+        "refinement_scope": list(request.refinement_scope),
+        "refinement_boundary": request.refinement_boundary.to_payload() if request.refinement_boundary else None,
+    }, artifact, budgets)
+    _require_analysis(analysis, mature=bool(request.mature_idea))
+    artifact["analysis"]["entries"].append(deepcopy(dict(analysis)))
+    _stage(artifact, "advanced_analysis")
+    return analysis
+
+
 def stable_evidence_signature(evidence: Sequence[Evidence]) -> str:
     return stable_signature([_evidence_dict(item) for item in evidence])
 
@@ -475,7 +487,10 @@ def _normal_prelude(
     query = _provider_call(
         provider,
         OP_QUERY,
-        {"topic": request.topic, "background": deepcopy(dict(background))},
+        {"topic": request.topic, "background": deepcopy(dict(background)),
+         "mature_idea": request.mature_idea, "refinement_scope": list(request.refinement_scope),
+         "experiment_feedback": request.experiment_feedback, "task_context": dict(request.task_context),
+         "research_policy": dict(request.research_policy)},
         artifact,
         budgets,
     )
@@ -515,7 +530,16 @@ def _normal_prelude(
         artifact,
         budgets,
     )
-    ranked_ids = _nonempty_strings(ranking.get("evidence_ids"), "reference_ranking.evidence_ids")
+    ranking_value = ranking.get("evidence_ids")
+    if "evidence_ids" not in ranking and set(ranking) == {"answer"}:
+        # Some OpenAI-compatible providers wrap a requested list in `answer`.
+        # Preserve its ordering and still require an exact permutation below.
+        ranking_value = ranking["answer"]
+        artifact["retrieval"]["ranking_projection"] = {
+            "source_key": "answer", "target_key": "evidence_ids",
+            "raw_response_signature": stable_signature(ranking),
+        }
+    ranked_ids = _nonempty_strings(ranking_value, "reference_ranking.evidence_ids")
     evidence = _rank_evidence(evidence, ranked_ids)
     _set_retrieval_namespace(artifact, evidence, resource_ids, retrieved.metadata)
     grounding = _run_keynote_grounding(
@@ -535,12 +559,15 @@ def _normal_prelude(
         {
             "topic": request.topic,
             "background": deepcopy(dict(background)),
+            "research_policy": dict(request.research_policy),
+            "task_context": dict(request.task_context),
+            "experiment_feedback": request.experiment_feedback,
             "evidence": [_evidence_dict(item) for item in evidence],
             **grounding,
             "mature_idea": deepcopy(dict(request.mature_idea or {})),
             "refinement_scope": list(request.refinement_scope),
             "refinement_boundary": (
-                deepcopy(dict(request.refinement_boundary))
+                request.refinement_boundary.to_payload()
                 if request.refinement_boundary
                 else None
             ),
@@ -763,7 +790,20 @@ def _provider_call(
     artifact: dict[str, Any],
     budgets: "_BudgetLedger",
 ) -> Mapping[str, Any]:
-    operation = ProviderOperation(name, deepcopy(dict(structured_input)))
+    provider_input = deepcopy(dict(structured_input))
+    mature = provider_input.get("mature_idea")
+    if name in {OP_ANALYSIS, OP_REPLAN} and isinstance(mature, Mapping) and mature:
+        provider_input["root_identity_contract"] = {
+            "instruction": ROOT_IDENTITY_INSTRUCTION,
+            "required_values": {key: deepcopy(mature[key]) for key in IDENTITY_FIELDS if key in mature},
+        }
+    if name == OP_RANKING:
+        provider_input["output_contract"] = {
+            "instruction": 'Return exactly {"evidence_ids": ["supplied-id", "..."]}. '
+                           'Use every supplied ID once; no answer wrapper or additional keys.',
+            "required_key": "evidence_ids",
+        }
+    operation = ProviderOperation(name, provider_input)
     digest = stable_signature(operation.structured_input)
     try:
         output = provider.execute(operation)
@@ -783,6 +823,20 @@ def _provider_call(
         )
         raise
     artifact["run"]["operation_trace"].append(trace)
+    raw_signature = stable_signature(value)
+    value, wrapper_depth = unwrap_answer_object(value)
+    if wrapper_depth:
+        artifact["run"].setdefault("response_projections", []).append({
+            "operation": name, "source_key": "answer", "target_key": "object",
+            "wrapper_depth": wrapper_depth, "raw_response_signature": raw_signature,
+        })
+    scalar_field = {OP_BACKGROUND: "background", OP_QUERY: "query"}.get(name)
+    if scalar_field and set(value) == {"answer"} and isinstance(value["answer"], str):
+        artifact["run"].setdefault("response_projections", []).append({
+            "operation": name, "source_key": "answer", "target_key": scalar_field,
+            "raw_response_signature": stable_signature(value),
+        })
+        value = {scalar_field: value["answer"]}
     return deepcopy(dict(value))
 
 
@@ -866,11 +920,14 @@ def _validate_rollout_records(output: ModeSearchOutput, expected_mode: str) -> N
             )
         if record.grounding_explicit_empty and (
             record.operator != MECHANISM_COMMIT_OPERATOR
-            or record.outcome not in {"applied", "explicit_empty"}
+            or record.outcome not in {"applied", "explicit_empty", "error"}
         ):
             raise WorkflowContractError(
-                f"{context} explicit-empty grounding is only valid for an applied mechanism commit"
+                f"{context} explicit-empty grounding is only valid for a mechanism commit attempt"
             )
+        # Empty retrieval is independent of a later generation failure. Error
+        # attempts still require a corresponding blocker below and are not
+        # promoted to applied candidates.
         key = (record.parent_node_id, record.operator, record.plan_digest)
         if key in attempts:
             raise WorkflowContractError(
@@ -953,14 +1010,30 @@ def _rank_evidence(evidence: tuple[Evidence, ...], ranked_ids: tuple[str, ...]) 
     return tuple(by_id[item] for item in ranked_ids)
 
 
-def _select_root(request: WorkflowRequest, analysis: Mapping[str, Any]) -> dict[str, Any]:
+def _select_root(
+    request: WorkflowRequest, analysis: Mapping[str, Any], *,
+    inheritance: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if request.mature_idea is not None:
+        context = "advanced_analysis.root_idea"
         root_value: object = analysis.get("root_idea") if request.experiment_feedback is None else None
         replan = analysis.get("replan")
         if isinstance(replan, Mapping):
             root_value = replan.get("root_idea", root_value)
+            context = "re_analysis_replan.root_idea"
         root = deepcopy(dict(root_value)) if isinstance(root_value, Mapping) else deepcopy(dict(request.mature_idea))
-        _validate_mature_root(request.mature_idea, root, request.refinement_boundary)
+        raw_signature = stable_signature(root)
+        try:
+            root, fields = inherit_root_identity(request.mature_idea, root, context=context)
+        except ValueError as error:
+            raise WorkflowContractError(str(error)) from error
+        _validate_mature_root(request.mature_idea, root, request.refinement_boundary, context=context)
+        if fields and inheritance is not None:
+            inheritance.update(
+                schema_version="xlab.root_identity_inheritance.v1", stage=context,
+                fields=fields, parent_signature=stable_signature(request.mature_idea),
+                raw_root_signature=raw_signature, normalized_root_signature=stable_signature(root),
+            )
     else:
         root = deepcopy(dict(_require_mapping(analysis.get("root_idea"), "advanced_analysis.root_idea")))
     _validate_idea(root, "search root")
@@ -971,10 +1044,13 @@ def _validate_mature_root(
     mature: Mapping[str, Any],
     root: Mapping[str, Any],
     refinement_boundary: RefinementBoundary | None,
+    *, context: str = "feedback replan.root_idea",
 ) -> None:
-    _validate_idea(root, "feedback replan.root_idea")
-    if root.get("root_domains") != mature.get("root_domains") or root.get("tags") != mature.get("tags"):
-        raise WorkflowContractError("feedback replan changed mature root domains or tags")
+    _validate_idea(root, context)
+    try:
+        validate_root_identity(mature, root, context=context)
+    except ValueError as error:
+        raise WorkflowContractError(str(error)) from error
     if refinement_boundary is None:
         return
     allowed = set(refinement_boundary.allowed_component_ids)
@@ -1003,7 +1079,7 @@ def _validate_mature_root(
     }
     if not changed.issubset(allowed):
         raise WorkflowContractError(
-            "feedback replan changed mature components outside refinement_boundary: "
+            f"{context} changed mature components outside refinement_boundary: "
             + ", ".join(sorted(changed - allowed))
         )
 
@@ -1046,6 +1122,7 @@ def _mode_seed(seed: str, root_signature: str, evidence_signature: str, mode: st
 def _initial_artifact(request: WorkflowRequest) -> dict[str, Any]:
     return {
         "run": {
+            "research_policy": dict(request.research_policy),
             "run_id": request.run_id,
             "status": "running",
             "algorithm_profile_id": ALGORITHM_PROFILE_ID,

@@ -10,7 +10,9 @@ import {
 	CODE_REVIEW_ROLES,
 	canonicalDigest,
 	canonicalJsonBytes,
+	codeReviewRoles,
 	EXPERIMENT_STAGES,
+	type ExperimentExecutionProfile,
 	type ExperimentProtocolSnapshot,
 	ExperimentProtocolStore,
 	SCIENCE_REVIEW_ROLES,
@@ -26,6 +28,12 @@ export const NATIVE_EXPERIMENT_POLICY = {
 
 export const NATIVE_EXPERIMENT_POLICY_DIGEST = canonicalDigest(NATIVE_EXPERIMENT_POLICY);
 
+export function experimentPolicy(profile?: ExperimentExecutionProfile) {
+	return profile
+		? { ...NATIVE_EXPERIMENT_POLICY, execution_profile: profile, code_review_roles: codeReviewRoles(profile) }
+		: NATIVE_EXPERIMENT_POLICY;
+}
+
 export interface XlabExperimentLifecycleOptions {
 	cwd: string;
 	agentDir: string;
@@ -34,7 +42,10 @@ export interface XlabExperimentLifecycleOptions {
 	runManager?: XlabRunManager;
 	clock?: () => string;
 	leaseDurationMs?: number;
-	coordinatorOptions?: Pick<ExperimentCoordinatorOptions, "tokenFactory" | "childRuntime">;
+	coordinatorOptions?: Pick<
+		ExperimentCoordinatorOptions,
+		"tokenFactory" | "childRuntime" | "childRuntimeOptions" | "maxAssignmentPromptAttempts"
+	>;
 	finalizeSuccess?: (record: XlabRunRecord) => { artifactRefs: XlabArtifactReference[]; manifestPath: string };
 }
 
@@ -53,21 +64,24 @@ export function initializeXlabExperimentStaging(
 	context: XlabRunStagingContext,
 	ideaBinding: XlabIdeaBinding,
 	clock?: () => string,
+	profile?: ExperimentExecutionProfile,
 ): ExperimentProtocolSnapshot {
-	atomicWriteFile(policyPath(context.stagingDir), canonicalJsonBytes(NATIVE_EXPERIMENT_POLICY));
+	const policy = experimentPolicy(profile);
+	atomicWriteFile(policyPath(context.stagingDir), canonicalJsonBytes(policy));
 	return new ExperimentProtocolStore(context.stagingDir, clock).initialize({
 		runId: context.record.runId,
 		ideaDigest: ideaBinding.metadata.canonical_digest,
-		policyDigest: NATIVE_EXPERIMENT_POLICY_DIGEST,
+		policyDigest: canonicalDigest(policy),
 	});
 }
 
 export function createXlabExperimentStagingMaterializer(
 	ideaBinding: XlabIdeaBinding,
 	clock?: () => string,
+	profile?: ExperimentExecutionProfile,
 ): (context: XlabRunStagingContext) => void {
 	return (context) => {
-		initializeXlabExperimentStaging(context, ideaBinding, clock);
+		initializeXlabExperimentStaging(context, ideaBinding, clock, profile);
 	};
 }
 
@@ -115,7 +129,14 @@ export class XlabExperimentLifecycle {
 				`Native experiment policy is invalid: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
-		if (canonicalDigest(parsedPolicy) !== NATIVE_EXPERIMENT_POLICY_DIGEST) {
+		const profile = (parsedPolicy as { execution_profile?: ExperimentExecutionProfile }).execution_profile;
+		if (
+			profile &&
+			(!["standard", "direct_formal"].includes(profile.mode) || !["research", "baseline"].includes(profile.kind))
+		)
+			throw new Error("Unknown experiment execution profile.");
+		const policyDigest = canonicalDigest(experimentPolicy(profile));
+		if (canonicalDigest(parsedPolicy) !== policyDigest) {
 			throw new Error("Native experiment policy digest does not match the canonical policy.");
 		}
 		const ideaPath = join(record.runDir, "inputs", "idea.json");
@@ -128,7 +149,7 @@ export class XlabExperimentLifecycle {
 		if (
 			snapshot.run_id !== record.runId ||
 			snapshot.idea_digest !== ideaDigest ||
-			snapshot.policy_digest !== NATIVE_EXPERIMENT_POLICY_DIGEST
+			snapshot.policy_digest !== policyDigest
 		) {
 			throw new Error("Native experiment protocol does not match immutable run inputs.");
 		}
@@ -138,7 +159,7 @@ export class XlabExperimentLifecycle {
 			cwd: record.cwd,
 			agentDir: this.options.agentDir,
 			ideaDigest,
-			policyDigest: NATIVE_EXPERIMENT_POLICY_DIGEST,
+			policyDigest,
 			ownerId: this.options.ownerId,
 			protocol,
 			clock: this.options.clock,

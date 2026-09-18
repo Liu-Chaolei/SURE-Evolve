@@ -108,8 +108,8 @@ def map_to_research_idea(
         "fusion_metadata": idea_result.get("fusion_metadata") if isinstance(idea_result.get("fusion_metadata"), dict) else {},
         "idea_contract": idea_result.get("idea_contract") if isinstance(idea_result.get("idea_contract"), dict) else idea_contract(request),
         "replanning_trigger": analysis_payload.get("replan") if request.experiment_feedback else None,
-        "previous_results": ideation.get("ablation_results") if request.experiment_feedback else None,
-        "generated_from": "survey_grounded_mcts",
+        "previous_results": request.task_context.get("experiment_memory") if request.research_policy else (ideation.get("ablation_results") if request.experiment_feedback else None),
+        "generated_from": "task_grounded_mcts" if request.research_policy.get("evidence_mode") == "task_only" else "survey_grounded_mcts",
     }
 
 

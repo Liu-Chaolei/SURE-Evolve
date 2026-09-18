@@ -4,10 +4,10 @@ import lockfile from "proper-lockfile";
 import type { XlabManifestArtifact, XlabManifestEnvelope } from "../types.ts";
 import {
 	atomicWriteFile,
-	CODE_REVIEW_ROLES,
 	canonicalDigest,
 	canonicalJson,
 	canonicalJsonBytes,
+	codeReviewRoles,
 	type ExperimentAcceptedResult,
 	type ExperimentPlan,
 	type ExperimentProtocolStore,
@@ -200,8 +200,9 @@ function normalizeFinal(
 	definitions: FinalComponentDefinition[],
 	results: Record<string, unknown>,
 	summary: Record<string, unknown>,
+	baseline = false,
 ): Record<string, unknown> {
-	if (definitions.length === 0) throw new Error("Final materialization requires canonical components.");
+	if (definitions.length === 0 && !baseline) throw new Error("Final materialization requires canonical components.");
 	const names = definitions.map((definition) => stringField(definition.component, "Canonical component name"));
 	if (new Set(names).size !== names.length) throw new Error("Canonical component names must be unique.");
 	if (Object.keys(results).length !== names.length || Object.keys(results).some((name) => !names.includes(name)))
@@ -229,6 +230,7 @@ function normalizeFinal(
 	if (!Array.isArray(summary.key_findings) || summary.key_findings.length === 0)
 		throw new Error("Final summary key_findings must be non-empty.");
 	return {
+		...(baseline ? { ablation_status: "not_applicable", experiment_kind: "baseline" } : {}),
 		components,
 		summary: {
 			feasible: summary.feasible,
@@ -462,12 +464,13 @@ export class ExperimentMaterializer {
 			throw new Error(`Assignment ${assignmentId} is not a materializable plan.`);
 		const plan = objectResult(accepted) as ExperimentPlan;
 		const stage = accepted.submission.stage as "prepare" | "code" | "science";
+		const profile = this.protocol.read().assignments[assignmentId].result_validation?.execution_profile;
 		const error =
 			stage === "prepare"
 				? validatePreparePlan(plan)
 				: stage === "code"
-					? validateCodePlan(plan, componentNames)
-					: validateSciencePlan(plan, componentNames);
+					? validateCodePlan(plan, componentNames, profile)
+					: validateSciencePlan(plan, componentNames, profile);
 		if (error) throw new Error(error);
 		return publishPair(
 			this.runRoot,
@@ -502,7 +505,10 @@ export class ExperimentMaterializer {
 	}
 
 	materializeReviewMatrix(options: MaterializeReviewMatrixOptions): { reports: ExperimentPublication[] } {
-		const roles = options.stage === "code" ? CODE_REVIEW_ROLES : SCIENCE_REVIEW_ROLES;
+		const roles =
+			options.stage === "code"
+				? codeReviewRoles(options.validationContext?.execution_profile)
+				: SCIENCE_REVIEW_ROLES;
 		if (options.assignmentIds.length !== roles.length)
 			throw new Error(`Review matrix must contain exactly ${roles.length} assignments.`);
 		const accepted = options.assignmentIds.map((id) => acceptedFor(this.protocol, id));
@@ -561,7 +567,8 @@ export class ExperimentMaterializer {
 			throw new Error("Science-plan provenance digest is not authoritative.");
 		const plan = objectResult(sciencePlan) as ExperimentPlan;
 		const componentNames = options.componentDefinitions.map((item) => item.component);
-		const planError = validateSciencePlan(plan, componentNames);
+		const profile = snapshot.assignments[sciencePlan.accepted.assignment_id].result_validation?.execution_profile;
+		const planError = validateSciencePlan(plan, componentNames, profile);
 		if (planError) throw new Error(planError);
 		if (options.provenance.science.cohort.length !== plan.work_units.length)
 			throw new Error("Finalization provenance requires the complete science worker cohort.");
@@ -600,6 +607,7 @@ export class ExperimentMaterializer {
 			reports.push(objectResult(review) as unknown as ExperimentReviewReport);
 		}
 		const validationContext: ExperimentReviewValidationContext = {
+			...(profile ? { execution_profile: profile } : {}),
 			component_names: componentNames,
 			science_conditions: plan.work_units.map((unit) => ({
 				id: unit.id,
@@ -636,7 +644,12 @@ export class ExperimentMaterializer {
 			canonicalDigest(resultProjection(options.componentResults))
 		)
 			throw new Error("Final component results do not match the authoritative science review matrix.");
-		const ablation = normalizeFinal(options.componentDefinitions, options.componentResults, options.summary);
+		const ablation = normalizeFinal(
+			options.componentDefinitions,
+			options.componentResults,
+			options.summary,
+			profile?.kind === "baseline",
+		);
 		const operationPayload = canonicalJson({ run_id: snapshot.run_id, provenance: options.provenance, ablation });
 		const payloadDigest = canonicalDigest(operationPayload);
 		const operationId = `experiment-finalization-${payloadDigest}`;

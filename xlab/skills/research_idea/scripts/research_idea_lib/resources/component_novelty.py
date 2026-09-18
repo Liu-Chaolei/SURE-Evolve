@@ -63,6 +63,7 @@ class DeclaredFaissComponentRetriever:
         except (OSError, UnicodeError, json.JSONDecodeError) as error:
             raise ResourceExecutionError("declared component metadata is unreadable or malformed") from error
         self._records = component_metadata_records(payload, index_descriptor.resource_id)
+        self._nodes = _core_nodes(self._records, index_descriptor)
 
     def retrieve_operator_components(
         self, query: str, *, limit: int
@@ -143,7 +144,7 @@ class DeclaredFaissComponentRetriever:
         typed_hits = tuple(
             ComponentHit(
                 record_id=component_id,
-                node=_core_node(component_id, record, self._index_descriptor),
+                node=self._nodes[str(record.get("node_id") or record.get("id") or component_id).strip()],
                 matched_component=str(record.get("component") or record.get("title") or record.get("name") or component_id),
                 similarity=score,
             )
@@ -258,13 +259,44 @@ def _string_tuple(value: object) -> tuple[str, ...]:
     return tuple(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
 
 
-def _core_node(component_id: str, record: Mapping[str, Any], descriptor: ResourceDescriptor) -> CoreNode:
+def _core_nodes(records, descriptor: ResourceDescriptor) -> dict[str, CoreNode]:
+    groups: dict[str, list[tuple[str, Mapping[str, Any]]]] = {}
+    for component_id, record in records:
+        node_id = str(record.get("node_id") or record.get("id") or component_id).strip()
+        groups.setdefault(node_id, []).append((component_id, record))
+    nodes = {}
+    for node_id, members in groups.items():
+        members = sorted(members, key=lambda item: item[0])
+        canonical = dict(members[0][1])
+        for field in ('paper_title', 'label'):
+            values = {str(record[field]).strip() for _, record in members if record.get(field)}
+            if len(values) > 1:
+                raise ResourceExecutionError(f'Conflicting Core node {node_id} {field}')
+            if values:
+                canonical[field] = next(iter(values))
+        canonical['node_id'] = node_id
+        canonical['evidence_id'] = f'component:{node_id}'
+        # Component summaries belong to hits. Build one immutable, traceable Core
+        # projection from the full declared index, never from query-dependent hits.
+        canonical['summary'] = '\n'.join(
+            f"{record.get('component') or component_id}: {record.get('summary') or record.get('description') or ''}"
+            for component_id, record in members)
+        canonical['insight'] = '\n'.join(dict.fromkeys(
+            str(record.get('insight') or record.get('explanation') or '').strip()
+            for _, record in members if record.get('insight') or record.get('explanation')))
+        nodes[node_id] = _core_node(node_id, canonical, descriptor,
+                                   component_ids=tuple(key for key, _ in members))
+    return nodes
+
+
+def _core_node(component_id: str, record: Mapping[str, Any], descriptor: ResourceDescriptor,
+               *, component_ids: tuple[str, ...] = ()) -> CoreNode:
     node_id = str(record.get("node_id") or record.get("id") or component_id).strip()
     label = str(record.get("label") or record.get("title") or record.get("name") or component_id).strip()
     provenance = {
         "resource_id": descriptor.resource_id,
         "descriptor_digest": descriptor.digest,
-        "component_id": component_id,
+        **({"component_ids": list(component_ids)} if component_ids else {"component_id": component_id}),
     }
     return CoreNode(
         evidence_id=str(record.get("evidence_id") or f"component:{component_id}"),

@@ -5,12 +5,13 @@ import {
 	type CreateExperimentChildOptions,
 	type ExperimentChildHandle,
 	ExperimentChildRuntime,
+	type ExperimentChildRuntimeOptions,
 } from "./child-runtime.ts";
 import {
 	type CanonicalJson,
-	CODE_REVIEW_ROLES,
 	canonicalDigest,
 	canonicalJson,
+	codeReviewRoles,
 	EXPERIMENT_STAGES,
 	type ExperimentAcceptedResult,
 	type ExperimentAssignment,
@@ -44,7 +45,9 @@ export interface ExperimentCoordinatorOptions {
 	protocol: ExperimentProtocolStore;
 	tokenFactory?: (assignmentId: string, allowKeyCreation: boolean) => string;
 	childRuntime?: ExperimentChildRuntime;
+	childRuntimeOptions?: Omit<ExperimentChildRuntimeOptions, "runDir" | "agentDir" | "protocol" | "ownerFence">;
 	leaseDurationMs?: number;
+	maxAssignmentPromptAttempts?: number;
 	clock?: () => string;
 	onStageTransition?: (stage: ExperimentStage, action: "start" | "complete") => void;
 }
@@ -185,6 +188,7 @@ export class ExperimentCoordinator {
 				agentDir: options.agentDir,
 				protocol: options.protocol,
 				ownerFence: () => this.fence,
+				...options.childRuntimeOptions,
 			});
 	}
 
@@ -282,6 +286,7 @@ export class ExperimentCoordinator {
 			}
 			byId.set(driver.workUnit.id, driver);
 		}
+		this.initialize();
 		const completed = new Set<string>();
 		while (completed.size < plan.work_units.length) {
 			const ready = plan.work_units.filter(
@@ -291,13 +296,25 @@ export class ExperimentCoordinator {
 			if (ready.length === 0) {
 				throw new Error("Experiment work-unit dependency graph is cyclic or references an unknown unit.");
 			}
-			for (const workUnit of ready) {
+			const execute = async (workUnit: ExperimentWorkUnit) => {
+				if (this.read().terminal_generation !== undefined) throw new Error("Experiment is cancelled or terminal.");
 				const driver = byId.get(workUnit.id);
 				if (!driver) {
 					throw new Error(`Experiment plan is missing a driver for work unit ${workUnit.id}.`);
 				}
 				await driver.run(this, workUnit);
 				completed.add(workUnit.id);
+			};
+			if (plan.stage === "science") {
+				const results = await Promise.allSettled(ready.map(execute));
+				const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+				if (failures.length)
+					throw new AggregateError(
+						failures.map((result) => result.reason),
+						"Science conditions remain incomplete.",
+					);
+			} else {
+				for (const workUnit of ready) await execute(workUnit);
 			}
 		}
 	}
@@ -379,14 +396,25 @@ export class ExperimentCoordinator {
 		let promptError: unknown;
 		try {
 			handle = await this.childRuntime.openAssignment(assignment, token);
-			try {
-				await this.withLeaseHeartbeat(() => handle!.session.prompt(spec.prompt, { expandPromptTemplates: false }));
-			} catch (error) {
-				promptError = error;
-			}
-			const accepted = this.protocol.readAcceptedResult(assignment.assignment_id);
-			if (accepted) {
-				return accepted;
+			const attempts = this.options.maxAssignmentPromptAttempts ?? 1;
+			if (!Number.isInteger(attempts) || attempts < 1)
+				throw new Error("Assignment attempts must be a positive integer.");
+			for (let attempt = 0; attempt < attempts; attempt++) {
+				const current = this.read();
+				if (current.terminal_generation !== undefined || current.status === "paused")
+					throw new Error("Assignment interrupted by run state.");
+				promptError = undefined;
+				const prompt = attempt
+					? `${spec.prompt}\nThe previous turn did not produce an accepted submission. Resume this same work unit, reuse existing evidence, and finish with the correct submit tool. Do not repeat completed execution. Required validation context: ${JSON.stringify(spec.resultValidation ?? {})}`
+					: spec.prompt;
+				try {
+					await this.withLeaseHeartbeat(() => handle!.session.prompt(prompt, { expandPromptTemplates: false }));
+				} catch (error) {
+					promptError = error;
+				}
+				const accepted = this.protocol.readAcceptedResult(assignment.assignment_id);
+				if (accepted) return accepted;
+				if (attempt + 1 < attempts) await new Promise<void>((done) => setTimeout(done, 1500 * (attempt + 1)));
 			}
 			if (promptError) {
 				throw promptError;
@@ -404,7 +432,8 @@ export class ExperimentCoordinator {
 	}
 
 	async runReviewMatrix(spec: ExperimentReviewSpec): Promise<ExperimentReviewMatrixResult> {
-		const roles = spec.stage === "code" ? CODE_REVIEW_ROLES : SCIENCE_REVIEW_ROLES;
+		const roles =
+			spec.stage === "code" ? codeReviewRoles(spec.validationContext?.execution_profile) : SCIENCE_REVIEW_ROLES;
 		const reports: ExperimentReviewReport[] = [];
 		const assignmentIds: string[] = [];
 		for (let index = 0; index < roles.length; index += 1) {

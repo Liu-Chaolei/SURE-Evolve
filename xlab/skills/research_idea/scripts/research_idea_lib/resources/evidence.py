@@ -107,13 +107,14 @@ class PackageNativeEvidenceResources:
             limit=limit,
             faiss_backend=self._faiss_backend,
         )
+        # Keynotes remain in the citation registry and grounding stage. They must
+        # not crowd out the top-k main evidence before the consumer filters them.
         selected = tuple(
             deepcopy(item)
             for _, _, item in sorted(
                 [
                     *[(float(item["resource_score"]), index, item) for index, item in enumerate(ranked_survey)],
                     *[(float(item["resource_score"]), len(ranked_survey) + index, item) for index, item in enumerate(graph_items)],
-                    *[(float(item["resource_score"]), len(ranked_survey) + len(graph_items) + index, item) for index, item in enumerate(keynote_items)],
                     *[
                         (
                             float(item["resource_score"]),

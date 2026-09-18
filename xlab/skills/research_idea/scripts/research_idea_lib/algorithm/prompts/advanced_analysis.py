@@ -75,6 +75,7 @@ Perform the steps below explicitly before answering:
 
 Return STRICT JSON (no prose, no Markdown) with the schema:
 {{
+  "analysis": {{
   "key_methods": ["..."],                          // survey-led cluster names or dominant families
   "field_consensus": ["..."],                      // constraints / assumptions / consensus points the new idea should respect
   "existing_problems": ["..."],                    // survey-led mechanism or structural limitations (primary driver of root_idea)
@@ -92,8 +93,13 @@ Return STRICT JSON (no prose, no Markdown) with the schema:
   }},
   "grounded_mature_idea": "3-6 sentences; if mature_idea is empty or provisional, provide a grounded mature idea derived from the survey/papers; otherwise return empty or a minimally clarified restatement",
   "grounded_refinement_scope": "1-3 sentences; if refinement_scope is empty or provisional, provide a crisp edit boundary that matches the grounded mature idea; otherwise return empty or a minimally clarified restatement",
+  "summary": "concise synthesis of the evidence and constraints"
+  }},
   "root_idea": {{
     "title": "one calibrated root idea title",
+    "tags": ["copy mature_idea.tags exactly when supplied; otherwise use task tags"],
+    "root_domains": ["copy mature_idea.root_domains exactly when supplied; otherwise use task domains"],
+    "components": [{{"name": "module name", "description": "concrete role and proposed structural intervention"}}],
     "abstract": "one concrete root idea abstract; should read like a refined v1.1 version of the current idea when mature_idea is provided",
     "core_contribution": "main mechanism-level claim; keep it close to the current idea and express the smallest meaningful repair unless evidence forces a local correction. Prefer a repaired rule/objective/update contract over a new gate/router/controller",
     "method": "specific method sketch with modules/objective/training contract; prefer local edits over new paradigms, state which original limitation is being repaired, avoid introducing a fresh gate/router/controller unless the mature idea already depends on one, and keep training-free ideas training-free unless new training is truly necessary",
@@ -124,7 +130,9 @@ Return STRICT JSON (no prose, no Markdown) with the schema:
 }}
 
 == Rules (Strict) ==
+- Return `analysis` as a JSON object and `root_idea` as a separate top-level JSON object. Include at least one named, described component in `root_idea.components`.
 - Always output exactly one `root_idea`; it must be concrete enough to act as the MCTS root node.
+- When `mature_idea` is supplied, copy its `tags` and `root_domains` arrays exactly into `root_idea`, preserving values and order, including empty arrays. These are immutable search identity fields, not proposed scientific edits.
 - `root_idea` must directly address at least one named `existing_problems`; it may also respond to `evaluation_gaps`, but evaluation gaps should usually support validation rather than define the main novelty.
 - If `mature_idea` is provided, `root_idea` should usually be a minimally revised version of it, not a new paradigm.
 - If `refinement_scope` is provided, `root_idea` must stay inside that scope. Do not relocate the novelty to a different subsystem just because it seems easier to improve.

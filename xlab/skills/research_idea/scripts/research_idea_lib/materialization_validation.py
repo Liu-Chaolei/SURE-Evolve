@@ -7,6 +7,17 @@ _STRUCTURAL_TEXT_FIELDS = ("title", "core_contribution", "hypothesis", "method")
 _STRUCTURAL_LIST_FIELDS = ("root_domains", "components")
 
 
+def materialization_contract(fusion_result, evidence_registry, references):
+    """Supply exact immutable values as input instructions, never repair output."""
+    idea = deepcopy(dict(fusion_result['idea']))
+    if isinstance(idea.get('risks'), str):
+        idea['risks'] = [idea['risks'].strip()]
+    idea['reference_papers'] = []
+    align_public_materialization(idea, fusion_result, evidence_registry, references)
+    return {key:idea[key] for key in (*_STRUCTURAL_TEXT_FIELDS, *_STRUCTURAL_LIST_FIELDS,
+                                     'risks','evidence_ids','reference_ids','reference_papers')}
+
+
 def align_public_materialization(
     idea_result: dict[str, Any],
     fusion_result: Mapping[str, Any],
@@ -14,6 +25,39 @@ def align_public_materialization(
     references: Sequence[Any],
 ) -> list[dict[str, Any]]:
     """Validate and project public structure from the persisted fused result."""
+    fused_idea = fusion_result.get("idea")
+    if not isinstance(fused_idea, Mapping):
+        raise ValueError("persisted fusion result must contain a structured idea.")
+
+    validate_materialization_identity(idea_result, fusion_result)
+    fused_risks = fused_idea.get("risks")
+    expected_risks = deepcopy(fused_risks) if isinstance(fused_risks, list) else [fused_risks.strip()]
+    evidence_ids = _unique_strings(fusion_result.get("evidence_ids"), "fusion result evidence_ids")
+    registry = _evidence_by_id(evidence_registry)
+    unknown = [evidence_id for evidence_id in evidence_ids if evidence_id not in registry]
+    if unknown:
+        raise ValueError(f"persisted fusion result contains unknown evidence identities: {unknown!r}.")
+    fused_evidence = [registry[evidence_id] for evidence_id in evidence_ids]
+    reference_by_id, reference_order = _reference_registry(attributed_references(references, evidence_registry))
+    reference_ids = list(dict.fromkeys(paper_id for item in fused_evidence
+        for paper_id in _unique_strings(item.get("paper_ids"), "evidence registry paper_ids")))
+    unresolved = [paper_id for paper_id in reference_ids if paper_id not in reference_by_id]
+    if unresolved:
+        raise ValueError(f"fused evidence contains unresolved reference identities: {unresolved!r}.")
+    reference_ids = [paper_id for paper_id in reference_order if paper_id in reference_ids]
+    supplied_reference_ids = idea_result.get("reference_ids")
+    if supplied_reference_ids is not None and _unique_strings(supplied_reference_ids, "idea_result reference_ids") != reference_ids:
+        raise ValueError("idea_result reference identities drifted from the fused evidence registry.")
+    _validate_supplied_references(idea_result.get("reference_papers"),
+                                 {paper_id:reference_by_id[paper_id] for paper_id in reference_ids})
+    idea_result.update({**{field:deepcopy(fused_idea[field]) for field in (*_STRUCTURAL_TEXT_FIELDS,*_STRUCTURAL_LIST_FIELDS)},
+                       "risks":expected_risks,"evidence_ids":evidence_ids,"reference_ids":reference_ids,
+                       "reference_papers":[reference_by_id[paper_id] for paper_id in reference_ids]})
+    return [deepcopy(item) for item in fused_evidence]
+
+
+def validate_materialization_identity(idea_result: Mapping[str, Any], fusion_result: Mapping[str, Any]) -> None:
+    """The same immutable-field contract before fallback and before publication."""
     fused_idea = fusion_result.get("idea")
     if not isinstance(fused_idea, Mapping):
         raise ValueError("persisted fusion result must contain a structured idea.")
@@ -57,48 +101,27 @@ def align_public_materialization(
     ) != evidence_ids:
         raise ValueError("idea_result evidence identities drifted from the persisted fusion result.")
 
-    registry = _evidence_by_id(evidence_registry)
-    unknown = [evidence_id for evidence_id in evidence_ids if evidence_id not in registry]
-    if unknown:
-        raise ValueError(f"persisted fusion result contains unknown evidence identities: {unknown!r}.")
-    fused_evidence = [registry[evidence_id] for evidence_id in evidence_ids]
-
-    reference_by_id, reference_order = _reference_registry(references)
-    reference_ids: list[str] = []
-    for item in fused_evidence:
-        for paper_id in _unique_strings(item.get("paper_ids"), "evidence registry paper_ids"):
-            if paper_id not in reference_ids:
-                reference_ids.append(paper_id)
-    unresolved = [paper_id for paper_id in reference_ids if paper_id not in reference_by_id]
-    if unresolved:
-        raise ValueError(f"fused evidence contains unresolved reference identities: {unresolved!r}.")
-    reference_ids = [paper_id for paper_id in reference_order if paper_id in reference_ids]
-    reference_titles = [reference_by_id[paper_id] for paper_id in reference_ids]
-    supplied_reference_ids = idea_result.get("reference_ids")
-    if supplied_reference_ids is not None and _unique_strings(
-        supplied_reference_ids, "idea_result reference_ids"
-    ) != reference_ids:
-        raise ValueError("idea_result reference identities drifted from the fused evidence registry.")
-    _validate_supplied_references(
-        idea_result.get("reference_papers"),
-        {paper_id: reference_by_id[paper_id] for paper_id in reference_ids},
-    )
-
-    idea_result.update(
-        {
-            "title": fused_idea["title"],
-            "core_contribution": fused_idea["core_contribution"],
-            "hypothesis": fused_idea["hypothesis"],
-            "method": fused_idea["method"],
-            "risks": deepcopy(expected_risks),
-            "root_domains": deepcopy(fused_idea["root_domains"]),
-            "components": deepcopy(fused_idea["components"]),
-            "evidence_ids": evidence_ids,
-            "reference_ids": reference_ids,
-            "reference_papers": reference_titles,
-        }
-    )
-    return [deepcopy(item) for item in fused_evidence]
+def attributed_references(references, evidence_registry):
+    """Extend citations only from exact, resource-attributed graph neighbors."""
+    registry, _ = _reference_registry(references)
+    result = deepcopy(list(references))
+    added = {}
+    for item in evidence_registry:
+        provenance = item.get('provenance', {})
+        resource = provenance.get('resource', {})
+        if item.get('kind') != 'graph_neighbor' or resource.get('role') != 'graph':
+            continue
+        paper_id = resource.get('neighbor_paper_id')
+        if not paper_id or item.get('paper_ids') != [paper_id] or not resource.get('descriptor_digest'):
+            raise ValueError('Graph citation lacks exact resource attribution')
+        title = _required_text(provenance.get('title'), 'graph citation title')
+        if paper_id in added and added[paper_id] != title:
+            raise ValueError('Graph citation title conflicts for the same paper identity')
+        if paper_id not in registry:
+            added[paper_id] = title
+            registry[paper_id] = title
+            result.append({'paper_id':paper_id,'title':title,'provenance':deepcopy(provenance)})
+    return result
 
 
 def _evidence_by_id(values: Sequence[Any]) -> dict[str, dict[str, Any]]:

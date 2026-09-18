@@ -25,7 +25,7 @@ Return STRICT JSON (no Markdown wrapping):
 }}
 
 == Rules (Strict) ==
--  Extract at least 1 and at most 5 components.
+-  Extract every distinct scientific component, with at least one component and no fixed upper count. Do not split or invent components just to increase the count.
 -  Each component must be a distinct, non-overlapping part of the idea's architecture or methodology.
 -  Use short, descriptive snake_case names (e.g. "flow_matching_generator", "controllability_gramian", "value_guidance_head").
 -  Do NOT include generic placeholders like "backbone_model" or "data_pipeline" — be specific to this idea.

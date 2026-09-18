@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -336,6 +337,10 @@ def _summary(value: JsonObject) -> JsonObject:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
+    corpus = commands.add_parser('import-corpus', help='Validate and import a bulk archive with existing MinerU bundles')
+    corpus.add_argument('--corpus', required=True)
+    corpus.add_argument('--run-dir', required=True)
+    corpus.add_argument('--database', default='/local/job/corpus-queue.sqlite')
     init = commands.add_parser("init")
     init.add_argument("--arguments", default="")
     init.add_argument("--input-directory")
@@ -356,6 +361,9 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = parser().parse_args()
+    if args.command == 'import-corpus':
+        return subprocess.call([sys.executable, str(Path(__file__).with_name('corpus_pipeline.py')), 'import-corpus',
+                                '--corpus', args.corpus, '--run-dir', args.run_dir, '--database', args.database])
     run_dir = Path(args.run_dir).expanduser().resolve()
     try:
         if args.command == "init":

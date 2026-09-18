@@ -10,7 +10,14 @@
     "axis": {"enum": ["arch", "train", "inference", null]},
     "round_index": {"type": "integer", "minimum": 0},
     "summary_digest": {"type": "string", "pattern": "^sha256:"},
-    "failure_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+    "failure_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "symbolic_memory": {"type": "array", "items": {"type": "object", "required": ["schema_version", "kind", "record_id", "candidate_id", "result_digest", "scope", "change_set", "outcome"], "properties": {
+      "schema_version": {"const": "xlab.candidate_outcome.v1"},
+      "kind": {"const": "candidate_outcome"},
+      "outcome": {"enum": ["improved", "worse", "tied", "incomparable", "execution_failed"]},
+      "scope": {"type": "object", "minProperties": 1},
+      "change_set": {"type": "array"}
+    }}}
   },
   "additionalProperties": true
 }

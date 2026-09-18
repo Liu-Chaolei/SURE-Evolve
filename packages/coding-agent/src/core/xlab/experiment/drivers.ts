@@ -9,11 +9,11 @@ import {
 import type { ExperimentFinalizationProvenance } from "./materializer.ts";
 import {
 	type CanonicalJson,
-	CODE_REVIEW_ROLES,
 	canonicalDigest,
 	canonicalJson,
 	EXPERIMENT_STAGES,
 	type ExperimentAcceptedResult,
+	type ExperimentExecutionProfile,
 	type ExperimentPlan,
 	type ExperimentReviewReport,
 	type ExperimentReviewValidationContext,
@@ -62,6 +62,8 @@ export interface ExperimentDriverPublication {
 }
 
 export interface ExperimentDriverOptions {
+	executionProfile?: ExperimentExecutionProfile;
+	planTemplates?: Partial<Record<"prepare" | "code" | "science", ExperimentPlan>>;
 	idea: Record<string, unknown>;
 	ideaDigest: string;
 	policyDigest: string;
@@ -96,7 +98,20 @@ function stringList(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every(nonEmptyString);
 }
 
-function canonicalComponents(idea: Record<string, unknown>): CanonicalExperimentIdeaComponent[] {
+function canonicalComponents(
+	idea: Record<string, unknown>,
+	profile?: ExperimentExecutionProfile,
+): CanonicalExperimentIdeaComponent[] {
+	if (profile?.kind === "baseline") {
+		if (
+			idea.schema_version !== "xlab.experiment_baseline.v1" ||
+			!Array.isArray(idea.components) ||
+			idea.components.length !== 0
+		) {
+			throw new Error("Baseline profile requires an explicit baseline input with no scientific components.");
+		}
+		return [];
+	}
 	if (
 		idea.schema_version !== "xlab.experiment_idea.v1" ||
 		idea.status !== "success" ||
@@ -173,12 +188,20 @@ function plannerSpec(
 		targetDigest: canonicalDigest(target),
 		readScope: [...options.readScope],
 		writeScope: [],
-		resultValidation: { component_names: components.map((item) => item.component) },
+		resultValidation: {
+			component_names: components.map((item) => item.component),
+			...(options.executionProfile ? { execution_profile: options.executionProfile } : {}),
+		},
 		prompt: [
 			`Produce the canonical ${stage} experiment plan and submit it with submit_plan.`,
 			"The plan must satisfy the native protocol validator exactly; do not use mock, quick, pilot, dry-run, or timeout-as-success shortcuts.",
 			`Canonical Idea components, in order: ${JSON.stringify(components)}.`,
 			`Immutable target: ${JSON.stringify(canonicalJson(target))}.`,
+			...(options.planTemplates?.[stage]
+				? [
+						`Use this executor-bound plan. Preserve command bindings, identifiers, dependencies, and evidence contracts: ${JSON.stringify(options.planTemplates[stage])}`,
+					]
+				: []),
 		].join("\n\n"),
 	};
 }
@@ -244,10 +267,15 @@ function workerSpec(params: {
 	};
 }
 
-function reviewContext(plan: ExperimentPlan, componentNames: string[]): ExperimentReviewValidationContext {
+function reviewContext(
+	plan: ExperimentPlan,
+	componentNames: string[],
+	profile?: ExperimentExecutionProfile,
+): ExperimentReviewValidationContext {
 	return {
+		...(profile ? { execution_profile: profile } : {}),
 		component_names: componentNames,
-		science_conditions: plan.work_units.map((unit) => ({
+		science_conditions: (plan.stage === "science" ? plan.work_units : []).map((unit) => ({
 			id: unit.id,
 			enabled_components: unit.enabled_components ?? [],
 			disabled_components: unit.disabled_components ?? [],
@@ -271,8 +299,8 @@ async function runPlanner(
 		stage === "prepare"
 			? validatePreparePlan(plan)
 			: stage === "code"
-				? validateCodePlan(plan, componentNames)
-				: validateSciencePlan(plan, componentNames);
+				? validateCodePlan(plan, componentNames, options.executionProfile)
+				: validateSciencePlan(plan, componentNames, options.executionProfile);
 	if (validationError) throw new Error(validationError);
 	await options.publication.publishPlan({ stage, assignmentId: accepted.accepted.assignment_id, plan });
 	return { plan, planDigest: accepted.accepted.result_digest };
@@ -323,6 +351,11 @@ async function runCode(
 				worker: initial,
 				maxReviewRounds: options.maxReviewRounds,
 				review: (accepted) => ({
+					validationContext: reviewContext(
+						plan,
+						components.map((item) => item.component),
+						options.executionProfile,
+					),
 					stage: "code",
 					workUnit: workUnit.id,
 					inputDigest: canonicalDigest({
@@ -352,6 +385,11 @@ async function runCode(
 			await options.publication.publishWorker({ stage: "code", workUnit, accepted: reviewed.worker });
 			await options.publication.publishReview({
 				stage: "code",
+				validationContext: reviewContext(
+					plan,
+					components.map((item) => item.component),
+					options.executionProfile,
+				),
 				workUnit,
 				reviewRound: reviewed.reviewRound,
 				assignmentIds: reviewed.review.assignmentIds,
@@ -422,6 +460,7 @@ async function runScience(
 	const validationContext = reviewContext(
 		plan,
 		components.map((item) => item.component),
+		options.executionProfile,
 	);
 	const inputDigest = canonicalDigest({ plan_digest: planDigest, cohort });
 	const targetDigest = canonicalDigest({ plan_digest: planDigest, conditions: plan.work_units, cohort });
@@ -504,6 +543,7 @@ function finalReviewResult(accepted: ExperimentAcceptedResult): FinalReviewResul
 async function currentScienceAuthority(
 	coordinator: ExperimentCoordinator,
 	components: CanonicalExperimentIdeaComponent[],
+	profile?: ExperimentExecutionProfile,
 ): Promise<ScienceAuthority> {
 	const snapshot = coordinator.read();
 	if (!snapshot.assignments["assignment-planner-science"]) {
@@ -534,7 +574,7 @@ async function currentScienceAuthority(
 	const plan = acceptedPlan(planner);
 	validatePlanShape(plan, "science");
 	const componentNames = components.map((item) => item.component);
-	const planError = validateSciencePlan(plan, componentNames);
+	const planError = validateSciencePlan(plan, componentNames, profile);
 	if (planError) throw new Error(planError);
 	const planDigest = planner.accepted.result_digest;
 	const cohort = plan.work_units.map((workUnit) => {
@@ -549,7 +589,7 @@ async function currentScienceAuthority(
 		}
 		return { work_unit: workUnit.id, result_digest: accepted.accepted.result_digest };
 	});
-	const validationContext = reviewContext(plan, componentNames);
+	const validationContext = reviewContext(plan, componentNames, profile);
 	const inputDigest = canonicalDigest({ plan_digest: planDigest, cohort });
 	const targetDigest = canonicalDigest({ plan_digest: planDigest, conditions: plan.work_units, cohort });
 	const lineage = canonicalDigest({ input_digest: inputDigest, target_digest: targetDigest });
@@ -612,7 +652,8 @@ async function runFinalize(
 	components: CanonicalExperimentIdeaComponent[],
 	currentAuthority?: ScienceAuthority,
 ): Promise<void> {
-	const authority = currentAuthority ?? (await currentScienceAuthority(coordinator, components));
+	const authority =
+		currentAuthority ?? (await currentScienceAuthority(coordinator, components, options.executionProfile));
 	const componentResults = authority.componentResults;
 	const acceptedResults = coordinator.read().assignments;
 	const target = {
@@ -673,7 +714,7 @@ export function createExperimentStageDrivers(options: ExperimentDriverOptions): 
 	if (!stringList(options.readScope) || !stringList(options.projectWriteScope)) {
 		throw new Error("Experiment driver scopes must contain non-empty paths.");
 	}
-	const components = canonicalComponents(options.idea);
+	const components = canonicalComponents(options.idea, options.executionProfile);
 	let scienceAuthority: ScienceAuthority | undefined;
 	const drivers: ExperimentStageDriver[] = [
 		{ stage: "prepare", run: (coordinator) => runPrepare(coordinator, options, components) },

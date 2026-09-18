@@ -1,0 +1,24 @@
+{
+  "schema_version": "2",
+  "name": "asr_evolution",
+  "version": "1.0.0",
+  "visibility": "public",
+  "description": "Native ASR evolution with full component ablations and SURE evaluation.",
+  "prompt": "SKILL.md",
+  "runtime": {"kind": "native", "driver": "asr_evolution"},
+  "permissions": {"tools": ["read"], "network": false, "subprocess": false, "external_mutations": false},
+  "workflow": {"stages": [
+    {"id": "baseline", "skill": "asr_evolution", "max_attempts": 3},
+    {"id": "round-1", "skill": "asr_evolution", "needs": ["baseline"], "max_attempts": 3},
+    {"id": "round-2", "skill": "asr_evolution", "needs": ["round-1"], "max_attempts": 3},
+    {"id": "round-3", "skill": "asr_evolution", "needs": ["round-2"], "max_attempts": 3},
+    {"id": "round-4", "skill": "asr_evolution", "needs": ["round-3"], "max_attempts": 3},
+    {"id": "round-5", "skill": "asr_evolution", "needs": ["round-4"], "max_attempts": 3},
+    {"id": "round-6", "skill": "asr_evolution", "needs": ["round-5"], "max_attempts": 3},
+    {"id": "evaluation", "skill": "asr_evolution", "needs": ["round-6"], "max_attempts": 3}
+  ]},
+  "artifacts": [{"type": "evolution_summary", "schema_version": "1", "required": true}],
+  "ui": {"argumentHint": "--config <profile.json> [--workspace <slug>]", "arguments": [
+    {"name": "--config", "description": "Frozen ASR training and evaluation profile.", "takesValue": true, "valueHint": "<profile.json>"}
+  ]}
+}

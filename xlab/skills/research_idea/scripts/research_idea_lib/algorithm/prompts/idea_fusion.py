@@ -51,7 +51,7 @@ Return STRICT JSON only:
         "component": "string",
         "role": "core_mechanism|support_module|protocol|guardrail",
         "why_selected": "string",
-        "evidence": ["verbatim evidence item from this source mode"]
+        "evidence": ["exact bare ID from this source mode's evidence_ids catalog"]
       }}
     ],
     "rejected_components": [
@@ -59,7 +59,7 @@ Return STRICT JSON only:
         "source_mode": "string",
         "component": "string",
         "why_rejected": "string",
-        "evidence": ["verbatim evidence item from this source mode"]
+        "evidence": ["exact bare ID from this source mode's evidence_ids catalog"]
       }}
     ],
     "conflicts_and_resolutions": [
@@ -67,7 +67,7 @@ Return STRICT JSON only:
         "conflict": "string",
         "resolution": "string",
         "source_modes": ["canonical source mode"],
-        "evidence": ["verbatim evidence item from those source modes"]
+        "evidence": ["exact bare ID from one of the declared source modes' catalogs"]
       }}
     ],
     "fused_core_thesis": "string",
@@ -88,6 +88,9 @@ Return STRICT JSON only:
 - Every selected and rejected component MUST copy its name exactly from the claimed source mode candidate's `components`.
 - Every selected and rejected component MUST include its canonical `source_mode` and non-empty `evidence` copied from that same mode input.
 - Every conflict resolution MUST include non-empty canonical `source_modes` and `evidence` copied from those modes.
+- Evidence means an opaque ID (for example an input `evidence:...` string), never a component description, paper title, evaluator sentence, or an ID followed by an explanation. Put explanations in `why_selected`, `why_rejected`, or `resolution`.
+- Copy names only from each mode input's top-level `idea.components`, not nested child ideas or search traces. Whole idea titles are not component names.
+- Select each fused component exactly once. Rejected components must also be exact source component names; use an empty rejected list when no distinct component needs rejection. Identical inputs do not require fabricated differences or conflicts.
 - Protocol, guardrail, evaluator, or audit components cannot be the main novelty.
 - Gate/router/controller/threshold-style components should almost never be the dominant core mechanism. Prefer the underlying task-solving mechanism, representation change, update rule, or transferred principle instead.
 - If the current mature idea is not centered on gating or routing, preserve that character in fusion. Do not elevate a gate/router wrapper into the fused thesis just because it is easy to combine.

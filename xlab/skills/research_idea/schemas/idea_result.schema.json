@@ -120,10 +120,9 @@
         },
         "reference_papers": {
           "type": "array",
-          "minItems": 1,
           "items": { "$ref": "#/$defs/nonemptyScientificItem" }
         },
-        "reference_ids": { "minItems": 1 },
+        "reference_ids": { "type": "array" },
         "evidence_ids": { "minItems": 1 },
         "mcts_evolution": { "type": "object", "minProperties": 1 },
         "idea_source": {
@@ -137,6 +136,14 @@
           "items": { "$ref": "#/$defs/nonemptyString" }
         }
       },
+      "allOf": [{
+        "if": {"required": ["research_policy"], "properties": {"research_policy": {
+          "required": ["profile", "evidence_mode"],
+          "properties": {"profile": {"const": "xlab.sure.native.v1"}, "evidence_mode": {"const": "task_only"}}
+        }}},
+        "then": {"properties": {"reference_papers": {"maxItems": 0}, "reference_ids": {"maxItems": 0}}},
+        "else": {"properties": {"reference_papers": {"minItems": 1}, "reference_ids": {"minItems": 1}}}
+      }],
       "required": [
         "title",
         "abstract",

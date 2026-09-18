@@ -36,6 +36,21 @@ def completion(content: str) -> bytes:
 
 
 class ProviderTests(unittest.TestCase):
+    def test_identified_user_agent_preserves_model_and_credentials(self) -> None:
+        captured = {}
+
+        def transport(url, headers, body, timeout):
+            captured.update(headers=headers, payload=json.loads(body))
+            return 200, {}, completion('{"ok":true}')
+
+        OpenAICompatibleProvider(
+            api_key="test-key", endpoint="https://provider.invalid/v1/chat/completions",
+            transport=transport,
+        ).complete(self.request())
+        self.assertEqual(captured["headers"]["User-Agent"], "XLab/1.0")
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer test-key")
+        self.assertEqual(captured["payload"]["model"], "test-model")
+
     def request(self, *, output_kind: str = "json") -> ProviderRequest:
         return ProviderRequest(
             operation="xlab.research_idea.idea.generate.v1",

@@ -14,7 +14,20 @@
     "round_index": {"type": "integer", "minimum": 0},
     "requested_idea_count": {"type": "integer", "minimum": 1},
     "metric": {"type": "object", "required": ["name", "direction"]},
-    "input_digest": {"type": "string", "pattern": "^sha256:"}
+    "input_digest": {"type": "string", "pattern": "^sha256:"},
+    "generation_policy": {"type": "object", "properties": {
+      "engine": {"const": "native"},
+      "feedback_kind": {"const": "candidate_outcome"},
+      "refinement": {"const": "current_best"},
+      "allow_auxiliary_experiments": {"const": false},
+      "memory_scope": {"type": "object"},
+      "mcts": {"type": "object", "properties": {
+        "max_iterations": {"type": "integer", "minimum": 1},
+        "max_depth": {"type": "integer", "minimum": 1},
+        "branching_factor": {"type": "integer", "minimum": 1},
+        "exploration_constant": {"type": "number", "minimum": 0}
+      }, "additionalProperties": false}
+    }}
   },
   "additionalProperties": true
 }

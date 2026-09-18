@@ -15,7 +15,6 @@ from research_idea_lib.research_idea_spec import (
 
 from .contracts import (
     FusionValidationFeedback,
-    MAX_COMPONENTS,
     RefinementBoundary,
     TighterRoleVariant,
 )
@@ -146,27 +145,38 @@ def fuse_five_modes(
         "source_modes": list(CANONICAL_MODES),
         "mode_inputs": deepcopy(ordered_inputs),
     }
+    if request.minimum_components != 1:
+        generation_request["minimum_components"] = request.minimum_components
     draft_feedback: list[FusionValidationFeedback] = []
+    previous_draft = None
+    validation_issues = []
     for attempt in range(1, request.max_fusion_draft_attempts + 1):
         draft_request = deepcopy(generation_request)
         draft_request["draft_attempt"] = attempt
         draft_request["max_draft_attempts"] = request.max_fusion_draft_attempts
         if draft_feedback:
             draft_request["validation_feedback"] = draft_feedback[-1].to_payload()
+            if previous_draft is not None:
+                draft_request["previous_draft"] = deepcopy(previous_draft)
+            if validation_issues:
+                draft_request["validation_issues"] = deepcopy(validation_issues)
+        candidate_output = None
         try:
             candidate_output = generator.generate(draft_request)
             if not isinstance(candidate_output, Mapping):
                 raise TypeError("Fusion generator must return a mapping.")
-            best_idea, selected, rejected, conflicts = _normalize_fusion_output(
-                candidate_output, ordered_inputs
+            best_idea, selected, rejected, conflicts = validate_fusion_output(
+                candidate_output, ordered_inputs, minimum_components=request.minimum_components
             )
             component_count = len(_component_names(best_idea))
             if component_count < request.minimum_components:
                 raise ValueError("Fused idea has fewer than minimum_components.")
-            if component_count > MAX_COMPONENTS:
-                raise ValueError(f"Fused idea cannot exceed {MAX_COMPONENTS} components.")
             break
         except (TypeError, ValueError) as exc:
+            previous_draft = getattr(exc, "previous_draft", None)
+            if previous_draft is None and isinstance(candidate_output, Mapping):
+                previous_draft = deepcopy(dict(candidate_output))
+            validation_issues = getattr(exc, "validation_issues", [])
             draft_feedback.append(
                 FusionValidationFeedback(
                     attempt=attempt,
@@ -366,8 +376,8 @@ def _ordered_mode_inputs(mode_inputs: Sequence[Mapping[str, Any]]) -> list[dict[
 
 
 def _validate_bounds(request: FusionRequest) -> None:
-    if not 1 <= request.minimum_components <= MAX_COMPONENTS:
-        raise ValueError(f"minimum_components must be between 1 and {MAX_COMPONENTS}.")
+    if type(request.minimum_components) is not int or request.minimum_components < 1:
+        raise ValueError("minimum_components must be a positive integer.")
     if request.max_fusion_draft_attempts < 1:
         raise ValueError("max_fusion_draft_attempts must be at least one.")
     if request.max_repair_steps < 0:
@@ -378,9 +388,10 @@ def _validate_bounds(request: FusionRequest) -> None:
         raise ValueError("score_epsilon must be a finite non-negative number.")
 
 
-def _normalize_fusion_output(
+def validate_fusion_output(
     generated: Mapping[str, Any],
     mode_inputs: Sequence[Mapping[str, Any]],
+    *, minimum_components: int = 1,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     idea = generated.get("idea", generated.get("fused_idea"))
     if not isinstance(idea, Mapping):
@@ -395,8 +406,13 @@ def _normalize_fusion_output(
     ):
         if not str(normalized_idea.get(field_name) or "").strip():
             raise ValueError(f"Fused idea requires {field_name}.")
-    if not _component_names(normalized_idea):
+    names = _component_names(normalized_idea)
+    if not names:
         raise ValueError("Fused idea must contain components.")
+    if len(names) != len(set(names)):
+        raise ValueError("Fused idea components must be unique.")
+    if len(names) < minimum_components:
+        raise ValueError("Fused idea has fewer than minimum_components.")
 
     metadata = generated.get("fusion_metadata")
     metadata = metadata if isinstance(metadata, Mapping) else generated
@@ -438,16 +454,17 @@ def _validate_component_provenance(
 ) -> None:
     evidence_by_mode = {str(item["mode"]): _source_evidence(item) for item in mode_inputs}
     components_by_mode = {str(item["mode"]): _source_components(item) for item in mode_inputs}
-    names: set[str] = set()
+    names: set[tuple[str, str]] = set()
     for record in records:
         component = _provenance_component(record)
         mode = str(record.get("source_mode") or "").strip()
         evidence = _evidence_values(record)
         if not component or mode not in CANONICAL_MODES or not evidence:
             raise ValueError(f"Each {field_name} entry needs component, canonical source_mode, and evidence.")
-        if component in names:
+        identity = (mode if field_name == "rejected_components" else "", component)
+        if identity in names:
             raise ValueError(f"Duplicate component provenance in {field_name}: {component}")
-        names.add(component)
+        names.add(identity)
         if "derived_from_component" in record:
             raise ValueError(f"{field_name} uses unsupported legacy derived provenance.")
 
@@ -792,8 +809,6 @@ def _apply_repair(
         raise ValueError("Repair would violate minimum_components.")
     if len(components) > original_count:
         raise ValueError("Repair cannot increase component count.")
-    if len(components) > MAX_COMPONENTS:
-        raise ValueError(f"Repair cannot exceed {MAX_COMPONENTS} components.")
     candidate["components"] = raw_components
     return candidate, candidate_selected, normalized_operations
 

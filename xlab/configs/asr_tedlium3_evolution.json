@@ -1,0 +1,26 @@
+{
+  "schema_version": "xlab.asr_evolution.v1",
+  "workspace": "asr-tedlium3-native",
+  "env_file": "/shared/chaolei.liu/SURE-Evolve/.env",
+  "python": "/shared/chaolei.liu/data/sure_xlab_runtime312/bin/python",
+  "runtime": "/shared/chaolei.liu/XLab/xlab/skills/run_experiment/scripts",
+  "icefall": "/shared/chaolei.liu/ASR/icefall",
+  "recipe": "/shared/chaolei.liu/ASR/icefall/egs/tedlium3/ASR/zipformer",
+  "data": "/shared/chaolei.liu/data/sure_tedlium3_full",
+  "survey": "/shared/chaolei.liu/XLab/.xlab/runs/20260910-survey-asr-v2/artifacts/survey.json",
+  "resource_manifest": "/shared/chaolei.liu/XLab/.xlab/runs/20260910-survey-asr-v2/resources/resource_manifest.json",
+  "sure_pythonpath": "/shared/chaolei.liu/sure-eval/src",
+  "pipeline_id": "asr.en.wer.whisper_norm_english_v1.wenet_wer_v1",
+  "ports_dir": "/shared/chaolei.liu/XLab/.xlab/asr_ports",
+  "refs": {
+    "regular": "/shared/chaolei.liu/data/sure_tedlium3_full/refs/asr_tedlium3_regular_ref.txt",
+    "selection": "/shared/chaolei.liu/data/sure_tedlium3_full/refs/asr_tedlium3_selection_ref.txt",
+    "test": "/shared/chaolei.liu/data/sure_tedlium3_full/refs/asr_tedlium3_test_ref.txt"
+  },
+  "training": {"epochs": 30, "world_size": 4, "max_duration": 900, "precision": "fp32", "seed": 42},
+  "slurm": {
+    "partition": "compute", "gres": "gpu:ascend910b3:4", "cpus": 80, "memory": "500G", "temporary": "1T", "time": "3-00:00:00",
+    "image": "registry.cluster.local:5000/users/chaolei-liu/sure-zipformer@sha256:d557a61e7beb3b675917946061e63790997fc9f672563fe7882f3336b1a8fa64"
+  },
+  "rounds": 6
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Validated bulk corpus snapshot",
+  "type": "object",
+  "required": ["schema_version", "source_kind", "corpus_root", "papers", "downloaded", "stages"],
+  "properties": {
+    "schema_version": {"const": "xlab.corpus.v1"},
+    "source_kind": {"const": "bulk_archive"},
+    "corpus_root": {"type": "string"},
+    "papers": {"type": "integer", "minimum": 0},
+    "downloaded": {"type": "integer", "minimum": 0},
+    "stages": {"type": "object", "required": ["parse", "basic", "deep"]}
+  }
+}

@@ -12,7 +12,9 @@
     "baseline_digest": {"type": "string", "pattern": "^sha256:"},
     "idea_batch_digest": {"type": "string", "pattern": "^sha256:"},
     "result_digest": {"type": "string", "pattern": "^sha256:"},
-    "candidates": {"type": "array"}
+    "candidates": {"type": "array"},
+    "parent_snapshot": {"type": "object"},
+    "evaluation_context": {"type": "object"}
   },
   "additionalProperties": true
 }

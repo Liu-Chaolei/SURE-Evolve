@@ -6,8 +6,14 @@ import hashlib
 import json
 import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict, is_dataclass
+from enum import Enum
+from pathlib import Path
+from . import contracts, component_novelty, evaluation, operator_grounding, operators
+from .search_checkpoint import SearchCheckpoint
 from typing import Literal
+
+from ..providers.failures import raise_infrastructure_failure
 
 from .component_novelty import (
     ComponentNoveltyEvaluator,
@@ -227,6 +233,8 @@ class MCTSEngine:
             refinement_scope=supplied.refinement_scope,
             refinement_boundary=supplied.refinement_boundary,
             memory_hints=tuple(dict.fromkeys((*supplied.memory_hints, *scoped_hints))),
+            task_context_json=supplied.task_context_json,
+            research_policy_json=supplied.research_policy_json,
         )
         self.operator_planner = OperatorPlanner()
         self._evaluation_cache: dict[str, tuple[Evaluation, float, ComponentNoveltyResult | None]] = {}
@@ -236,7 +244,8 @@ class MCTSEngine:
         digest = hashlib.sha256(f"{seed}\0{mode}".encode("utf-8")).digest()
         return int.from_bytes(digest[:8], "big")
 
-    def search(self, root_state: IdeaState, mode: str) -> SearchResult:
+    def search(self, root_state: IdeaState, mode: str, *, checkpoint_path: Path | None = None,
+               export_provider_state=None, restore_provider_state=None) -> SearchResult:
         if mode not in IDEA_TASTE_MODES:
             raise ValueError(f"unknown idea taste: {mode}")
         taste = get_taste(mode)
@@ -251,48 +260,83 @@ class MCTSEngine:
         rollout_blockers: list[RolloutBlockerRecord] = []
         attempted_plans: dict[int, set[EditPlan]] = {}
 
-        counters.add_root_diagnostic()
-        diagnostic = self.provider.evaluate(
-            root_state,
-            idea_taste_mode=mode,
-            prompt_mode=self.config.prompt_mode,
-            diagnostic=True,
-            context=self.context,
-        )
-        counters.add_usage(diagnostic.usage)
-        root.evaluation = Evaluation.from_payload(
-            diagnostic.metrics,
-            confidence=diagnostic.confidence,
-            detected_defects=diagnostic.detected_defects,
-            feedback=diagnostic.feedback,
-        )
-        root.evaluation, root_score, root_novelty = self._apply_novelty(
-            root_state,
-            root.evaluation,
-            taste,
-            candidate_id="root",
-            idea_taste_mode=mode,
-        )
-        candidates.append(Candidate(
-            0,
-            root_state,
-            root.evaluation,
-            root_score,
-            "root_diagnostic",
-            self._cache_identity(root_state, mode),
-            root_novelty,
-        ))
-        candidates_by_node[0] = candidates[0]
-        self._evaluation_cache[candidates[0].cache_identity.digest] = (
-            root.evaluation,
-            root_score,
-            root_novelty,
-        )
-        states_by_scientific_identity = {root_state.scientific_identity: root}
-        edge_keys: set[tuple[int, int, EditPlan]] = set()
+        registry = {}
+        for namespace in [globals(), *(vars(module) for module in
+                         (contracts, component_novelty, evaluation, operator_grounding, operators))]:
+            for name, value in namespace.items():
+                if isinstance(value, type) and (is_dataclass(value) or issubclass(value, Enum)):
+                    registry[name] = value
+        identity = hashlib.sha256(json.dumps({'root': root_state.to_payload(), 'mode': mode,
+            'config': asdict(self.config), 'context': self.context.to_payload(),
+            'memory': self.memory.digest}, sort_keys=True).encode()).hexdigest()
+        checkpoint = SearchCheckpoint(checkpoint_path, identity, registry) if checkpoint_path else None
+        resumed = checkpoint.load() if checkpoint else None
+        if resumed:
+            nodes, candidates = resumed['nodes'], resumed['candidates']
+            root = nodes[0]
+            counters = resumed['counters']
+            operator_attempts, rollout_blockers = resumed['operator_attempts'], resumed['rollout_blockers']
+            attempted_plans, edge_keys = resumed['attempted_plans'], resumed['edge_keys']
+            rng.setstate(resumed['rng_state'])
+            self.operator_planner = resumed['operator_planner']
+            self._evaluation_cache = resumed['evaluation_cache']
+            candidates_by_node = {item.node_id:item for item in candidates}
+            states_by_scientific_identity = {node.state.scientific_identity:node for node in nodes}
+            if restore_provider_state:
+                restore_provider_state(resumed['provider_state'])
+        else:
+            counters.add_root_diagnostic()
+            diagnostic = self.provider.evaluate(
+                root_state,
+                idea_taste_mode=mode,
+                prompt_mode=self.config.prompt_mode,
+                diagnostic=True,
+                context=self.context,
+            )
+            counters.add_usage(diagnostic.usage)
+            root.evaluation = Evaluation.from_payload(
+                diagnostic.metrics,
+                confidence=diagnostic.confidence,
+                detected_defects=diagnostic.detected_defects,
+                feedback=diagnostic.feedback,
+            )
+            root.evaluation, root_score, root_novelty = self._apply_novelty(
+                root_state,
+                root.evaluation,
+                taste,
+                candidate_id="root",
+                idea_taste_mode=mode,
+            )
+            candidates.append(Candidate(
+                0,
+                root_state,
+                root.evaluation,
+                root_score,
+                "root_diagnostic",
+                self._cache_identity(root_state, mode),
+                root_novelty,
+            ))
+            candidates_by_node[0] = candidates[0]
+            self._evaluation_cache[candidates[0].cache_identity.digest] = (
+                root.evaluation,
+                root_score,
+                root_novelty,
+            )
+            states_by_scientific_identity = {root_state.scientific_identity: root}
+            edge_keys: set[tuple[int, int, EditPlan]] = set()
+    
+        def save_iteration(status='running'):
+            if checkpoint:
+                checkpoint.save({'nodes':nodes, 'candidates':candidates, 'counters':counters,
+                    'operator_attempts':operator_attempts, 'rollout_blockers':rollout_blockers,
+                    'attempted_plans':attempted_plans, 'edge_keys':edge_keys,
+                    'rng_state':rng.getstate(), 'operator_planner':self.operator_planner,
+                    'evaluation_cache':self._evaluation_cache,
+                    'provider_state':export_provider_state() if export_provider_state else {}}, status=status)
 
         stop_reason: StopReason = "iteration_budget"
         while counters.iterations < self.config.max_iterations:
+            save_iteration()
             limit = self._budget_reason(counters)
             if limit:
                 stop_reason = limit
@@ -319,6 +363,7 @@ class MCTSEngine:
                         grounding_digest=grounding_digest,
                     )
                 except _RolloutStageError as staged:
+                    raise_infrastructure_failure(staged.error)
                     incoming_edge = path[-1].incoming_edge
                     if incoming_edge is None:
                         raise
@@ -413,6 +458,7 @@ class MCTSEngine:
                 try:
                     grounding_result = self._ground_plan(plan, leaf.state)
                 except Exception as error:
+                    raise_infrastructure_failure(error)
                     operator_attempts.append(self._attempt_record(
                         leaf.node_id, plan, plan_digest, "error"
                     ))
@@ -452,6 +498,7 @@ class MCTSEngine:
                             )
                         )
                     except Exception as error:
+                        raise_infrastructure_failure(error)
                         operator_attempts.append(self._attempt_record(
                             leaf.node_id,
                             plan,
@@ -511,6 +558,7 @@ class MCTSEngine:
                         )
                         candidate_was_evaluated = True
                     except _RolloutStageError as staged:
+                        raise_infrastructure_failure(staged.error)
                         operator_attempts.append(self._attempt_record(
                             leaf.node_id,
                             plan,
@@ -576,6 +624,7 @@ class MCTSEngine:
         else:
             stop_reason = "iteration_budget"
 
+        save_iteration('completed')
         best = max(candidates, key=lambda item: (item.score, -item.node_id))
         champions = tuple(
             Champion(label, metric, "max", max(candidates, key=lambda item: (item.evaluation.metrics[metric], item.score, -item.node_id)))

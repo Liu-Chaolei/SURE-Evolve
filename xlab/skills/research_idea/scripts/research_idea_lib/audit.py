@@ -7,6 +7,7 @@ from typing import Any
 from .checkpoints import read_checkpoint
 from .common import portable_output_findings, read_json, read_jsonl, run_paths, text_contains_secret_shape, utc_now
 from .research_idea_spec import ALGORITHM_ID, IDEA_TASTE_MODES
+from .providers.routing import routing_credentials, routing_policy_from_environment
 
 RESEARCH_IDEA_MODES = IDEA_TASTE_MODES
 ALGORITHM_PROVENANCE = {
@@ -111,6 +112,9 @@ def audit_artifacts(run_dir: Path) -> dict[str, Any]:
     trace = load_object(paths["idea_trace_json"], blocking_errors, "idea_trace.json")
     preflight = load_object(paths["resource_preflight"], blocking_errors, "resource preflight") if paths["resource_preflight"].exists() else {}
     workflow_artifact = load_object(paths["workflow_artifact"], blocking_errors, "artifact.json") if paths["workflow_artifact"].exists() else {}
+    request = read_json(paths["request"]) if paths["request"].exists() else {}
+    policy = request.get("research_policy", {})
+    task_only = policy.get("evidence_mode") == "task_only"
 
     checks["idea_schema_version"] = idea.get("schema_version") == "xlab.research_idea.v2"
     if not checks["idea_schema_version"]:
@@ -123,7 +127,8 @@ def audit_artifacts(run_dir: Path) -> dict[str, Any]:
     checks["required_research_idea_fields"] = not missing_idea_fields
     if missing_idea_fields:
         blocking_errors.append(f"research_idea.json is missing required content: {', '.join(missing_idea_fields)}.")
-    missing_result_fields = [field for field in REQUIRED_RESULT_FIELDS if empty(idea_result.get(field))]
+    missing_result_fields = [field for field in REQUIRED_RESULT_FIELDS if empty(idea_result.get(field))
+                             and not (task_only and field == "reference_papers")]
     checks["required_idea_result_fields"] = not missing_result_fields
     if missing_result_fields:
         blocking_errors.append(f"idea_result.json is missing required research idea content: {', '.join(missing_result_fields)}.")
@@ -160,8 +165,11 @@ def audit_artifacts(run_dir: Path) -> dict[str, Any]:
         "keynote_cache_present",
         "survey_resource_paths_resolved",
     )
+    if task_only:
+        required_preflight_checks = ("provider_available", "required_python_modules", "task_context_present", "literature_disabled")
     missing_preflight_checks = [name for name in required_preflight_checks if preflight_checks.get(name) is not True]
-    resource_identity_errors = validate_resource_identities(preflight)
+    resource_identity_errors = ([] if task_only and preflight.get("resources") == {}
+                                else validate_resource_identities(preflight))
     checks["resource_preflight_passed"] = preflight.get("passed") is True
     checks["resource_preflight_algorithm_spec"] = preflight_implementation.get("algorithm_spec") == ALGORITHM_ID
     checks["resource_preflight_success_profile"] = preflight_implementation.get("success_policy") == ALGORITHM_PROVENANCE["success_profile"]
@@ -190,7 +198,7 @@ def audit_artifacts(run_dir: Path) -> dict[str, Any]:
     workflow_analysis = workflow_artifact.get("analysis") if isinstance(workflow_artifact.get("analysis"), dict) else {}
     workflow_ideation = workflow_artifact.get("ideation") if isinstance(workflow_artifact.get("ideation"), dict) else {}
     workflow_persistence = workflow_artifact.get("persistence") if isinstance(workflow_artifact.get("persistence"), dict) else {}
-    checks["workflow_retrieval_namespace_provenance"] = bool(workflow_retrieval.get("rag_hits") and workflow_retrieval.get("references"))
+    checks["workflow_retrieval_namespace_provenance"] = bool(workflow_retrieval.get("rag_hits") and (task_only or workflow_retrieval.get("references")))
     checks["workflow_analysis_namespace_provenance"] = bool(workflow_analysis.get("entries") and workflow_analysis.get("root_idea"))
     checks["workflow_ideation_namespace_provenance"] = bool(workflow_ideation.get("latest_candidate") and workflow_ideation.get("mode_candidates") and workflow_ideation.get("fusion_result"))
     checks["workflow_persistence_namespace_provenance"] = bool(workflow_persistence.get("idea_result"))
@@ -207,6 +215,16 @@ def audit_artifacts(run_dir: Path) -> dict[str, Any]:
     selected_evidence = source_context.get("selected_evidence") if isinstance(source_context.get("selected_evidence"), list) else []
     source_evidence = idea.get("source_evidence") if isinstance(idea.get("source_evidence"), list) else []
     references = source_context.get("references") if isinstance(source_context.get("references"), list) else []
+    if task_only:
+        local_records = workflow_retrieval.get("evidence", [])
+        checks["no_literature_evidence"] = (
+            idea_result.get("reference_papers") == [] and references == []
+            and workflow_retrieval.get("references") == []
+            and all(item.get("kind") in {"task_context", "experiment_observation"}
+                    and not item.get("paper_ids") for item in local_records)
+        )
+        if not checks["no_literature_evidence"]:
+            blocking_errors.append("Task-only research contains literature evidence or references.")
     reference_ids = {str(reference.get("paper_id")) for reference in references if isinstance(reference, dict) and reference.get("paper_id") is not None}
     evidence_ids = {str(pid) for item in source_evidence if isinstance(item, dict) for pid in item.get("paper_ids", []) if pid is not None}
     unresolved = sorted(evidence_ids - reference_ids) if reference_ids else []
@@ -240,6 +258,8 @@ def audit_artifacts(run_dir: Path) -> dict[str, Any]:
     feedback_supplied = bool(request.get("experiment_feedback")) if isinstance(request, dict) else False
     stage_names = [str(item.get("stage")) for item in workflow_trace if isinstance(item, dict)]
     expected_stage_path = ["advanced_analysis", "re_analysis_replan", "idea_generation"] if feedback_supplied else ["knowledge_acquisition", "advanced_analysis", "idea_generation"]
+    if policy and feedback_supplied:
+        expected_stage_path.insert(0, "knowledge_acquisition")
     checks["research_idea_workflow_trace"] = stage_names == expected_stage_path
     if not checks["research_idea_workflow_trace"]:
         workflow_label = "feedback research idea" if feedback_supplied else "research idea"
@@ -261,8 +281,11 @@ def audit_artifacts(run_dir: Path) -> dict[str, Any]:
         for item in workflow_operation_trace
         if isinstance(item, dict) and item.get("event") == "llm_call" and item.get("status") == "success"
     }
-    missing_provider_ops = [op for op in REQUIRED_PROVIDER_OPS if op not in provider_success_ops]
-    missing_workflow_provider_ops = [op for op in REQUIRED_PROVIDER_OPS if op not in workflow_provider_success_ops]
+    required_ops = tuple(op for op in REQUIRED_PROVIDER_OPS if not (task_only and op == COMPONENT_NOVELTY_PROVIDER_OPERATION))
+    missing_provider_ops = [op for op in required_ops if op not in provider_success_ops]
+    missing_workflow_provider_ops = [op for op in required_ops if op not in workflow_provider_success_ops]
+    if task_only and COMPONENT_NOVELTY_PROVIDER_OPERATION in provider_success_ops:
+        blocking_errors.append("Task-only research executed a literature novelty operation.")
     novelty_trace_tampered = any(
         isinstance(item, dict)
         and item.get("event") == "llm_call"
@@ -472,6 +495,9 @@ def scan_artifact_safety(run_dir: Path, *, exclude: set[Path] | None = None) -> 
     nonportable_paths: list[str] = []
     secrets: list[str] = []
     secret_values = [os.environ.get("OPENAI_API_KEY", "")]
+    routing_policy = routing_policy_from_environment()
+    if routing_policy is not None:
+        secret_values.extend(routing_credentials(routing_policy).values())
     secret_needles = []
     for value in secret_values:
         if not value:

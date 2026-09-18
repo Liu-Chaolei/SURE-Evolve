@@ -41,7 +41,6 @@ _ALLOWED_OPERATOR_ATTEMPT_OUTCOMES = {
 _ALLOWED_ROLLOUT_BLOCKER_STAGES = {"grounding", "generation", "evaluation", "component_novelty"}
 
 MIN_COMPONENTS = 1
-MAX_COMPONENTS = 5
 
 
 def _digest(value: object) -> str:
@@ -228,8 +227,10 @@ class IdeaState:
         empty_fields = [name for name, value in scientific_text.items() if not value.strip()]
         if empty_fields:
             raise ValueError(f"idea scientific text fields cannot be empty: {', '.join(empty_fields)}")
-        if not MIN_COMPONENTS <= len(self.components) <= MAX_COMPONENTS:
-            raise ValueError(f"an idea requires {MIN_COMPONENTS}..{MAX_COMPONENTS} components")
+        if len(self.components) < MIN_COMPONENTS:
+            raise ValueError(f"an idea requires at least {MIN_COMPONENTS} component")
+        if len({component.name for component in self.components}) != len(self.components):
+            raise ValueError("idea component names must be unique")
         object.__setattr__(self, "tags", _clean(self.tags))
         object.__setattr__(self, "root_domains", _clean(self.root_domains))
         object.__setattr__(self, "textual_identity", _digest(self.to_payload()))
@@ -542,6 +543,8 @@ class IdeaProviderContext:
     refinement_scope: tuple[str, ...] = ()
     refinement_boundary: RefinementBoundary | None = None
     memory_hints: tuple[str, ...] = ()
+    task_context_json: str = "{}"
+    research_policy_json: str = "{}"
 
     def __post_init__(self) -> None:
         if any(item.rank != index for index, item in enumerate(self.evidence, start=1)):
@@ -570,6 +573,10 @@ class IdeaProviderContext:
             "refinement_scope": list(self.refinement_scope),
             "memory_hints": list(self.memory_hints),
         }
+        if self.task_context_json != "{}":
+            payload["task_context"] = json.loads(self.task_context_json)
+        if self.research_policy_json != "{}":
+            payload["research_policy"] = json.loads(self.research_policy_json)
         if self.refinement_boundary is not None:
             payload["refinement_boundary"] = self.refinement_boundary.to_payload()
         return payload

@@ -7,37 +7,14 @@ import types
 import unittest
 import json
 import shlex
+import os
 from contextlib import ExitStack
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
-RESEARCH_IDEA_LIB = "research_idea_lib"
-research_idea_package = types.ModuleType(RESEARCH_IDEA_LIB)
-research_idea_package.__path__ = []
-sys.modules[RESEARCH_IDEA_LIB] = research_idea_package
-
-
-def stub_module(name: str, **attributes: object) -> None:
-    module = types.ModuleType(name)
-    for key, value in attributes.items():
-        setattr(module, key, value)
-    sys.modules[name] = module
-
-
-stub_module(f"{RESEARCH_IDEA_LIB}.common", read_json=lambda path: {}, run_paths=lambda path: {})
-stub_module(f"{RESEARCH_IDEA_LIB}.config", load_runtime_config=lambda: None)
-stub_module(f"{RESEARCH_IDEA_LIB}.inputs", parse_request_args=lambda *args: None, IdeaRequest=object)
-stub_module(f"{RESEARCH_IDEA_LIB}.pipeline", run_pipeline=lambda **kwargs: {})
-stub_module(
-    f"{RESEARCH_IDEA_LIB}.research_idea_artifacts",
-    final_idea_result=lambda artifact: artifact.get("persistence", {}).get("idea_result", {}),
-)
-
-stub_module(f"{RESEARCH_IDEA_LIB}.providers.contracts", ProviderRequest=object)
-stub_module(f"{RESEARCH_IDEA_LIB}.providers.openai_compatible", OpenAICompatibleConfig=object, OpenAICompatibleProvider=object)
-
-stub_module(f"{RESEARCH_IDEA_LIB}.survey_repository", SurveyArtifactRepository=object)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "research_idea/scripts"))
+from research_idea_lib.inputs import IdeaRequest as NativeRequest
 
 CLIENT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "xlab_idea_client.py"
 spec = importlib.util.spec_from_file_location("xlab_idea_client", CLIENT_PATH)
@@ -106,6 +83,7 @@ class GenerateTests(unittest.TestCase):
         native_calls = []
         def pipeline(**kwargs):
             native_calls.append(kwargs)
+            arguments.append(kwargs["request"].discussion)
             branch = kwargs["run_dir"]
             (branch / "artifacts").mkdir(exist_ok=True)
             (branch / "artifacts/idea_result.json").write_text(json.dumps(next(native_candidates)))
@@ -118,7 +96,6 @@ class GenerateTests(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(patch.object(client, "_survey_path", return_value=root / "survey.json"))
             stack.enter_context(patch.object(client, "load_runtime_config", return_value=object()))
-            stack.enter_context(patch.object(client, "parse_request_args", side_effect=lambda args, *rest: arguments.append(args)))
             stack.enter_context(patch.object(client, "run_pipeline", side_effect=pipeline))
             stack.enter_context(patch.object(client, "run_paths", side_effect=lambda path: {"idea_result_json": path / "artifacts/idea_result.json"}))
             stack.enter_context(patch.object(client, "read_json", side_effect=lambda path: json.loads(path.read_text())))
@@ -224,6 +201,30 @@ class GenerateTests(unittest.TestCase):
         with self.assertRaisesRegex(client.AdapterError, "digest"):
             client._native_arguments(payload, Path("/tmp/survey"), feedback)
 
+    def test_structured_request_preserves_equals_and_multiline_text(self):
+        task = 'ASR seed=42\n--literal "quote"'
+        payload = {"task_description": task, "execution_contract": {"candidate_type": "arch", "note": "a=b"}}
+        request = client._native_request(payload, Path("/tmp/survey"))
+        self.assertEqual(request.topic, task)
+        self.assertIn('a=b', request.discussion)
+        self.assertIsInstance(request, NativeRequest)
+
+    def test_flow_first_publishes_four_without_deep_pipeline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            def practical(payload, survey, branch, runtime, accepted, rejected):
+                artifact = branch / 'advisory_candidate.json'
+                candidate = self._candidate(len(accepted) + 1)
+                candidate['research_mode'] = 'survey_analysis_direct'
+                artifact.write_text(json.dumps(candidate))
+                return artifact
+            with patch.dict(os.environ, {'XLAB_SURE_FLOW_FIRST': '1'}), \
+                 patch.object(client, 'generate_pragmatic_candidate', side_effect=practical):
+                batch, _, _, calls = self._run(root, [], reviews=[self._review(i, 'arch') for i in range(4)])
+            self.assertEqual(calls, [])
+            self.assertEqual(len(batch['ideas']), 4)
+            self.assertTrue(all(item['candidate_type'] == 'arch' for item in batch['ideas']))
+
     def test_summary_distinguishes_measurement_and_scientific_claim(self):
         candidates = [
             {"idea_id": "better", "final_status": "success", "improved": True, "rungs": [{"success": True, "score": 0.9}]},
@@ -238,10 +239,10 @@ class GenerateTests(unittest.TestCase):
         self.assertEqual([r["outcome"] for r in summary["observations"]],
             ["improved", "no_improvement", "no_improvement", "inconclusive", "execution_failed", "execution_failed", "execution_failed"])
 
-    def test_rejects_non_four_request_before_native_pipeline(self):
+    def test_rejects_invalid_count_before_native_pipeline(self):
         with patch.object(client, "run_pipeline") as pipeline:
-            with self.assertRaisesRegex(client.AdapterError, "exactly four"):
-                client.generate({"requested_idea_count": 1}, "operation-1")
+            with self.assertRaisesRegex(client.AdapterError, "positive"):
+                client.generate({"requested_idea_count": 0}, "operation-1")
             pipeline.assert_not_called()
 
 

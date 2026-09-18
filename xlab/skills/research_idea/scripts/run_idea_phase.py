@@ -26,6 +26,7 @@ def parse_args() -> argparse.Namespace:
         help="Parse /xlab generate-research-ideas arguments and initialize Survey-linked run state",
     )
     init.add_argument("--arguments", default="", help="Quoted public XLab arguments; never include API keys or other secrets")
+    init.add_argument("--arguments-file", help="Read quoted public arguments from a file, avoiding operating-system command-line limits")
     init.add_argument("--run-dir", required=True, help="XLab-owned run directory")
     init.add_argument("--run-id", required=True, help="Stable XLab run identifier")
     init.add_argument("--cwd", help="Project root used to resolve XLab-owned paths")
@@ -85,7 +86,11 @@ def command_init(args: argparse.Namespace) -> int:
     cwd = cwd_from_args(run_dir, args.cwd)
     ensure_run_directories(run_dir)
     runtime = load_runtime_config()
-    request = parse_request_args(args.arguments, cwd, runtime)
+    arguments_file = getattr(args, "arguments_file", None)
+    if arguments_file and args.arguments:
+        raise ValueError("Use either --arguments or --arguments-file")
+    arguments = Path(arguments_file).read_text() if arguments_file else args.arguments
+    request = parse_request_args(arguments, cwd, runtime)
     request_json = request.to_json(cwd)
     runtime_json = runtime.to_json()
     paths = run_paths(run_dir)

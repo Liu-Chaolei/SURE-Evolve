@@ -1,0 +1,112 @@
+{
+  "source_response_sha256": "41d17852ca448aa80f306c02365dd57e62725de0d31e095638045b2c6abc05f7",
+  "mature": {
+    "title": "F5TTS v1 Base Chinese Text-to-Speech Fine-Tuning Baseline",
+    "components": [
+      {
+        "description": "A Python main function that calls SURE_TASK_WRAPPER through SURE_WORKER_PYTHON with --action baseline and raises an error if the subprocess fails.",
+        "name": "baseline implementation entrypoint"
+      },
+      {
+        "description": "The adapter responsible for the F5-TTS candidate, fine-tuning, checkpoint production, inference configuration, and samples_jsonl artifact contract.",
+        "name": "tts.f5tts adapter"
+      },
+      {
+        "description": "The configured model with a DiT backbone, pinyin tokenizer, 22 layer depth, dimension 1024, 16 heads, four convolution layers, text dimension 512, and Vocos mel inputs.",
+        "name": "F5TTS_v1_Base"
+      },
+      {
+        "description": "The supplied DiT backbone module used by the F5TTS_v1_Base model configuration.",
+        "name": "f5_tts.model.backbones.dit"
+      },
+      {
+        "description": "The supplied conditional flow matching model module included in the F5-TTS source and used by the model training and generation stack.",
+        "name": "f5_tts.model.cfm"
+      },
+      {
+        "description": "The supplied dataset module supporting the training data path used by the F5-TTS trainer.",
+        "name": "f5_tts.model.dataset"
+      },
+      {
+        "description": "The supplied training module used with the SURE training contract for full fine-tuning, distributed execution, checkpointing, and final EMA selection.",
+        "name": "f5_tts.model.trainer"
+      },
+      {
+        "description": "The supplied command-line inference module supporting F5-TTS generation from model, text, reference audio, and inference settings.",
+        "name": "f5_tts.infer.infer_cli"
+      },
+      {
+        "description": "The supplied inference utility module supporting model loading, audio conditioning, mel processing, chunked generation, and waveform handling.",
+        "name": "f5_tts.infer.utils_infer"
+      },
+      {
+        "description": "The local Vocos mel 24 kHz vocoder artifact used to convert generated mel representations into waveform audio.",
+        "name": "Vocos mel vocoder"
+      },
+      {
+        "description": "The configured tts.zh.tts_cer.funasr_loader_16k_mono.paraformer_zh.asr_cer route, which consumes artifacts/samples.jsonl and evaluates Chinese speech semantic intelligibility through Paraformer transcription and CER.",
+        "name": "SURE TTS semantic scoring"
+      },
+      {
+        "description": "The recorded final_checkpoint.pt, model_cfg.yaml, training_completion.json, vocabulary file, samples_jsonl path, waveform directory, and worker logs associated with the completed run.",
+        "name": "training evidence artifacts"
+      }
+    ],
+    "tags": [
+      "F5-TTS",
+      "F5TTS_v1_Base",
+      "Chinese TTS",
+      "text-to-speech",
+      "DiT",
+      "conditional flow matching",
+      "fine-tuning",
+      "pinyin tokenizer",
+      "Vocos",
+      "BF16",
+      "distributed training",
+      "CER evaluation"
+    ],
+    "root_domains": [
+      "speech synthesis",
+      "text-to-speech",
+      "deep learning",
+      "generative modeling",
+      "Chinese language processing",
+      "audio generation",
+      "model fine-tuning"
+    ]
+  },
+  "root_idea": {
+    "title": "Syllable-Aligned Reference Prosody Conditioning for F5-TTS Chinese",
+    "components": [
+      {
+        "name": "Syllable-aligned reference prosody summary",
+        "description": "Extract fixed-dimensional pitch, energy, normalized duration, and coarse temporal trend statistics from the reference audio, aggregate them over the existing pinyin syllable sequence, and inject the resulting embeddings through the existing text-conditioning path. The representation is trained jointly with the full F5-TTS model, so requires_training is true."
+      },
+      {
+        "name": "Prosody-preserving batch transform",
+        "description": "During training, preserve the existing text and mel targets while deriving reference summaries from the conditioning audio. Normalize speaker-level statistics before injection so the representation carries relative timing and intonation rather than absolute speaker identity."
+      },
+      {
+        "name": "Existing flow-matching and inference contract",
+        "description": "Keep the DiT architecture, conditional flow-matching objective, pinyin vocabulary, Vocos mel interface, vocoder, 32-step inference default, CFG conditioning, eight-NPU BF16 training, FP32 master parameters, 50 epochs, and final EMA selection unchanged unless the candidate action requires the corresponding workspace source edit."
+      }
+    ],
+    "abstract": "F5-TTS Chinese generation currently relies on a flat pinyin-conditioned flow model and implicit prosody inference. This refinement adds a compact reference-derived prosody summary aligned to the existing pinyin syllable sequence, combining normalized pitch, energy, duration, and coarse temporal trend information. The summary is injected through the existing conditioning path and trained with the complete Premium split using official initialization, a fresh optimizer, eight NPUs, BF16 autocast, FP32 master parameters, 50 epochs, and final EMA weights. The fixed tokenizer, mel representation, vocoder, and Paraformer CER evaluation remain unchanged.",
+    "core_contribution": "The contribution is a local repair to the baseline's flat prosody assumption: syllable-aligned reference statistics provide an explicit bridge between Chinese linguistic units and acoustic timing while retaining the existing conditional flow-matching model. The mechanism should reduce prosodic averaging and long-context timing drift without changing the content representation or vocoder.",
+    "method": "Prepare an isolated workspace source and implement the intervention in the existing F5-TTS conditioning or batch transformation slots. For each training and inference example, compute speaker-normalized reference pitch and energy trajectories, coarse duration or pace descriptors, and temporal trend summaries; align them to the existing pinyin syllable sequence using the reference text's syllable boundaries, then interpolate or repeat them to the mel conditioning length. Concatenate or add the resulting embeddings to the existing text conditioning representation and train all resulting parameters from official pretrained weights with the fixed 50-epoch Premium protocol. Use the normal SURE candidate execution with requires_training=true, final EMA weights, and the unchanged Paraformer CER route.",
+    "risks": "Reference text and audio may have imperfect syllable boundaries, causing alignment noise. Pitch extraction can fail on unvoiced or noisy regions, and normalization may remove useful speaker cues. Additional conditioning may over-transfer reference prosody, reduce content robustness, increase memory use, or provide little CER benefit if the baseline already infers timing adequately.",
+    "target_defects": [
+      "Flat implicit prosody representation in the baseline",
+      "Weak synchronization between Chinese syllable structure and acoustic timing",
+      "Long-utterance and chunk-boundary prosodic inconsistency",
+      "Entanglement of reference speaker style with local pronunciation and duration"
+    ],
+    "rationale": "This is the smallest mechanism-level patch supported by the survey. The survey explicitly identifies hierarchical linguistic timing as a missing capability and identifies accurate synchronization as the central implementation constraint. A syllable-level reference summary stays inside the existing conditioning and training slots, preserves the current F5-TTS thesis, and targets Chinese intelligibility through timing and pronunciation stability rather than through a numeric sweep or a new control architecture.",
+    "supporting_papers": [
+      "SURVEY_ANCHOR: survey-paragraph-985, prosody is hierarchical across phones, syllables, words, and utterances and must balance local control with global coherence",
+      "SURVEY_ANCHOR: survey-paragraph-995, prosody representations require temporal coherence and phoneme-level contextual structure",
+      "PAPER_ANCHOR: s2:73e3858de2024116d21999bbb71f879d4f8f751e, CHiVE aligns prosody generation with word, syllable, and phone rates and reports improved temporal consistency"
+    ]
+  }
+}

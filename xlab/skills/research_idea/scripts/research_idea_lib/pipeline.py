@@ -11,12 +11,16 @@ from .checkpoints import checkpoint_signature, read_checkpoint, stage_completed,
 from .common import append_diagnostic, append_pipeline_event, atomic_write_json, ensure_run_directories, read_json, run_paths, stable_signature, write_portable_json
 from .config import RuntimeConfig, provider_api_key
 from .inputs import IdeaRequest
+from .materialization_validation import attributed_references
 from .research_idea_artifacts import final_idea_result, retrieval_namespace
 from .research_idea_spec import ALGORITHM_ID, ALGORITHM_SPEC_VERSION, IMPLEMENTATION_PROVENANCE
 from .llm import llm_status
 from .manifest import finalize_run
 from .providers import OpenAICompatibleConfig, OpenAICompatibleProvider
 from .survey_repository import SurveyArtifactRepository
+from .resources.retrieval import component_metadata_records
+from .research_policy import ResearchPolicy
+from .task_context import TaskContextRepository
 
 SKILL_VERSION = "1.0.0"
 ALGORITHM_IMPLEMENTATION = {
@@ -42,11 +46,17 @@ def run_pipeline(
     ensure_run_directories(run_dir)
     request_json = request.to_json(cwd)
     runtime_json = runtime_contract_json(runtime.to_json())
-    completed_result = completed_success(run_dir, run_id, requested_status=requested_status)
-    if completed_result is not None:
-        return completed_result
+    if not request.research_policy:
+        completed_result = completed_success(run_dir, run_id, requested_status=requested_status)
+        if completed_result is not None:
+            return completed_result
+    write_portable_json(run_paths(run_dir)["request"], request_json)
+    write_portable_json(run_paths(run_dir)["runtime_config"], runtime_json)
+    if request.research_policy:
+        ResearchPolicy.from_payload(request.research_policy)
     repository = ingest_survey(cwd, run_dir, request, runtime, request_json, runtime_json)
     source_context = organize_context(cwd, run_dir, request, runtime, request_json, runtime_json, repository)
+    source_context.update(research_policy=request.research_policy, task_context=request.task_context)
     validation = repository.validation()
     if not validation.get("passed"):
         reason = "; ".join(str(error) for error in validation.get("blocking_errors", [])) or "Survey validation failed."
@@ -113,7 +123,9 @@ def ingest_survey(
     runtime_json: dict[str, Any],
 ) -> SurveyArtifactRepository:
     paths = run_paths(run_dir)
-    repository = SurveyArtifactRepository.from_request(request, cwd, model_cache_root=run_paths(run_dir)["memory"] / "resource-cache")
+    repository = (TaskContextRepository(request)
+                  if request.research_policy.get("evidence_mode") == "task_only"
+                  else SurveyArtifactRepository.from_request(request, cwd, model_cache_root=run_paths(run_dir)["memory"] / "resource-cache"))
     request_signature, runtime_signature, source_signature = checkpoint_signature(request_json, runtime_json, repository.source.signatures)
     if stage_completed(
         run_dir,
@@ -169,7 +181,7 @@ def organize_context(
         source_signature=source_signature,
     ):
         append_pipeline_event(run_dir, "organize_context", "skipped")
-        return read_json(paths["context"])
+        return read_json(paths["context"])["source_context"]
     source_context = repository.source_context(request)
     context = {
         "schema_version": "xlab.research_idea.context.v1",
@@ -206,7 +218,7 @@ def resource_preflight(
     runtime_json: dict[str, Any],
     repository: SurveyArtifactRepository,
 ) -> dict[str, Any]:
-    del cwd, request
+    del cwd
     paths = run_paths(run_dir)
     request_signature, runtime_signature, source_signature = checkpoint_signature(request_json, runtime_json, repository.source.signatures)
     if stage_completed(
@@ -224,6 +236,18 @@ def resource_preflight(
     checks: dict[str, bool] = {}
     blockers: list[str] = []
     warnings: list[str] = []
+    if request.research_policy.get("evidence_mode") == "task_only":
+        checks = {"provider_available": runtime.provider_available,
+                  "required_python_modules": required_python_modules_available(),
+                  "task_context_present": bool(repository.evidence_items),
+                  "literature_disabled": request.survey_path is None}
+        preflight = {"implementation": ALGORITHM_IMPLEMENTATION,
+                     "research_policy": request.research_policy,
+                     "passed": all(checks.values()), "checks": checks,
+                     "blocking_errors": [key for key, passed in checks.items() if not passed],
+                     "resources": {}, "source_signatures": repository.source.signatures}
+        atomic_write_json(paths["resource_preflight"], preflight)
+        return preflight
     resolution = repository.source.resources
 
     checks["resource_manifest_declared"] = resolution.manifest_path is not None
@@ -363,10 +387,9 @@ def component_metadata_nonempty(path: Path | None) -> bool:
         return False
     try:
         value = read_json(path)
+        return bool(component_metadata_records(value, "component-index"))
     except Exception:
         return False
-    meta = value.get("meta") if isinstance(value, dict) else None
-    return isinstance(meta, dict) and bool(meta)
 
 
 def survey_references_have_keynotes(references: list[dict[str, Any]]) -> bool:
@@ -478,6 +501,7 @@ def run_research_idea(
 def merge_workflow_retrieval_context(source_context: dict[str, Any], workflow_artifact: dict[str, Any]) -> dict[str, Any]:
     merged = dict(source_context)
     retrieval = retrieval_namespace(workflow_artifact)
+    merged['references'] = attributed_references(merged.get('references', []), retrieval.get('evidence', []))
     selected: list[dict[str, Any]] = []
     for batch in retrieval.get("rag_hits", []) if isinstance(retrieval.get("rag_hits"), list) else []:
         hits: list[Any] = []
@@ -619,4 +643,3 @@ def audit_and_manifest(cwd: Path, run_dir: Path, run_id: str, request_json: dict
         request=request_json,
         requested_status=requested_status,
     )
-

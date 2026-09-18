@@ -16,11 +16,15 @@ from literature_survey_lib.config import RuntimeConfig, load_runtime_config, run
 from literature_survey_lib.inputs import SurveyRequest, parse_request_args, request_from_json
 from literature_survey_lib.manifest import build_final_manifest, write_final_manifest
 from literature_survey_lib.pipeline import SKILL_VERSION, run_pipeline
+from literature_survey_lib.corpus_survey import run_corpus_surveys
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the self-contained XLab literature survey runtime")
     subcommands = parser.add_subparsers(dest="command", required=True)
+    corpus = subcommands.add_parser('corpus-synthesize', help='Write full local surveys from a validated tiered corpus pipeline')
+    corpus.add_argument('--pipeline-dir', type=Path, required=True)
+    corpus.add_argument('--pilot', action='store_true')
 
     init = subcommands.add_parser("init", help="Parse /xlab write-literature-survey arguments and initialize run state")
     init.add_argument("--arguments", default="")
@@ -202,6 +206,9 @@ def command_smoke(args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = parse_args()
+    if args.command == 'corpus-synthesize':
+        print(json.dumps(run_corpus_surveys(args.pipeline_dir, args.pilot), ensure_ascii=False))
+        return 0
     if args.command == "init":
         return command_init(args)
     if args.command == "synthesize":

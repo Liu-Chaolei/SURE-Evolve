@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -140,11 +142,21 @@ def validated_logical_path(value: Any) -> str | None:
 
 def sanitize_public_paths(value: Any) -> Any:
     if isinstance(value, dict):
-        return {key: sanitize_public_paths(child) for key, child in value.items()}
+        return {
+            key: ({"private_context_digest": "sha256:" + hashlib.sha256(
+                json.dumps(child, sort_keys=True, ensure_ascii=False).encode()).hexdigest()}
+                if key == "task_context" and isinstance(child, dict) and set(child) != {"private_context_digest"}
+                else sanitize_public_paths(child))
+            for key, child in value.items()
+        }
     if isinstance(value, list):
         return [sanitize_public_paths(child) for child in value]
     if isinstance(value, str):
-        return _ABSOLUTE_PATH_RE.sub("[redacted-path]", value)
+        # Adjacent slashes in source excerpts can expose a second match after
+        # substitution. Reach a fixed point so publication remains idempotent.
+        while _ABSOLUTE_PATH_RE.search(value):
+            value = _ABSOLUTE_PATH_RE.sub("[redacted-path]", value)
+        return value
     return value
 
 

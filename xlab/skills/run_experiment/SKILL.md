@@ -7,7 +7,7 @@ description: Execute a canonical Research Idea with the native durable XLab expe
 
 `/xlab run-experiment` executes an existing successful Research Idea through the native XLab/Pi control plane. The command never invents or repairs an Idea. `--idea` must resolve exactly to an existing structured Idea by file path, artifact ID, producer run ID, workspace `idea-vN` handle, current workspace Idea, or case-sensitive indexed title. Missing, ambiguous, malformed, incomplete, corrupted, or legacy inputs fail before a run is created.
 
-The resolved semantic input is frozen as `inputs/idea.json` with its binding metadata. The run then uses one macro workflow in this exact order:
+The resolved semantic input is frozen as `inputs/idea.json` with its binding metadata. The standard profile uses one macro workflow in this exact order:
 
 1. `prepare`: resolve and validate repositories, dataset, model, environment, and synthesis inputs.
 2. `code`: implement the canonical components and finish with one real terminal `final_integration_smoke`.
@@ -16,7 +16,24 @@ The resolved semantic input is frozen as `inputs/idea.json` with its binding met
 
 `workflow.json` is the only macro-stage state machine. The native experiment journal and current projection own the stage-internal execution graph. Do not call generic `xlab_stage` or `xlab_finish` tools for this skill.
 
-## Durable child roles
+## Direct formal ASR profile
+
+`/xlab run-experiment --profile <asr-profile.json> --idea <reference>` selects the native ASR execution profile.
+`/xlab run-experiment --baseline-profile <asr-profile.json>` creates an explicit original-model baseline instead; it is mutually exclusive with `--idea` and does not fabricate a Research Idea.
+The baseline has zero scientific components, one all-components reference condition, and an explicit `ablation_status: not_applicable` result.
+
+The ASR profile preserves prepare/code/science/finalize and all durable child/reviewer/lineage contracts, with these explicit policy changes:
+
+- Code ends in `final_static_integration`, and its matrix uses `static_integration` instead of `integration_smoke`.
+- No separate model smoke, pilot, benchmark or API probe is scheduled. Runtime integration evidence is deferred to the real full science conditions; an omitted smoke is never reported as passed.
+- Workers execute actual bound work with `experiment_execute`; the native executor submits exclusive four-NPU Slurm jobs, captures training and SURE scoring evidence, and reattaches to recorded jobs after interruption.
+- Science work units with satisfied dependencies execute concurrently without an application-level count cap. Slurm resources and policy determine actual concurrency.
+- Every canonical component gets a full disabled condition, with no fixed component-count or ablation-count limit.
+- The original-model baseline and every trained scientific condition use the same frozen data, seed, epoch and per-device duration budgets.
+
+The default smoke requirements below apply to the standard profile. Direct formal success instead requires the accepted full science cohort and its runtime evidence.
+
+## Durable child execution
 
 The parent runtime creates isolated durable planner, worker, reviewer, and final-reviewer sessions. Children submit structured candidates only; they cannot modify the parent workflow, protocol, reviewer aggregate, artifact index, final manifest, or symbolic memory.
 
