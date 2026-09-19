@@ -133,7 +133,7 @@ A-r2-i3 的改动记录以 Conformer 层数为 6 为主要结构改动；B-r2-i3
 | A-r5-i3 | arch | 9.5913 | 9.9700 | -7.8032 | success |
 | A-r5-i4 | inference | 8.8913 | 9.9142 | -7.1995 | success |
 | A-r6-i1 | inference | 8.6913 | 9.8400 | -6.3975 | success |
-| A-r6-i2 | inference | 9.5675 | 9.9433 | -7.5149 | success |
+| A-r6-i2 | inference | 8.6675 | 9.9433 | -7.5149 | success |
 | A-r6-i3 | inference | 9.0800 | 10.0983 | -9.1908 | success |
 | A-r6-i4 | inference | 24.6687 | 19.6683 | -112.6689 | success |
 
@@ -151,7 +151,7 @@ A-r2-i3 的改动记录以 Conformer 层数为 6 为主要结构改动；B-r2-i3
 | B-r2-i4 | inference | 15.1363 | 10.0408 | -8.5691 | success |
 | B-r3-i1 | fine_tune | 13.6500 | 10.8475 | -17.2914 | success |
 | B-r3-i2 | inference | 16.9950 | 16.3092 | -76.3471 | success |
-| B-r3-i3 | inference | 9.7400 | 9.2050 | 0.4686 | success |
+| B-r3-i3 | inference | 8.5238 | 9.2050 | 0.4686 | success |
 | B-r3-i4 | fine_tune | 13.1612 | 10.2400 | -10.7227 | success |
 | B-r4-i1 | inference | 9.9075 | 9.6617 | -4.4693 | success |
 | B-r4-i2 | inference | 9.9075 | 9.6617 | -4.4693 | success |
@@ -161,7 +161,7 @@ A-r2-i3 的改动记录以 Conformer 层数为 6 为主要结构改动；B-r2-i3
 | B-r5-i2 | inference | 25.6925 | 19.0300 | -105.7668 | success |
 | B-r5-i3 | inference | 8.5625 | 9.2358 | 0.1352 | success |
 | B-r5-i4 | inference | 25.4312 | 19.3675 | -109.4161 | success |
-| B-r6-i1 | inference | 9.7400 | 9.2050 | 0.4686 | success |
+| B-r6-i1 | inference | 8.5238 | 9.2050 | 0.4686 | success |
 | B-r6-i2 | inference | 12.5087 | 9.1458 | 1.1083 | success |
 | B-r6-i3 | -- | -- | -- | -- | not_generated |
 | B-r6-i4 | -- | -- | -- | -- | not_generated |

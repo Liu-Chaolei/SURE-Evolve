@@ -209,3 +209,25 @@ evomaster/skills_ts/node_modules/*
 # Local paper corpus and generated paper-library artifacts
 /data/papers/**/*.pdf
 /data/paper_library/
+
+# Local monitoring and scheduler output
+/check_latest.json
+slurm-*.out
+
+# LaTeX build artifacts (keep manuscript sources and styles)
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+/ICLR/*.out
+/ICLR/sure_evolve_zh.pdf
+
+# Downloaded reference papers and extracted text
+/docs/zh/automated_research_papers/
+
+# TTS evaluation run artifacts; retain reusable evaluation scripts
+/exports/tts_direct_v11/*/*
+!/exports/tts_direct_v11/*/evaluate.py
+/exports/tts_direct_v11/*job_id*
